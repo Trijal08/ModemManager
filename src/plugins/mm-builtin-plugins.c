@@ -112,6 +112,9 @@ MMPlugin *mm_plugin_create_rolling (void);
 #if defined ENABLE_PLUGIN_SAMSUNG
 MMPlugin *mm_plugin_create_samsung (void);
 #endif
+#if defined ENABLE_PLUGIN_SAMSUNG_SIT
+MMPlugin *mm_plugin_create_samsung_sit (void);
+#endif
 #if defined ENABLE_PLUGIN_SIERRA
 MMPlugin *mm_plugin_create_sierra (void);
 #endif
@@ -249,6 +252,9 @@ mm_builtin_plugins_load (void)
 #endif
 #if defined ENABLE_PLUGIN_SAMSUNG
     PREPEND_PLUGIN (samsung);
+#endif
+#if defined ENABLE_PLUGIN_SAMSUNG_SIT
+    PREPEND_PLUGIN (samsung_sit);
 #endif
 #if defined ENABLE_PLUGIN_SIERRA
     PREPEND_PLUGIN (sierra);
