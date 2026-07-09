@@ -49,10 +49,11 @@ if enable_tests
     'test-samsung-sit-protocol',
     sources: files(
       'samsung-sit/mm-sit-protocol.c',
+      'samsung-sit/mm-port-serial-sit.c',
       'samsung-sit/tests/test-sit-protocol.c',
     ),
-    include_directories: include_directories('samsung-sit'),
-    dependencies: libhelpers_dep,
+    include_directories: [top_inc, src_inc, include_directories('samsung-sit')],
+    dependencies: [libhelpers_dep, libport_dep],
   )
   test('samsung-sit-protocol', samsung_sit_protocol_test)
 endif

@@ -241,6 +241,19 @@
 #define ID_MM_PORT_TYPE_XMMRPC "ID_MM_PORT_TYPE_XMMRPC"
 
 /**
+ * ID_MM_PORT_TYPE_SIT:
+ *
+ * This is a port-specific tag applied to generic ports that we know in advance
+ * speak the Samsung IPC Transport (SIT) binary control protocol.
+ *
+ * This tag will also prevent other types of probing (e.g. AT, QMI) on the
+ * port. It is not required for WWAN ports whose kernel type attribute is SIT.
+ *
+ * Since: 1.26
+ */
+#define ID_MM_PORT_TYPE_SIT "ID_MM_PORT_TYPE_SIT"
+
+/**
  * ID_MM_TTY_BAUDRATE:
  *
  * This is a port-specific tag applied to TTYs that require a specific

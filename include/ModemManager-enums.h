@@ -670,6 +670,7 @@ typedef enum { /*< underscore_name=mm_modem_band >*/
  * @MM_MODEM_PORT_TYPE_AUDIO: Audio port. Since 1.12.
  * @MM_MODEM_PORT_TYPE_IGNORED: Ignored port. Since 1.16.
  * @MM_MODEM_PORT_TYPE_XMMRPC: Control protocol for Intel XMM modems. Since 1.24.
+ * @MM_MODEM_PORT_TYPE_SIT: Samsung IPC Transport binary control protocol. Since 1.26.
  *
  * Type of modem port.
  *
@@ -686,6 +687,7 @@ typedef enum { /*< underscore_name=mm_modem_port_type >*/
     MM_MODEM_PORT_TYPE_AUDIO   = 8,
     MM_MODEM_PORT_TYPE_IGNORED = 9,
     MM_MODEM_PORT_TYPE_XMMRPC  = 10,
+    MM_MODEM_PORT_TYPE_SIT     = 11,
 } MMModemPortType;
 
 /**

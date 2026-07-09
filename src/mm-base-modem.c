@@ -349,6 +349,14 @@ base_modem_create_wwan_port (MMBaseModem *self,
                                       MM_PORT_TYPE, MM_PORT_TYPE_XMMRPC,
                                       NULL));
 
+    if (ptype == MM_PORT_TYPE_SIT)
+        return MM_PORT (g_object_new (MM_TYPE_PORT,
+                                      MM_PORT_DEVICE, name,
+                                      MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+                                      MM_PORT_GROUP, MM_PORT_GROUP_USED,
+                                      MM_PORT_TYPE, MM_PORT_TYPE_SIT,
+                                      NULL));
+
     return NULL;
 }
 
@@ -1378,6 +1386,9 @@ parse_port_infos (GHashTable *ports,
         case MM_PORT_TYPE_XMMRPC:
             port_info.type = MM_MODEM_PORT_TYPE_XMMRPC;
             break;
+        case MM_PORT_TYPE_SIT:
+            port_info.type = MM_MODEM_PORT_TYPE_SIT;
+            break;
         case MM_PORT_TYPE_IGNORED:
             port_info.type = MM_MODEM_PORT_TYPE_IGNORED;
             break;
@@ -1522,6 +1533,7 @@ mm_base_modem_organize_ports (MMBaseModem *self,
     MMPortSerial *audio = NULL;
     MMPortSerialAt *data_at_primary = NULL;
     MMPort *xmmrpc = NULL;
+    MMPort *sit = NULL;
     GList *l;
     /* These lists don't keep full references, so they should be
      * g_list_free()-ed on error exits */
@@ -1627,6 +1639,12 @@ mm_base_modem_organize_ports (MMBaseModem *self,
                 xmmrpc = MM_PORT (candidate);
             break;
 
+        case MM_PORT_TYPE_SIT:
+            g_assert (MM_IS_PORT (candidate));
+            if (!sit)
+                sit = MM_PORT (candidate);
+            break;
+
 #if defined WITH_QMI
         case MM_PORT_TYPE_QMI:
             qmi = g_list_append (qmi, candidate);
@@ -1676,6 +1694,9 @@ mm_base_modem_organize_ports (MMBaseModem *self,
             if (mbim)
                 allow_modem_without_at_port = TRUE;
 #endif
+
+            if (sit)
+                allow_modem_without_at_port = TRUE;
 
             if (!allow_modem_without_at_port) {
                 g_set_error_literal (error,
@@ -1755,6 +1776,7 @@ mm_base_modem_organize_ports (MMBaseModem *self,
     log_port (self, MM_PORT (gps),             "gps (nmea)");
     log_port (self, MM_PORT (audio),           "audio");
     log_port (self, MM_PORT (xmmrpc),          "xmmrpc");
+    log_port (self, MM_PORT (sit),             "sit");
 #if defined WITH_QMI
     for (l = qmi; l; l = g_list_next (l))
         log_port (self, MM_PORT (l->data),     "qmi");

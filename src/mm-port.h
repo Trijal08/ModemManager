@@ -52,7 +52,8 @@ typedef enum { /*< underscore_name=mm_port_type >*/
     MM_PORT_TYPE_MBIM,
     MM_PORT_TYPE_XMMRPC,
     MM_PORT_TYPE_AUDIO,
-    MM_PORT_TYPE_LAST = MM_PORT_TYPE_AUDIO /*< skip >*/
+    MM_PORT_TYPE_SIT,
+    MM_PORT_TYPE_LAST = MM_PORT_TYPE_SIT /*< skip >*/
 } MMPortType;
 
 #define MM_TYPE_PORT            (mm_port_get_type ())

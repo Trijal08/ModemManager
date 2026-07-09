@@ -2,7 +2,10 @@
 /* Copyright (C) 2026 The ModemManager authors */
 
 #include <glib.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
+#include "mm-port-serial-sit.h"
 #include "mm-sit-protocol.h"
 
 static void
@@ -255,6 +258,147 @@ test_parse_data_call (void)
     g_assert_cmpuint (call.mtu, ==, 1500);
 }
 
+typedef struct {
+    gint       peer_fd;
+    GMainLoop *loop;
+    guint      indication_count;
+    gboolean   command_completed;
+    gboolean   timed_out;
+} PortTestContext;
+
+static gboolean
+write_all (gint          fd,
+           const guint8 *buffer,
+           gsize         len)
+{
+    while (len) {
+        gssize written;
+
+        written = write (fd, buffer, len);
+        if (written <= 0)
+            return FALSE;
+        buffer += written;
+        len -= written;
+    }
+    return TRUE;
+}
+
+static gpointer
+port_test_peer (PortTestContext *ctx)
+{
+    guint8 request[64];
+    guint8 reply[24] = {
+        /* A radio-state indication before the solicited response. */
+        2, 0, 2, 8, 12, 0, 0, 0, 2, 0, 0, 0,
+        /* Response header/body completed below from the request. */
+        1, 0, 0, 0, 12, 0, 0, 0, 0, 0, 0, 0,
+    };
+    gssize request_len;
+
+    request_len = read (ctx->peer_fd, request, sizeof (request));
+    g_assert_cmpint (request_len, >=, MM_SIT_HEADER_SIZE);
+    reply[14] = request[2];
+    reply[15] = request[3];
+    reply[18] = request[6];
+    reply[19] = request[7];
+    g_assert_true (write_all (ctx->peer_fd, reply, sizeof (reply)));
+    return NULL;
+}
+
+static void
+port_test_indication (MMPortSerialSit    *port,
+                      const MMSitMessage *message,
+                      PortTestContext    *ctx)
+{
+    MMSitRadioState state;
+
+    g_assert_cmphex (message->id, ==, MM_SIT_MESSAGE_RADIO_STATE_CHANGED);
+    g_assert_true (mm_sit_message_parse_radio_state (message, &state, NULL));
+    g_assert_cmpuint (state, ==, MM_SIT_RADIO_STATE_ON);
+    ctx->indication_count++;
+}
+
+static void
+port_test_command_ready (MMPortSerialSit *port,
+                         GAsyncResult    *res,
+                         PortTestContext *ctx)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    g_autoptr(GError)       error = NULL;
+
+    response = mm_port_serial_sit_command_finish (port, res, &error);
+    g_assert_no_error (error);
+    g_assert_nonnull (response);
+    g_assert_cmphex (response->id, ==, MM_SIT_MESSAGE_GET_SIM_STATUS);
+    g_assert_cmphex (response->token, ==, 1);
+    g_assert_cmpuint (response->status, ==, 0);
+    ctx->command_completed = TRUE;
+    g_main_loop_quit (ctx->loop);
+}
+
+static gboolean
+port_test_timeout (PortTestContext *ctx)
+{
+    ctx->timed_out = TRUE;
+    g_main_loop_quit (ctx->loop);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+test_port_command_and_indication (void)
+{
+    PortTestContext            ctx = { 0 };
+    gint                       sockets[2];
+    guint                      handler_id;
+    guint                      timeout_id;
+    g_autoptr(GThread)         peer = NULL;
+    g_autoptr(MMPortSerialSit) port = NULL;
+    g_autoptr(GByteArray)      request = NULL;
+    g_autoptr(GError)          error = NULL;
+
+    g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    ctx.peer_fd = sockets[1];
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+
+    port = MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+                                             MM_PORT_DEVICE, "test-sit",
+                                             MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+                                             MM_PORT_TYPE, MM_PORT_TYPE_SIT,
+                                             MM_PORT_SERIAL_FD, sockets[0],
+                                             NULL));
+    g_assert_true (mm_port_serial_open (MM_PORT_SERIAL (port), &error));
+    g_assert_no_error (error);
+    handler_id = mm_port_serial_sit_add_unsolicited_handler (
+        port,
+        (MMPortSerialSitUnsolicitedFn) port_test_indication,
+        &ctx,
+        NULL);
+
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_SIM_STATUS,
+                                        mm_port_serial_sit_next_token (port));
+    peer = g_thread_new ("sit-test-peer", (GThreadFunc) port_test_peer, &ctx);
+    mm_port_serial_sit_command (port,
+                                request,
+                                2,
+                                NULL,
+                                (GAsyncReadyCallback) port_test_command_ready,
+                                &ctx);
+    timeout_id = g_timeout_add_seconds (5, (GSourceFunc) port_test_timeout, &ctx);
+    g_main_loop_run (ctx.loop);
+
+    if (!ctx.timed_out)
+        g_source_remove (timeout_id);
+    g_thread_join (g_steal_pointer (&peer));
+    mm_port_serial_sit_remove_unsolicited_handler (port, handler_id);
+    mm_port_serial_close (MM_PORT_SERIAL (port));
+    close (ctx.peer_fd);
+    g_main_loop_unref (ctx.loop);
+
+    g_assert_false (ctx.timed_out);
+    g_assert_true (ctx.command_completed);
+    g_assert_cmpuint (ctx.indication_count, ==, 1);
+}
+
 int
 main (int argc,
       char **argv)
@@ -269,6 +413,7 @@ main (int argc,
     g_test_add_func ("/MM/sit/decode/radio", test_parse_radio);
     g_test_add_func ("/MM/sit/decode/sim-registration", test_parse_status_and_registration);
     g_test_add_func ("/MM/sit/decode/data-call", test_parse_data_call);
+    g_test_add_func ("/MM/sit/port/command-and-indication", test_port_command_and_indication);
 
     return g_test_run ();
 }
