@@ -42,6 +42,26 @@ executable(
   install: true,
 )
 
+if plugins_options['samsung-sit']
+  executable(
+    'mm-sit-tool',
+    sources: files(
+      'mm-sit-tool.c',
+      '../src/plugins/samsung-sit/mm-port-serial-sit.c',
+      '../src/plugins/samsung-sit/mm-sit-client.c',
+      '../src/plugins/samsung-sit/mm-sit-protocol.c',
+    ),
+    include_directories: [
+      top_inc,
+      src_inc,
+      include_directories('../src/plugins/samsung-sit'),
+    ],
+    dependencies: [libhelpers_dep, libport_dep],
+    c_args: '-DMM_MODULE_NAME="samsung-sit"',
+    install: true,
+  )
+endif
+
 if enable_bash_completion
   install_data(
     'mmcli-completion',

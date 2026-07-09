@@ -44,12 +44,13 @@ plugins_udev_rules = []
 plugins_test_udev_rules_dir_c_args = []
 plugins_test_keyfile_c_args = []
 
-if enable_tests
+if enable_tests and plugins_options['samsung-sit']
   samsung_sit_protocol_test = executable(
     'test-samsung-sit-protocol',
     sources: files(
       'samsung-sit/mm-sit-protocol.c',
       'samsung-sit/mm-port-serial-sit.c',
+      'samsung-sit/mm-sit-client.c',
       'samsung-sit/tests/test-sit-protocol.c',
     ),
     include_directories: [top_inc, src_inc, include_directories('samsung-sit')],
@@ -954,6 +955,27 @@ if plugins_options['samsung']
   plugins += {'plugin-samsung': {
     'plugin': true,
     'module': {'sources': sources, 'include_directories': plugins_incs + [icera_inc], 'c_args': '-DMM_MODULE_NAME="samsung"'},
+  }}
+endif
+
+# plugin: Samsung SIT
+if plugins_options['samsung-sit']
+  sources = files(
+    'samsung-sit/mm-bearer-samsung-sit.c',
+    'samsung-sit/mm-broadband-modem-samsung-sit.c',
+    'samsung-sit/mm-port-serial-sit.c',
+    'samsung-sit/mm-plugin-samsung-sit.c',
+    'samsung-sit/mm-sit-client.c',
+    'samsung-sit/mm-sit-protocol.c',
+  )
+
+  plugins += {'plugin-samsung-sit': {
+    'plugin': true,
+    'module': {
+      'sources': sources,
+      'include_directories': plugins_incs + [include_directories('samsung-sit')],
+      'c_args': '-DMM_MODULE_NAME="samsung-sit"',
+    },
   }}
 endif
 

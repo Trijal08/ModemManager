@@ -6,6 +6,7 @@
 #include <unistd.h>
 
 #include "mm-port-serial-sit.h"
+#include "mm-sit-client.h"
 #include "mm-sit-protocol.h"
 
 static void
@@ -399,6 +400,254 @@ test_port_command_and_indication (void)
     g_assert_cmpuint (ctx.indication_count, ==, 1);
 }
 
+typedef struct {
+    gint          peer_fd;
+    GMainLoop    *loop;
+    MMSitDataCall call;
+    GError       *error;
+    gboolean      completed;
+    gboolean      timed_out;
+} ClientTestContext;
+
+static gboolean
+read_all (gint    fd,
+          guint8 *buffer,
+          gsize   len)
+{
+    while (len) {
+        gssize n = read (fd, buffer, len);
+
+        if (n <= 0)
+            return FALSE;
+        buffer += n;
+        len -= n;
+    }
+    return TRUE;
+}
+
+static gpointer
+client_test_peer (ClientTestContext *ctx)
+{
+    static const guint16 expected_ids[] = {
+        MM_SIT_MESSAGE_SET_PREFERRED_DATA_MODEM,
+        MM_SIT_MESSAGE_SET_DATA_PROFILE,
+        MM_SIT_MESSAGE_SET_INITIAL_ATTACH_APN,
+        0x0900,
+        0x0106,
+        0x0107,
+        MM_SIT_MESSAGE_GET_DATA_REGISTRATION,
+        MM_SIT_MESSAGE_SETUP_DATA_CALL,
+        MM_SIT_MESSAGE_GET_DATA_CALL_LIST,
+    };
+    guint i;
+
+    for (i = 0; i < G_N_ELEMENTS (expected_ids); i++) {
+        guint8  header[MM_SIT_HEADER_SIZE];
+        guint8  response[304] = { 0 };
+        guint16 request_len;
+        guint16 response_len = 12;
+
+        g_assert_true (read_all (ctx->peer_fd, header, sizeof (header)));
+        request_len = header[4] | (((guint16) header[5]) << 8);
+        g_assert_cmpuint (header[2] | (((guint16) header[3]) << 8), ==, expected_ids[i]);
+        g_assert_cmpuint (request_len, >=, MM_SIT_HEADER_SIZE);
+        if (request_len > MM_SIT_HEADER_SIZE) {
+            g_autofree guint8 *body = g_malloc (request_len - MM_SIT_HEADER_SIZE);
+
+            g_assert_true (read_all (ctx->peer_fd, body, request_len - MM_SIT_HEADER_SIZE));
+        }
+
+        if (expected_ids[i] == MM_SIT_MESSAGE_GET_DATA_REGISTRATION) {
+            response_len = 32;
+            memcpy (&response[12], "26203", 5);
+        } else if (expected_ids[i] == MM_SIT_MESSAGE_SETUP_DATA_CALL) {
+            response_len = sizeof (response);
+            response[14] = 1;
+            response[15] = 1;
+            response[16] = 1;
+            response[17] = 10;
+            response[18] = 20;
+            response[19] = 30;
+            response[20] = 40;
+            response[38] = 1;
+            response[39] = 1;
+            response[40] = 1;
+            response[41] = 1;
+            response[58] = 8;
+            response[59] = 8;
+            response[60] = 8;
+            response[61] = 8;
+            response[139] = 0xdc;
+            response[140] = 0x05;
+        }
+
+        response[0] = MM_SIT_MESSAGE_TYPE_RESPONSE;
+        response[2] = header[2];
+        response[3] = header[3];
+        response[4] = response_len & 0xff;
+        response[5] = response_len >> 8;
+        response[6] = header[6];
+        response[7] = header[7];
+        g_assert_true (write_all (ctx->peer_fd, response, response_len));
+    }
+    return NULL;
+}
+
+static void
+client_test_connect_ready (MMSitClient      *client,
+                           GAsyncResult     *res,
+                           ClientTestContext *ctx)
+{
+    ctx->completed = mm_sit_client_connect_data_finish (client, res, &ctx->call, &ctx->error);
+    g_main_loop_quit (ctx->loop);
+}
+
+static gboolean
+client_test_timeout (ClientTestContext *ctx)
+{
+    ctx->timed_out = TRUE;
+    g_main_loop_quit (ctx->loop);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+test_client_connect_sequence (void)
+{
+    ClientTestContext          ctx = { 0 };
+    gint                       sockets[2];
+    guint                      timeout_id;
+    g_autoptr(GThread)         peer = NULL;
+    g_autoptr(MMPortSerialSit) port = NULL;
+    g_autoptr(MMSitClient)     client = NULL;
+    g_autoptr(GError)          error = NULL;
+
+    g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    ctx.peer_fd = sockets[1];
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    port = MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+                                             MM_PORT_DEVICE, "test-sit-client",
+                                             MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+                                             MM_PORT_TYPE, MM_PORT_TYPE_SIT,
+                                             MM_PORT_SERIAL_FD, sockets[0],
+                                             NULL));
+    client = mm_sit_client_new_from_port (port);
+    g_assert_true (mm_sit_client_open (client, &error));
+    g_assert_no_error (error);
+
+    peer = g_thread_new ("sit-client-test-peer", (GThreadFunc) client_test_peer, &ctx);
+    mm_sit_client_connect_data (client, "internet", NULL,
+                                (GAsyncReadyCallback) client_test_connect_ready, &ctx);
+    timeout_id = g_timeout_add_seconds (10, (GSourceFunc) client_test_timeout, &ctx);
+    g_main_loop_run (ctx.loop);
+
+    if (!ctx.timed_out)
+        g_source_remove (timeout_id);
+    g_thread_join (g_steal_pointer (&peer));
+    mm_sit_client_close (client);
+    close (ctx.peer_fd);
+    g_main_loop_unref (ctx.loop);
+
+    g_assert_false (ctx.timed_out);
+    g_assert_no_error (ctx.error);
+    g_assert_true (ctx.completed);
+    g_assert_cmpuint (ctx.call.cid, ==, 1);
+    g_assert_cmpstr (ctx.call.ipv4, ==, "10.20.30.40");
+    g_assert_cmpstr (ctx.call.dns1, ==, "1.1.1.1");
+    g_assert_cmpuint (ctx.call.mtu, ==, 1500);
+}
+
+static gpointer
+client_radio_test_peer (ClientTestContext *ctx)
+{
+    static const guint16 expected_ids[] = {
+        MM_SIT_MESSAGE_GET_RADIO_POWER,
+        MM_SIT_MESSAGE_SET_RADIO_POWER,
+        MM_SIT_MESSAGE_GET_RADIO_POWER,
+    };
+    guint i;
+
+    for (i = 0; i < G_N_ELEMENTS (expected_ids); i++) {
+        guint8  header[MM_SIT_HEADER_SIZE];
+        guint8  response[16] = { 0 };
+        guint16 request_len;
+        guint16 response_len;
+
+        g_assert_true (read_all (ctx->peer_fd, header, sizeof (header)));
+        request_len = header[4] | (((guint16) header[5]) << 8);
+        g_assert_cmpuint (header[2] | (((guint16) header[3]) << 8), ==, expected_ids[i]);
+        if (request_len > MM_SIT_HEADER_SIZE) {
+            g_autofree guint8 *body = g_malloc (request_len - MM_SIT_HEADER_SIZE);
+
+            g_assert_true (read_all (ctx->peer_fd, body, request_len - MM_SIT_HEADER_SIZE));
+        }
+
+        response_len = (expected_ids[i] == MM_SIT_MESSAGE_GET_RADIO_POWER) ? 16 : 12;
+        response[0] = MM_SIT_MESSAGE_TYPE_RESPONSE;
+        response[2] = header[2];
+        response[3] = header[3];
+        response[4] = response_len;
+        response[6] = header[6];
+        response[7] = header[7];
+        if (response_len == 16)
+            response[12] = (i == 0) ? MM_SIT_RADIO_STATE_OFF : MM_SIT_RADIO_STATE_ON;
+        else
+            response[10] = MM_SIT_RADIO_STATE_ON;
+        g_assert_true (write_all (ctx->peer_fd, response, response_len));
+    }
+    return NULL;
+}
+
+static void
+client_radio_test_ready (MMSitClient       *client,
+                         GAsyncResult      *res,
+                         ClientTestContext *ctx)
+{
+    ctx->completed = mm_sit_client_set_radio_state_finish (client, res, &ctx->error);
+    g_main_loop_quit (ctx->loop);
+}
+
+static void
+test_client_radio_transition (void)
+{
+    ClientTestContext          ctx = { 0 };
+    gint                       sockets[2];
+    guint                      timeout_id;
+    g_autoptr(GThread)         peer = NULL;
+    g_autoptr(MMPortSerialSit) port = NULL;
+    g_autoptr(MMSitClient)     client = NULL;
+    g_autoptr(GError)          error = NULL;
+
+    g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    ctx.peer_fd = sockets[1];
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    port = MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+                                             MM_PORT_DEVICE, "test-sit-radio",
+                                             MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+                                             MM_PORT_TYPE, MM_PORT_TYPE_SIT,
+                                             MM_PORT_SERIAL_FD, sockets[0],
+                                             NULL));
+    client = mm_sit_client_new_from_port (port);
+    g_assert_true (mm_sit_client_open (client, &error));
+    g_assert_no_error (error);
+
+    peer = g_thread_new ("sit-radio-test-peer", (GThreadFunc) client_radio_test_peer, &ctx);
+    mm_sit_client_set_radio_state (client, MM_SIT_RADIO_STATE_ON, NULL,
+                                   (GAsyncReadyCallback) client_radio_test_ready, &ctx);
+    timeout_id = g_timeout_add_seconds (5, (GSourceFunc) client_test_timeout, &ctx);
+    g_main_loop_run (ctx.loop);
+
+    if (!ctx.timed_out)
+        g_source_remove (timeout_id);
+    g_thread_join (g_steal_pointer (&peer));
+    mm_sit_client_close (client);
+    close (ctx.peer_fd);
+    g_main_loop_unref (ctx.loop);
+
+    g_assert_false (ctx.timed_out);
+    g_assert_no_error (ctx.error);
+    g_assert_true (ctx.completed);
+}
+
 int
 main (int argc,
       char **argv)
@@ -414,6 +663,8 @@ main (int argc,
     g_test_add_func ("/MM/sit/decode/sim-registration", test_parse_status_and_registration);
     g_test_add_func ("/MM/sit/decode/data-call", test_parse_data_call);
     g_test_add_func ("/MM/sit/port/command-and-indication", test_port_command_and_indication);
+    g_test_add_func ("/MM/sit/client/connect-sequence", test_client_connect_sequence);
+    g_test_add_func ("/MM/sit/client/radio-transition", test_client_radio_transition);
 
     return g_test_run ();
 }

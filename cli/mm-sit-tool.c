@@ -1,0 +1,763 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* Copyright (C) 2026 The ModemManager authors */
+
+#include <errno.h>
+#include <glib-unix.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+#include "mm-log.h"
+#include "mm-sit-client.h"
+
+static gchar    *opt_device;
+static gboolean  opt_verbose;
+static gboolean  opt_hold;
+static gchar    *opt_configure;
+static gchar    *opt_model;
+static gchar    *opt_build_id;
+static gchar    *opt_capabilities;
+static gchar    *opt_carrier_directory;
+static gchar    *opt_carrier_sha1;
+static gint      opt_indication_filter = 0x7f;
+
+static GOptionEntry entries[] = {
+    { "device", 'd', 0, G_OPTION_ARG_FILENAME, &opt_device,
+      "SIT device (default: first /dev/wwan*sit*, then /dev/umts_ipc0)", "PATH" },
+    { "verbose", 'v', 0, G_OPTION_ARG_NONE, &opt_verbose,
+      "Enable transport debug logging (payloads stay redacted)", NULL },
+    { "hold", 'H', 0, G_OPTION_ARG_NONE, &opt_hold,
+      "Keep the control channel open and monitor after connect", NULL },
+    { "configure", 0, 0, G_OPTION_ARG_STRING, &opt_configure,
+      "Configure this raw-IP interface after connect", "INTERFACE" },
+    { "model", 0, 0, G_OPTION_ARG_STRING, &opt_model,
+      "Device model for the initialize command", "MODEL" },
+    { "build-id", 0, 0, G_OPTION_ARG_STRING, &opt_build_id,
+      "Build ID for the initialize command", "BUILD" },
+    { "capabilities", 0, 0, G_OPTION_ARG_STRING, &opt_capabilities,
+      "Six capability bytes for initialize", "HEX" },
+    { "carrier-directory", 0, 0, G_OPTION_ARG_FILENAME, &opt_carrier_directory,
+      "Carrier-config directory for initialize", "PATH" },
+    { "carrier-sha1", 0, 0, G_OPTION_ARG_STRING, &opt_carrier_sha1,
+      "20-byte carrier manifest SHA1 for initialize", "HEX" },
+    { "indication-filter", 0, 0, G_OPTION_ARG_INT, &opt_indication_filter,
+      "Unsolicited indication mask for initialize (default: 127)", "MASK" },
+    { NULL }
+};
+
+typedef struct {
+    GMainLoop         *loop;
+    GError            *error;
+    gboolean           boolean_result;
+    MMSitRadioState    radio_state;
+    MMSitSimStatus     sim_status;
+    MMSitRegistration  registration;
+    MMSitDataCall      data_call;
+    MMSitMessage      *message;
+} WaitContext;
+
+static gint
+compare_strings (gconstpointer a,
+                 gconstpointer b)
+{
+    return g_strcmp0 (*(gchar * const *) a, *(gchar * const *) b);
+}
+
+static gchar *
+find_default_device (void)
+{
+    g_autoptr(GDir) dir = NULL;
+    g_autoptr(GPtrArray) candidates = NULL;
+    const gchar *name;
+
+    dir = g_dir_open ("/dev", 0, NULL);
+    if (dir) {
+        candidates = g_ptr_array_new_with_free_func (g_free);
+        while ((name = g_dir_read_name (dir))) {
+            if (g_str_has_prefix (name, "wwan") && strstr (name, "sit"))
+                g_ptr_array_add (candidates, g_strdup (name));
+        }
+        if (candidates->len) {
+            g_ptr_array_sort (candidates, compare_strings);
+            return g_build_filename ("/dev", g_ptr_array_index (candidates, 0), NULL);
+        }
+    }
+
+    if (g_file_test ("/dev/umts_ipc0", G_FILE_TEST_EXISTS))
+        return g_strdup ("/dev/umts_ipc0");
+    return NULL;
+}
+
+static GByteArray *
+parse_hex (const gchar  *text,
+           GError      **error)
+{
+    g_autoptr(GByteArray) bytes = NULL;
+    gint high_nibble = -1;
+    const gchar *p;
+
+    bytes = g_byte_array_new ();
+    for (p = text; p && *p; p++) {
+        gint value;
+
+        if (g_ascii_isspace (*p) || *p == ':' || *p == '-')
+            continue;
+        value = g_ascii_xdigit_value (*p);
+        if (value < 0) {
+            g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                         "Invalid hexadecimal character '%c'", *p);
+            return NULL;
+        }
+        if (high_nibble < 0)
+            high_nibble = value;
+        else {
+            guint8 byte = (high_nibble << 4) | value;
+
+            g_byte_array_append (bytes, &byte, 1);
+            high_nibble = -1;
+        }
+    }
+    if (high_nibble >= 0) {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                             "Hexadecimal input contains an incomplete byte");
+        return NULL;
+    }
+    return g_steal_pointer (&bytes);
+}
+
+static gboolean
+parse_uint64 (const gchar  *text,
+              guint64       maximum,
+              guint64      *out_value,
+              GError      **error)
+{
+    gchar  *end = NULL;
+    guint64 value;
+
+    errno = 0;
+    value = g_ascii_strtoull (text, &end, 0);
+    if (errno || !end || end == text || *end || value > maximum) {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                     "Invalid numeric value '%s'", text);
+        return FALSE;
+    }
+    *out_value = value;
+    return TRUE;
+}
+
+static void
+command_ready (MMSitClient *client,
+               GAsyncResult *res,
+               WaitContext *ctx)
+{
+    ctx->message = mm_sit_client_command_finish (client, res, &ctx->error);
+    g_main_loop_quit (ctx->loop);
+}
+
+static MMSitMessage *
+command_sync (MMSitClient *client,
+              GByteArray  *request,
+              guint32      timeout,
+              GError     **error)
+{
+    WaitContext ctx = { 0 };
+
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    mm_sit_client_command (client, request, timeout, NULL,
+                           (GAsyncReadyCallback) command_ready, &ctx);
+    g_main_loop_run (ctx.loop);
+    g_main_loop_unref (ctx.loop);
+    if (!ctx.message) {
+        g_propagate_error (error, ctx.error);
+        return NULL;
+    }
+    return ctx.message;
+}
+
+static gboolean
+response_success (const MMSitMessage *message,
+                  GError            **error)
+{
+    if (!message->has_status || message->status != 0) {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                     "%s returned status %u",
+                     mm_sit_message_id_get_string (message->id),
+                     message->has_status ? message->status : G_MAXUINT16);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static gboolean
+run_request (MMSitClient *client,
+             GByteArray  *request,
+             guint32      timeout,
+             GError     **error)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+
+    response = command_sync (client, request, timeout, error);
+    return response && response_success (response, error);
+}
+
+static void
+get_radio_ready (MMSitClient *client,
+                 GAsyncResult *res,
+                 WaitContext *ctx)
+{
+    ctx->radio_state = mm_sit_client_get_radio_state_finish (client, res, &ctx->error);
+    g_main_loop_quit (ctx->loop);
+}
+
+static gboolean
+get_radio_sync (MMSitClient     *client,
+                MMSitRadioState *out_state,
+                GError         **error)
+{
+    WaitContext ctx = { 0 };
+
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    mm_sit_client_get_radio_state (client, NULL,
+                                   (GAsyncReadyCallback) get_radio_ready, &ctx);
+    g_main_loop_run (ctx.loop);
+    g_main_loop_unref (ctx.loop);
+    if (ctx.error) {
+        g_propagate_error (error, ctx.error);
+        return FALSE;
+    }
+    *out_state = ctx.radio_state;
+    return TRUE;
+}
+
+static void
+set_radio_ready (MMSitClient *client,
+                 GAsyncResult *res,
+                 WaitContext *ctx)
+{
+    ctx->boolean_result = mm_sit_client_set_radio_state_finish (client, res, &ctx->error);
+    g_main_loop_quit (ctx->loop);
+}
+
+static gboolean
+set_radio_sync (MMSitClient     *client,
+                MMSitRadioState  state,
+                GError         **error)
+{
+    WaitContext ctx = { 0 };
+
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    mm_sit_client_set_radio_state (client, state, NULL,
+                                   (GAsyncReadyCallback) set_radio_ready, &ctx);
+    g_main_loop_run (ctx.loop);
+    g_main_loop_unref (ctx.loop);
+    if (!ctx.boolean_result)
+        g_propagate_error (error, ctx.error);
+    return ctx.boolean_result;
+}
+
+static void
+get_sim_ready (MMSitClient *client,
+               GAsyncResult *res,
+               WaitContext *ctx)
+{
+    ctx->boolean_result = mm_sit_client_get_sim_status_finish (client, res,
+                                                               &ctx->sim_status,
+                                                               &ctx->error);
+    g_main_loop_quit (ctx->loop);
+}
+
+static gboolean
+get_sim_sync (MMSitClient    *client,
+              MMSitSimStatus *out_status,
+              GError        **error)
+{
+    WaitContext ctx = { 0 };
+
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    mm_sit_client_get_sim_status (client, NULL,
+                                  (GAsyncReadyCallback) get_sim_ready, &ctx);
+    g_main_loop_run (ctx.loop);
+    g_main_loop_unref (ctx.loop);
+    if (!ctx.boolean_result) {
+        g_propagate_error (error, ctx.error);
+        return FALSE;
+    }
+    *out_status = ctx.sim_status;
+    return TRUE;
+}
+
+static void
+get_registration_ready (MMSitClient *client,
+                        GAsyncResult *res,
+                        WaitContext *ctx)
+{
+    ctx->boolean_result = mm_sit_client_get_registration_finish (client, res,
+                                                                  &ctx->registration,
+                                                                  &ctx->error);
+    g_main_loop_quit (ctx->loop);
+}
+
+static gboolean
+get_registration_sync (MMSitClient       *client,
+                       MMSitRegistration *out_registration,
+                       GError           **error)
+{
+    WaitContext ctx = { 0 };
+
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    mm_sit_client_get_registration (client, NULL,
+                                    (GAsyncReadyCallback) get_registration_ready, &ctx);
+    g_main_loop_run (ctx.loop);
+    g_main_loop_unref (ctx.loop);
+    if (!ctx.boolean_result) {
+        g_propagate_error (error, ctx.error);
+        return FALSE;
+    }
+    *out_registration = ctx.registration;
+    return TRUE;
+}
+
+static void
+connect_ready (MMSitClient *client,
+               GAsyncResult *res,
+               WaitContext *ctx)
+{
+    ctx->boolean_result = mm_sit_client_connect_data_finish (client, res,
+                                                              &ctx->data_call,
+                                                              &ctx->error);
+    g_main_loop_quit (ctx->loop);
+}
+
+static gboolean
+connect_sync (MMSitClient   *client,
+              const gchar   *apn,
+              MMSitDataCall *out_call,
+              GError       **error)
+{
+    WaitContext ctx = { 0 };
+
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    mm_sit_client_connect_data (client, apn, NULL,
+                                (GAsyncReadyCallback) connect_ready, &ctx);
+    g_main_loop_run (ctx.loop);
+    g_main_loop_unref (ctx.loop);
+    if (!ctx.boolean_result) {
+        g_propagate_error (error, ctx.error);
+        return FALSE;
+    }
+    *out_call = ctx.data_call;
+    return TRUE;
+}
+
+static void
+disconnect_ready (MMSitClient *client,
+                  GAsyncResult *res,
+                  WaitContext *ctx)
+{
+    ctx->boolean_result = mm_sit_client_disconnect_data_finish (client, res, &ctx->error);
+    g_main_loop_quit (ctx->loop);
+}
+
+static gboolean
+disconnect_sync (MMSitClient *client,
+                 guint8       cid,
+                 GError     **error)
+{
+    WaitContext ctx = { 0 };
+
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    mm_sit_client_disconnect_data (client, cid, NULL,
+                                   (GAsyncReadyCallback) disconnect_ready, &ctx);
+    g_main_loop_run (ctx.loop);
+    g_main_loop_unref (ctx.loop);
+    if (!ctx.boolean_result)
+        g_propagate_error (error, ctx.error);
+    return ctx.boolean_result;
+}
+
+static void
+print_message (const MMSitMessage *message)
+{
+    g_print ("%s type=%u id=0x%04x token=0x%04x length=%u",
+             mm_sit_message_id_get_string (message->id),
+             message->type, message->id, message->token, message->length);
+    if (message->has_status)
+        g_print (" status=%u", message->status);
+    g_print ("\n");
+
+    if (message->id == MM_SIT_MESSAGE_RADIO_STATE_CHANGED ||
+        message->id == MM_SIT_MESSAGE_GET_RADIO_POWER ||
+        message->id == MM_SIT_MESSAGE_SET_RADIO_POWER) {
+        MMSitRadioState state;
+
+        if (mm_sit_message_parse_radio_state (message, &state, NULL))
+            g_print ("  radio-state: %s\n",
+                     state == MM_SIT_RADIO_STATE_ON ? "on" :
+                     state == MM_SIT_RADIO_STATE_OFF ? "off" : "unknown");
+    } else if (message->id == MM_SIT_MESSAGE_SERVING_NETWORK ||
+               message->id == MM_SIT_MESSAGE_GET_DATA_REGISTRATION) {
+        MMSitRegistration registration;
+
+        if (mm_sit_message_parse_registration (message, &registration, NULL))
+            g_print ("  packet-registration: %s%s%s\n",
+                     registration.registered ? "registered" : "not registered",
+                     registration.plmn[0] ? " PLMN=" : "",
+                     registration.plmn);
+    } else if (message->id == MM_SIT_MESSAGE_DATA_CALL_LIST_CHANGED ||
+               message->id == MM_SIT_MESSAGE_SETUP_DATA_CALL) {
+        MMSitDataCall call;
+
+        if (mm_sit_message_parse_data_call (message, &call, NULL))
+            g_print ("  data-call: cid=%u active=%u cause=%u%s%s\n",
+                     call.cid, call.active, call.cause,
+                     call.has_ipv4 ? " IPv4=" : "",
+                     call.ipv4);
+    }
+}
+
+static void
+indication_received (MMSitClient        *client,
+                     const MMSitMessage *message,
+                     gpointer            user_data)
+{
+    print_message (message);
+}
+
+static gboolean
+stop_loop (GMainLoop *loop)
+{
+    g_main_loop_quit (loop);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+monitor (MMSitClient *client)
+{
+    g_autoptr(GMainLoop) loop = NULL;
+    guint sigint_id;
+    guint sigterm_id;
+
+    loop = g_main_loop_new (NULL, FALSE);
+    sigint_id = g_unix_signal_add (SIGINT, (GSourceFunc) stop_loop, loop);
+    sigterm_id = g_unix_signal_add (SIGTERM, (GSourceFunc) stop_loop, loop);
+    g_print ("Monitoring redacted SIT events on %s; press Ctrl-C to stop\n",
+             mm_sit_client_get_device (client));
+    g_main_loop_run (loop);
+    g_source_remove (sigint_id);
+    g_source_remove (sigterm_id);
+}
+
+static gboolean
+run_ip (const gchar *const *argv,
+        GError            **error)
+{
+    g_autoptr(GSubprocess) process = NULL;
+
+    process = g_subprocess_newv (argv,
+                                 G_SUBPROCESS_FLAGS_STDOUT_SILENCE |
+                                 G_SUBPROCESS_FLAGS_STDERR_PIPE,
+                                 error);
+    if (!process)
+        return FALSE;
+    if (!g_subprocess_wait_check (process, NULL, error))
+        return FALSE;
+    return TRUE;
+}
+
+static gboolean
+configure_interface (const gchar         *interface,
+                     const MMSitDataCall *call,
+                     GError             **error)
+{
+    g_autofree gchar *address = NULL;
+    g_autofree gchar *mtu = NULL;
+    const gchar *flush[] = { "ip", "address", "flush", "dev", interface, NULL };
+    const gchar *add[] = { "ip", "address", "add", NULL, "dev", interface, NULL };
+    const gchar *link[] = { "ip", "link", "set", "dev", interface, "mtu", NULL, "up", NULL };
+    const gchar *route[] = { "ip", "route", "replace", "default", "dev", interface, NULL };
+
+    if (!call->has_ipv4) {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                             "Cannot configure an interface without an IPv4 address");
+        return FALSE;
+    }
+
+    address = g_strdup_printf ("%s/32", call->ipv4);
+    mtu = g_strdup_printf ("%u", call->mtu >= 576 && call->mtu <= 2000 ? call->mtu : 1500);
+    add[3] = address;
+    link[7] = mtu;
+
+    return run_ip (flush, error) && run_ip (add, error) &&
+           run_ip (link, error) && run_ip (route, error);
+}
+
+static gboolean
+run_initialize (MMSitClient *client,
+                GError     **error)
+{
+    static const guint8 default_capabilities[6] = { 0x7e, 0x06, 0x08, 0x0f, 0x26, 0x0c };
+    const guint8 *capabilities = default_capabilities;
+    g_autoptr(GByteArray) parsed_capabilities = NULL;
+    g_autoptr(GByteArray) request = NULL;
+    g_autoptr(GByteArray) sha1 = NULL;
+    guint8 oem_body[6] = { 0, 0, 0, 0, 0x33, 0x33 };
+    guint8 modem_config[5] = { 0 };
+
+    if (opt_capabilities) {
+        parsed_capabilities = parse_hex (opt_capabilities, error);
+        if (!parsed_capabilities || parsed_capabilities->len != 6) {
+            if (parsed_capabilities)
+                g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                     "Capabilities must contain exactly six bytes");
+            return FALSE;
+        }
+        capabilities = parsed_capabilities->data;
+    }
+
+    request = mm_sit_request_new_device_capabilities (1, capabilities);
+    if (!run_request (client, request, 5, error))
+        return FALSE;
+
+    if (opt_model || opt_build_id) {
+        if (!opt_model || !opt_build_id) {
+            g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "--model and --build-id must be provided together");
+            return FALSE;
+        }
+        g_clear_pointer (&request, g_byte_array_unref);
+        request = mm_sit_request_new_device_info (2, opt_model, opt_build_id, error);
+        if (!request || !run_request (client, request, 5, error))
+            return FALSE;
+    }
+
+    g_clear_pointer (&request, g_byte_array_unref);
+    request = mm_sit_request_new (MM_SIT_MESSAGE_OEM_CONFIG, 3,
+                                  oem_body, sizeof (oem_body), error);
+    if (!request || !run_request (client, request, 5, error))
+        return FALSE;
+    g_clear_pointer (&request, g_byte_array_unref);
+    request = mm_sit_request_new (MM_SIT_MESSAGE_SET_MODEM_CONFIG, 4,
+                                  modem_config, sizeof (modem_config), error);
+    if (!request || !run_request (client, request, 5, error))
+        return FALSE;
+
+    if (opt_carrier_directory || opt_carrier_sha1) {
+        if (!opt_carrier_directory || !opt_carrier_sha1) {
+            g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "--carrier-directory and --carrier-sha1 must be provided together");
+            return FALSE;
+        }
+        sha1 = parse_hex (opt_carrier_sha1, error);
+        if (!sha1 || sha1->len != MM_SIT_SHA1_LENGTH) {
+            if (sha1)
+                g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                     "Carrier SHA1 must contain exactly 20 bytes");
+            return FALSE;
+        }
+        g_clear_pointer (&request, g_byte_array_unref);
+        request = mm_sit_request_new_carrier_manifest (5,
+                                                       opt_carrier_directory,
+                                                       sha1->data,
+                                                       error);
+        if (!request || !run_request (client, request, 10, error))
+            return FALSE;
+    }
+
+    g_clear_pointer (&request, g_byte_array_unref);
+    request = mm_sit_request_new_set_indication_filter (6, (guint32) opt_indication_filter);
+    return run_request (client, request, 5, error);
+}
+
+static void
+print_usage (const gchar *program)
+{
+    g_printerr ("Usage:\n"
+                "  %s [OPTIONS] status\n"
+                "  %s [OPTIONS] radio on|off\n"
+                "  %s [OPTIONS] connect APN\n"
+                "  %s [OPTIONS] disconnect [CID]\n"
+                "  %s [OPTIONS] initialize\n"
+                "  %s [OPTIONS] monitor\n"
+                "  %s [OPTIONS] raw MESSAGE_ID [BODY_HEX]\n",
+                program, program, program, program, program, program, program);
+}
+
+int
+main (int argc,
+      char **argv)
+{
+    g_autoptr(GOptionContext) option_context = NULL;
+    g_autoptr(MMSitClient) client = NULL;
+    g_autoptr(GError) error = NULL;
+    g_autofree gchar *device = NULL;
+    const gchar *command;
+    gboolean success = FALSE;
+
+    option_context = g_option_context_new ("COMMAND - Samsung SIT diagnostic client");
+    g_option_context_add_main_entries (option_context, entries, NULL);
+    if (!g_option_context_parse (option_context, &argc, &argv, &error)) {
+        g_printerr ("Option error: %s\n", error->message);
+        return EXIT_FAILURE;
+    }
+    if (argc < 2) {
+        print_usage (argv[0]);
+        return EXIT_FAILURE;
+    }
+    if (opt_indication_filter < 0) {
+        g_printerr ("Option error: indication filter must be non-negative\n");
+        return EXIT_FAILURE;
+    }
+
+    if (!mm_log_setup (opt_verbose ? "DEBUG" : "WARN", NULL, FALSE,
+                       FALSE, FALSE, FALSE, &error)) {
+        g_printerr ("Logging setup failed: %s\n", error->message);
+        return EXIT_FAILURE;
+    }
+
+    device = opt_device ? g_strdup (opt_device) : find_default_device ();
+    if (!device) {
+        g_printerr ("No SIT device found; use --device=/dev/wwan0sit0\n");
+        mm_log_shutdown ();
+        return EXIT_FAILURE;
+    }
+
+    client = mm_sit_client_new (device);
+    if (!mm_sit_client_open (client, &error)) {
+        g_printerr ("Cannot open %s: %s\n", device, error->message);
+        mm_log_shutdown ();
+        return EXIT_FAILURE;
+    }
+    g_signal_connect (client, "indication", G_CALLBACK (indication_received), NULL);
+
+    command = argv[1];
+    if (g_str_equal (command, "status")) {
+        MMSitRadioState radio;
+        MMSitSimStatus sim;
+        MMSitRegistration registration;
+
+        if (argc != 2) {
+            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "status takes no arguments");
+            goto out;
+        }
+        if (!get_radio_sync (client, &radio, &error))
+            goto out;
+        g_print ("radio: %s\n", radio == MM_SIT_RADIO_STATE_ON ? "on" :
+                                 radio == MM_SIT_RADIO_STATE_OFF ? "off" : "unknown");
+        if (!get_sim_sync (client, &sim, &error))
+            goto out;
+        g_print ("SIM: %s (card-state=%u apps=%u)\n",
+                 sim.present ? "present" : "not present", sim.card_state, sim.app_count);
+        if (!get_registration_sync (client, &registration, &error))
+            goto out;
+        g_print ("packet registration: %s%s%s\n",
+                 registration.registered ? "registered" : "not registered",
+                 registration.plmn[0] ? " PLMN=" : "", registration.plmn);
+        success = TRUE;
+    } else if (g_str_equal (command, "radio")) {
+        MMSitRadioState state;
+
+        if (argc != 3 || (!g_str_equal (argv[2], "on") && !g_str_equal (argv[2], "off"))) {
+            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "radio requires 'on' or 'off'");
+            goto out;
+        }
+        state = g_str_equal (argv[2], "on") ? MM_SIT_RADIO_STATE_ON : MM_SIT_RADIO_STATE_OFF;
+        success = set_radio_sync (client, state, &error);
+        if (success)
+            g_print ("radio request accepted: %s\n", argv[2]);
+    } else if (g_str_equal (command, "connect")) {
+        MMSitDataCall call;
+
+        if (argc != 3) {
+            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "connect requires an APN");
+            goto out;
+        }
+        if (!connect_sync (client, argv[2], &call, &error))
+            goto out;
+        g_print ("data call: cid=%u active=%u IPv4=%s DNS=%s,%s MTU=%u\n",
+                 call.cid, call.active, call.ipv4, call.dns1, call.dns2, call.mtu);
+        if (opt_configure && !configure_interface (opt_configure, &call, &error))
+            goto out;
+        if (opt_configure)
+            g_print ("configured %s (configure DNS separately: %s, %s)\n",
+                     opt_configure, call.dns1, call.dns2);
+        success = TRUE;
+        if (opt_hold)
+            monitor (client);
+    } else if (g_str_equal (command, "disconnect")) {
+        guint64 cid = 1;
+
+        if (argc > 3) {
+            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "disconnect accepts at most one CID");
+            goto out;
+        }
+        if (argc == 3 && !parse_uint64 (argv[2], G_MAXUINT8, &cid, &error))
+            goto out;
+        if (cid == 0) {
+            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "CID must be between 1 and 255");
+            goto out;
+        }
+        success = disconnect_sync (client, cid, &error);
+        if (success)
+            g_print ("data call %" G_GUINT64_FORMAT " deactivated\n", cid);
+    } else if (g_str_equal (command, "initialize")) {
+        if (argc != 2) {
+            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "initialize takes no arguments");
+            goto out;
+        }
+        success = run_initialize (client, &error);
+        if (success)
+            g_print ("SIT initialization sequence completed\n");
+    } else if (g_str_equal (command, "monitor")) {
+        if (argc != 2) {
+            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "monitor takes no arguments");
+            goto out;
+        }
+        monitor (client);
+        success = TRUE;
+    } else if (g_str_equal (command, "raw")) {
+        g_autoptr(GByteArray) body = NULL;
+        g_autoptr(GByteArray) request = NULL;
+        g_autoptr(MMSitMessage) response = NULL;
+        guint64 id;
+
+        if (argc < 3 || argc > 4) {
+            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "raw requires MESSAGE_ID and optional BODY_HEX");
+            goto out;
+        }
+        if (!parse_uint64 (argv[2], G_MAXUINT16, &id, &error))
+            goto out;
+        if (argc == 4) {
+            body = parse_hex (argv[3], &error);
+            if (!body)
+                goto out;
+        } else
+            body = g_byte_array_new ();
+        request = mm_sit_request_new (id, 1, body->data, body->len, &error);
+        if (!request)
+            goto out;
+        response = command_sync (client, request, 30, &error);
+        if (!response)
+            goto out;
+        print_message (response);
+        success = TRUE;
+    } else {
+        g_set_error (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                     "Unknown command '%s'", command);
+    }
+
+out:
+    if (!success && error)
+        g_printerr ("SIT command failed: %s\n", error->message);
+    mm_sit_client_close (client);
+    mm_log_shutdown ();
+    return success ? EXIT_SUCCESS : EXIT_FAILURE;
+}

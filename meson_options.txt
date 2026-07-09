@@ -62,6 +62,7 @@ option('plugin_qcom_soc', type: 'feature', value: 'auto', description: 'enable q
 option('plugin_quectel', type: 'feature', value: 'auto', description: 'enable quectel plugin support')
 option('plugin_rolling', type: 'feature', value: 'auto', description: 'enable rolling plugin support')
 option('plugin_samsung', type: 'feature', value: 'auto', description: 'enable samsung plugin support')
+option('plugin_samsung_sit', type: 'feature', value: 'auto', description: 'enable Samsung SIT plugin support')
 option('plugin_sierra_legacy', type: 'feature', value: 'auto', description: 'enable sierra legacy plugin support')
 option('plugin_sierra', type: 'feature', value: 'auto', description: 'enable sierra plugin support')
 option('plugin_simtech', type: 'feature', value: 'auto', description: 'enable simtech plugin support')

@@ -410,6 +410,7 @@ plugins_options_reqs = {
   'quectel': {'available': true, 'shared': ['quectel']},
   'rolling': {'available': true, 'shared': ['fibocom', 'mtk']},
   'samsung': {'available': true, 'shared': ['icera']},
+  'samsung-sit': {'available': true, 'shared': []},
   'sierra-legacy': {'available': true, 'shared': ['icera', 'sierra']},
   'sierra': {'available': true, 'shared': ['xmm']},
   'simtech': {'available': true, 'shared': []},
