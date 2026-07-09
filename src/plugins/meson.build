@@ -44,6 +44,19 @@ plugins_udev_rules = []
 plugins_test_udev_rules_dir_c_args = []
 plugins_test_keyfile_c_args = []
 
+if enable_tests
+  samsung_sit_protocol_test = executable(
+    'test-samsung-sit-protocol',
+    sources: files(
+      'samsung-sit/mm-sit-protocol.c',
+      'samsung-sit/tests/test-sit-protocol.c',
+    ),
+    include_directories: include_directories('samsung-sit'),
+    dependencies: libhelpers_dep,
+  )
+  test('samsung-sit-protocol', samsung_sit_protocol_test)
+endif
+
 # never include static libs as deps when building
 # plugins or shared utils modules
 plugins_incs = [
