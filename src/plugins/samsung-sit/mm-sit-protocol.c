@@ -479,6 +479,31 @@ mm_sit_message_parse_radio_state (const MMSitMessage *message,
         state = read_le32 (&data[message->id == MM_SIT_MESSAGE_GET_RADIO_POWER ? 12 : 8]);
     }
 
+    /* Android's SIT adapter normalizes GET_RADIO_POWER differently from
+     * RADIO_STATE_CHANGED: GET values 2..10 all mean RIL_RADIO_ON, while
+     * unsolicited values 0/1 mean unavailable and 2 means on. */
+    if (message->id == MM_SIT_MESSAGE_GET_RADIO_POWER) {
+        if (state > 10) {
+            g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                         "Unknown SIT GET radio state %u", state);
+            return FALSE;
+        }
+        *out_state = (state == 0) ? MM_SIT_RADIO_STATE_UNKNOWN :
+                     (state == 1) ? MM_SIT_RADIO_STATE_OFF :
+                                    MM_SIT_RADIO_STATE_ON;
+        return TRUE;
+    }
+
+    if (message->id == MM_SIT_MESSAGE_RADIO_STATE_CHANGED) {
+        if (state == 0 || state == 1)
+            *out_state = MM_SIT_RADIO_STATE_UNKNOWN;
+        else if (state == 2)
+            *out_state = MM_SIT_RADIO_STATE_ON;
+        else
+            *out_state = MM_SIT_RADIO_STATE_OFF;
+        return TRUE;
+    }
+
     if (state > MM_SIT_RADIO_STATE_ON) {
         g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
                      "Unknown SIT radio state %u", state);

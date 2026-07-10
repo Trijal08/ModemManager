@@ -169,6 +169,12 @@ test_parse_radio (void)
     static const guint8 get_response[] = {
         1, 0, 1, 8, 16, 0, 1, 0, 0, 0, 0, 0, 2, 0, 0, 0,
     };
+    static const guint8 get_response_android_on[] = {
+        1, 0, 1, 8, 16, 0, 1, 0, 0, 0, 0, 0, 10, 0, 0, 0,
+    };
+    static const guint8 indication_on[] = {
+        2, 0, 2, 8, 12, 0, 0, 0, 2, 0, 0, 0,
+    };
     static const guint8 indication[] = {
         2, 0, 2, 8, 12, 0, 0, 0, 1, 0, 0, 0,
     };
@@ -183,11 +189,26 @@ test_parse_radio (void)
     g_assert_cmpuint (state, ==, MM_SIT_RADIO_STATE_ON);
 
     g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (get_response_android_on,
+                                    sizeof (get_response_android_on), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_radio_state (message, &state, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (state, ==, MM_SIT_RADIO_STATE_ON);
+
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (indication_on, sizeof (indication_on), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_radio_state (message, &state, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (state, ==, MM_SIT_RADIO_STATE_ON);
+
+    g_clear_pointer (&message, mm_sit_message_free);
     message = mm_sit_message_parse (indication, sizeof (indication), &error);
     g_assert_no_error (error);
     g_assert_true (mm_sit_message_parse_radio_state (message, &state, &error));
     g_assert_no_error (error);
-    g_assert_cmpuint (state, ==, MM_SIT_RADIO_STATE_OFF);
+    g_assert_cmpuint (state, ==, MM_SIT_RADIO_STATE_UNKNOWN);
 }
 
 static void

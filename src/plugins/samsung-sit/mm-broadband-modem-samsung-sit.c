@@ -348,6 +348,22 @@ load_power_state_finish (MMIfaceModem  *self,
 }
 
 static void
+load_power_state_ready (MMSitClient *client,
+                        GAsyncResult *res,
+                        GTask *task)
+{
+    GError          *error = NULL;
+    MMSitRadioState  state;
+
+    state = mm_sit_client_get_radio_state_finish (client, res, &error);
+    if (error)
+        g_task_return_error (task, error);
+    else
+        g_task_return_int (task, state);
+    g_object_unref (task);
+}
+
+static void
 load_power_state (MMIfaceModem        *iface,
                   GAsyncReadyCallback  callback,
                   gpointer             user_data)
@@ -355,13 +371,18 @@ load_power_state (MMIfaceModem        *iface,
     MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
     MMSitClient                *client;
     GError                     *error = NULL;
+    GTask                      *task;
 
+    task = g_task_new (iface, NULL, callback, user_data);
     client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
     if (!client) {
-        g_task_report_error (self, callback, user_data, load_power_state, error);
+        g_task_return_error (task, error);
+        g_object_unref (task);
         return;
     }
-    mm_sit_client_get_radio_state (client, NULL, callback, user_data);
+    mm_sit_client_get_radio_state (client, NULL,
+                                   (GAsyncReadyCallback) load_power_state_ready,
+                                   task);
 }
 
 static gboolean
@@ -373,6 +394,20 @@ modem_set_power_finish (MMIfaceModem  *self,
 }
 
 static void
+modem_set_power_ready (MMSitClient *client,
+                       GAsyncResult *res,
+                       GTask *task)
+{
+    GError *error = NULL;
+
+    if (!mm_sit_client_set_radio_state_finish (client, res, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
 modem_set_power (MMIfaceModem        *iface,
                  MMSitRadioState      state,
                  GAsyncReadyCallback  callback,
@@ -381,13 +416,18 @@ modem_set_power (MMIfaceModem        *iface,
     MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
     MMSitClient                *client;
     GError                     *error = NULL;
+    GTask                      *task;
 
+    task = g_task_new (iface, NULL, callback, user_data);
     client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
     if (!client) {
-        g_task_report_error (self, callback, user_data, modem_set_power, error);
+        g_task_return_error (task, error);
+        g_object_unref (task);
         return;
     }
-    mm_sit_client_set_radio_state (client, state, NULL, callback, user_data);
+    mm_sit_client_set_radio_state (client, state, NULL,
+                                   (GAsyncReadyCallback) modem_set_power_ready,
+                                   task);
 }
 
 static void
@@ -567,6 +607,20 @@ register_in_network (MMIfaceModem3gpp   *self,
 }
 
 static void
+set_unsolicited_events_ready (MMSitClient *client,
+                              GAsyncResult *res,
+                              GTask *task)
+{
+    GError *error = NULL;
+
+    if (!mm_sit_client_set_indication_filter_finish (client, res, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
 set_unsolicited_events (MMIfaceModem3gpp   *iface,
                         GAsyncReadyCallback callback,
                         gpointer            user_data)
@@ -574,13 +628,18 @@ set_unsolicited_events (MMIfaceModem3gpp   *iface,
     MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
     MMSitClient                *client;
     GError                     *error = NULL;
+    GTask                      *task;
 
+    task = g_task_new (iface, NULL, callback, user_data);
     client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
     if (!client) {
-        g_task_report_error (self, callback, user_data, set_unsolicited_events, error);
+        g_task_return_error (task, error);
+        g_object_unref (task);
         return;
     }
-    mm_sit_client_set_indication_filter (client, 0x7f, NULL, callback, user_data);
+    mm_sit_client_set_indication_filter (client, 0x7f, NULL,
+                                         (GAsyncReadyCallback) set_unsolicited_events_ready,
+                                         task);
 }
 
 static gboolean
@@ -702,8 +761,15 @@ static void
 mm_broadband_modem_samsung_sit_class_init (MMBroadbandModemSamsungSitClass *klass)
 {
     GObjectClass *object_class = G_OBJECT_CLASS (klass);
+    MMBroadbandModemClass *broadband_modem_class = MM_BROADBAND_MODEM_CLASS (klass);
 
     g_type_class_add_private (object_class, sizeof (MMBroadbandModemSamsungSitPrivate));
     object_class->dispose = dispose;
     object_class->finalize = finalize;
+
+    /* The Shannon AT service rejects ATZ with +CME ERROR: 100. The generic
+     * initialization sequence has already configured the AT port, so skip the
+     * reset normally issued by the first-enable hook. */
+    broadband_modem_class->enabling_modem_init = NULL;
+    broadband_modem_class->enabling_modem_init_finish = NULL;
 }
