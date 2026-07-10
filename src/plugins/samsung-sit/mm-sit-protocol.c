@@ -170,8 +170,9 @@ mm_sit_message_id_get_string (guint16 id)
     case MM_SIT_MESSAGE_SET_INDICATION_FILTER:   return "SET_INDICATION_FILTER";
     case MM_SIT_MESSAGE_SET_MODEM_CONFIG:        return "SET_MODEM_CONFIG";
     case MM_SIT_MESSAGE_DEVICE_CAPABILITIES:     return "DEVICE_CAPABILITIES";
-    case MM_SIT_MESSAGE_OEM_CONFIG:              return "OEM_CONFIG";
     case MM_SIT_MESSAGE_CARRIER_CONFIG_MANIFEST: return "CARRIER_CONFIG_MANIFEST";
+    case MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO: return "CARRIER_CONFIG_SIM_INFO";
+    case MM_SIT_MESSAGE_OEM_CONFIG:              return "OEM_CONFIG";
     default:                                     return "UNKNOWN";
     }
 }
@@ -515,6 +516,72 @@ mm_sit_message_parse_sim_status (const MMSitMessage *message,
     out_status->ims_app_index = data[16];
     out_status->app_count = data[17];
     out_status->present = (out_status->card_state == 1);
+    return TRUE;
+}
+
+static gboolean
+copy_decimal_identity (gchar        *destination,
+                       gsize         destination_size,
+                       const guint8 *source,
+                       gsize         source_size,
+                       const gchar  *field,
+                       GError      **error)
+{
+    gsize i;
+
+    for (i = 0; i < source_size && source[i]; i++) {
+        if (!g_ascii_isdigit (source[i])) {
+            g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                         "SIT carrier SIM information has an invalid %s", field);
+            return FALSE;
+        }
+    }
+    if (!i || i >= destination_size || (i == source_size && source[source_size - 1])) {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                     "SIT carrier SIM information has an invalid %s length", field);
+        return FALSE;
+    }
+
+    memcpy (destination, source, i);
+    destination[i] = '\0';
+    return TRUE;
+}
+
+gboolean
+mm_sit_message_parse_carrier_sim_info (const MMSitMessage  *message,
+                                       MMSitCarrierSimInfo *out_info,
+                                       GError             **error)
+{
+    const guint8 *payload;
+    gsize         payload_len;
+    guint32       declared_len;
+
+    g_return_val_if_fail (out_info != NULL, FALSE);
+
+    if (!require_message (message, MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO, 49, error))
+        return FALSE;
+    if (message->type != MM_SIT_MESSAGE_TYPE_INDICATION) {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                             "Carrier SIM information is not an indication");
+        return FALSE;
+    }
+
+    payload = mm_sit_message_get_payload (message, &payload_len);
+    declared_len = read_le32 (payload);
+    if (declared_len != payload_len) {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                     "SIT carrier SIM information declares %u bytes but contains %" G_GSIZE_FORMAT,
+                     declared_len, payload_len);
+        return FALSE;
+    }
+
+    memset (out_info, 0, sizeof (*out_info));
+    /* Captured 0x4602 layout: u32 body length, char ICCID[21], char IMSI[16]. */
+    if (!copy_decimal_identity (out_info->iccid, sizeof (out_info->iccid),
+                                &payload[4], 21, "ICCID", error) ||
+        !copy_decimal_identity (out_info->imsi, sizeof (out_info->imsi),
+                                &payload[25], 16, "IMSI", error))
+        return FALSE;
     return TRUE;
 }
 

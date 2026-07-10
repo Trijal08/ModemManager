@@ -4,6 +4,7 @@
 #include <gmodule.h>
 
 #include "mm-broadband-modem-samsung-sit.h"
+#include "mm-kernel-device.h"
 #include "mm-log-object.h"
 #include "mm-plugin-common.h"
 #include "mm-private-boxed-types.h"
@@ -23,14 +24,34 @@ create_modem (MMPlugin      *self,
               GList         *probes,
               GError       **error)
 {
+    g_autofree gchar *database = NULL;
+    const gchar      *directory = MM_SIT_DEFAULT_CARRIER_CONFIG_DIRECTORY;
+    GList            *l;
+
     if (!mm_port_probe_list_has_sit_port (probes)) {
         g_set_error_literal (error, MM_CORE_ERROR, MM_CORE_ERROR_UNSUPPORTED,
                              "Samsung s5300 device has no SIT control port");
         return NULL;
     }
 
+    for (l = probes; l; l = g_list_next (l)) {
+        MMPortProbe    *probe = MM_PORT_PROBE (l->data);
+        MMKernelDevice *port;
+        const gchar    *configured_directory;
+
+        if (!mm_port_probe_is_sit (probe))
+            continue;
+        port = mm_port_probe_peek_port (probe);
+        configured_directory = mm_kernel_device_get_property (
+            port, "ID_MM_SIT_CARRIER_CONFIG_DIRECTORY");
+        if (configured_directory && configured_directory[0])
+            directory = configured_directory;
+        break;
+    }
+
+    database = g_build_filename (directory, "cfg.db", NULL);
     return MM_BASE_MODEM (mm_broadband_modem_samsung_sit_new (
-        uid, physdev, drivers, mm_plugin_get_name (self), vendor, product));
+        uid, physdev, drivers, mm_plugin_get_name (self), vendor, product, database));
 }
 
 MM_PLUGIN_NAMED_CREATOR_SCOPE MMPlugin *

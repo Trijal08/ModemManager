@@ -2,10 +2,13 @@
 /* Copyright (C) 2026 The ModemManager authors */
 
 #include <glib.h>
+#include <glib/gstdio.h>
+#include <sqlite3.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include "mm-port-serial-sit.h"
+#include "mm-sit-carrier-config.h"
 #include "mm-sit-client.h"
 #include "mm-sit-protocol.h"
 
@@ -257,6 +260,246 @@ test_parse_data_call (void)
     g_assert_cmpstr (call.dns1, ==, "1.1.1.1");
     g_assert_cmpstr (call.dns2, ==, "8.8.8.8");
     g_assert_cmpuint (call.mtu, ==, 1500);
+}
+
+static void
+test_parse_carrier_sim_info (void)
+{
+    guint8 raw[207] = { 0 };
+    g_autoptr(MMSitMessage) message = NULL;
+    g_autoptr(GError)       error = NULL;
+    MMSitCarrierSimInfo     info;
+
+    raw[0] = MM_SIT_MESSAGE_TYPE_INDICATION;
+    raw[2] = MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO & 0xff;
+    raw[3] = MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO >> 8;
+    raw[4] = sizeof (raw) & 0xff;
+    raw[5] = sizeof (raw) >> 8;
+    raw[8] = (sizeof (raw) - MM_SIT_HEADER_SIZE) & 0xff;
+    memcpy (&raw[12], "8901234567890123456", 19);
+    memcpy (&raw[33], "262071234567890", 15);
+
+    message = mm_sit_message_parse (raw, sizeof (raw), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_carrier_sim_info (message, &info, &error));
+    g_assert_no_error (error);
+    g_assert_cmpstr (info.iccid, ==, "8901234567890123456");
+    g_assert_cmpstr (info.imsi, ==, "262071234567890");
+
+    raw[8]--;
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (raw, sizeof (raw), &error);
+    g_assert_no_error (error);
+    g_assert_false (mm_sit_message_parse_carrier_sim_info (message, &info, &error));
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+}
+
+static void
+database_exec (sqlite3     *database,
+               const gchar *sql)
+{
+    gchar *message = NULL;
+
+    g_assert_cmpint (sqlite3_exec (database, sql, NULL, NULL, &message), ==, SQLITE_OK);
+    g_assert_null (message);
+}
+
+static void
+create_manifest (const gchar *directory,
+                 const gchar *hash)
+{
+    g_autofree gchar *path = g_build_filename (directory, "manifests", hash, NULL);
+
+    g_assert_true (g_file_set_contents (path, "", 0, NULL));
+}
+
+static void
+remove_manifest (const gchar *directory,
+                 const gchar *hash)
+{
+    g_autofree gchar *path = g_build_filename (directory, "manifests", hash, NULL);
+
+    g_assert_cmpint (g_remove (path), ==, 0);
+}
+
+static void
+test_carrier_config_resolver (void)
+{
+    static const gchar hash_global[] = "0000000000000000000000000000000000000000";
+    static const gchar hash_base[] = "1111111111111111111111111111111111111111";
+    static const gchar hash_imsi[] = "2222222222222222222222222222222222222222";
+    static const gchar hash_gid[] = "3333333333333333333333333333333333333333";
+    static const gchar hash_both_gids[] = "6666666666666666666666666666666666666666";
+    static const gchar hash_france[] = "7777777777777777777777777777777777777777";
+    static const gchar hash_france_iin[] = "8888888888888888888888888888888888888888";
+    static const gchar hash_iin[] = "4444444444444444444444444444444444444444";
+    static const gchar hash_rule[] = "5555555555555555555555555555555555555555";
+    g_autofree gchar *directory = NULL;
+    g_autofree gchar *manifest_directory = NULL;
+    g_autofree gchar *database_path = NULL;
+    sqlite3          *database = NULL;
+    MMSitCarrierIdentity identity = { 0 };
+    g_autoptr(MMSitCarrierConfig) config = NULL;
+    g_autoptr(GError) error = NULL;
+
+    directory = g_dir_make_tmp ("mm-sit-carrier-XXXXXX", &error);
+    g_assert_no_error (error);
+    g_assert_nonnull (directory);
+    manifest_directory = g_build_filename (directory, "manifests", NULL);
+    g_assert_cmpint (g_mkdir (manifest_directory, 0700), ==, 0);
+    database_path = g_build_filename (directory, "cfg.db", NULL);
+    g_assert_cmpint (sqlite3_open (database_path, &database), ==, SQLITE_OK);
+    database_exec (database,
+                   "CREATE TABLE carrier_info (carrier_id INTEGER NOT NULL,mccmnc TEXT NOT NULL,"
+                   "imsi_prefix_xpattern TEXT,spn TEXT,plmn_name TEXT,gid1 TEXT,gid2 TEXT,"
+                   "preferred_apn TEXT,iccid_prefix TEXT,privelege_access_rule TEXT);"
+                   "CREATE TABLE confmap (carrier_id TEXT NOT NULL UNIQUE,parent_id TEXT,confman TEXT NOT NULL);"
+                   "CREATE TABLE confnames (carrier_id INTEGER NOT NULL UNIQUE,name TEXT NOT NULL);"
+                   "CREATE TABLE iin (carrier_id TEXT,iccid_prefix TEXT);"
+                   "CREATE TABLE regional_fallback (country_code TEXT,carrier_id TEXT);"
+                   "INSERT INTO carrier_info VALUES (1,'26207','%','%',NULL,'%','%',NULL,NULL,NULL);"
+                   "INSERT INTO carrier_info VALUES (2,'26207','26207123%','%',NULL,'%','%',NULL,NULL,NULL);"
+                   "INSERT INTO carrier_info VALUES (3,'26207','%','Special',NULL,'AB','%',NULL,NULL,NULL);"
+                   "INSERT INTO carrier_info VALUES (4,'26207','%','Wrong SPN',NULL,'AB','CD',NULL,NULL,NULL);"
+                   "INSERT INTO carrier_info VALUES (5,'26207','%','%',NULL,'%','%',NULL,NULL,'RULE');"
+                   "INSERT INTO carrier_info VALUES (6,'20801','%','%',NULL,'%','%',NULL,NULL,NULL);"
+                   "INSERT INTO carrier_info VALUES (7,'20801','%','%',NULL,'%','%',NULL,'894936',NULL);"
+                   "INSERT INTO confmap VALUES ('0',NULL,'0000000000000000000000000000000000000000');"
+                   "INSERT INTO confmap VALUES ('1',NULL,'1111111111111111111111111111111111111111');"
+                   "INSERT INTO confmap VALUES ('2',NULL,'2222222222222222222222222222222222222222');"
+                   "INSERT INTO confmap VALUES ('3',NULL,'3333333333333333333333333333333333333333');"
+                   "INSERT INTO confmap VALUES ('4',NULL,'6666666666666666666666666666666666666666');"
+                   "INSERT INTO confmap VALUES ('6',NULL,'7777777777777777777777777777777777777777');"
+                   "INSERT INTO confmap VALUES ('7',NULL,'8888888888888888888888888888888888888888');"
+                   "INSERT INTO confmap VALUES ('9',NULL,'4444444444444444444444444444444444444444');"
+                   "INSERT INTO confmap VALUES ('5',NULL,'5555555555555555555555555555555555555555');"
+                   "INSERT INTO confnames VALUES (0,'wildcard');"
+                   "INSERT INTO confnames VALUES (1,'base');"
+                   "INSERT INTO confnames VALUES (2,'imsi');"
+                   "INSERT INTO confnames VALUES (3,'gid');"
+                   "INSERT INTO confnames VALUES (4,'both-gids');"
+                   "INSERT INTO confnames VALUES (6,'france');"
+                   "INSERT INTO confnames VALUES (7,'france-iin');"
+                   "INSERT INTO confnames VALUES (9,'iin');"
+                   "INSERT INTO confnames VALUES (5,'rule');"
+                   "INSERT INTO iin VALUES ('9','89999%');"
+                   "INSERT INTO regional_fallback VALUES ('0','0');");
+    g_assert_cmpint (sqlite3_close (database), ==, SQLITE_OK);
+    database = NULL;
+
+    create_manifest (directory, hash_global);
+    create_manifest (directory, hash_base);
+    create_manifest (directory, hash_imsi);
+    create_manifest (directory, hash_gid);
+    create_manifest (directory, hash_both_gids);
+    create_manifest (directory, hash_france);
+    create_manifest (directory, hash_france_iin);
+    create_manifest (directory, hash_iin);
+    create_manifest (directory, hash_rule);
+
+    identity.imsi = "262071234567890";
+    identity.iccid = "8999912345678901234";
+    identity.mccmnc = "26207";
+    identity.spn = "Special";
+    identity.gid1 = "AB";
+    identity.gid2 = "CD";
+    g_assert_true (mm_sit_carrier_config_resolve (database_path, &identity, &config, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (config->carrier_id, ==, 4);
+    g_assert_cmpstr (config->carrier_name, ==, "both-gids");
+    g_assert_cmpstr (config->manifest_sha1, ==, hash_both_gids);
+
+    g_clear_pointer (&config, mm_sit_carrier_config_free);
+    identity.spn = NULL;
+    identity.gid1 = NULL;
+    identity.gid2 = NULL;
+    g_assert_true (mm_sit_carrier_config_resolve (database_path, &identity, &config, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (config->carrier_id, ==, 2);
+    g_assert_cmpstr (config->manifest_sha1, ==, hash_imsi);
+
+    g_clear_pointer (&config, mm_sit_carrier_config_free);
+    identity.imsi = "208010000000000";
+    identity.iccid = "8949361234567890123";
+    identity.mccmnc = NULL;
+    g_assert_true (mm_sit_carrier_config_resolve (database_path, &identity, &config, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (config->carrier_id, ==, 7);
+    g_assert_cmpstr (config->manifest_sha1, ==, hash_france_iin);
+
+    g_clear_pointer (&config, mm_sit_carrier_config_free);
+    identity.iccid = "8999912345678901234";
+    identity.mccmnc = "20801";
+    g_assert_true (mm_sit_carrier_config_resolve (database_path, &identity, &config, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (config->carrier_id, ==, 6);
+    g_assert_cmpstr (config->manifest_sha1, ==, hash_france);
+
+    g_clear_pointer (&config, mm_sit_carrier_config_free);
+    identity.imsi = "999991234567890";
+    identity.mccmnc = "99999";
+    g_assert_true (mm_sit_carrier_config_resolve (database_path, &identity, &config, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (config->carrier_id, ==, 9);
+    g_assert_cmpstr (config->manifest_sha1, ==, hash_iin);
+
+    g_clear_pointer (&config, mm_sit_carrier_config_free);
+    identity.iccid = "12345";
+    g_assert_true (mm_sit_carrier_config_resolve (database_path, &identity, &config, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (config->carrier_id, ==, 0);
+    g_assert_cmpstr (config->manifest_sha1, ==, hash_global);
+
+    g_clear_pointer (&config, mm_sit_carrier_config_free);
+    identity.imsi = "262071234567890";
+    identity.mccmnc = "26207";
+    identity.privilege_access_rule = "rule";
+    g_assert_true (mm_sit_carrier_config_resolve (database_path, &identity, &config, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (config->carrier_id, ==, 5);
+    g_assert_cmpstr (config->manifest_sha1, ==, hash_rule);
+
+    g_assert_cmpint (g_remove (config->manifest_path), ==, 0);
+    g_clear_pointer (&config, mm_sit_carrier_config_free);
+    g_assert_false (mm_sit_carrier_config_resolve (database_path, &identity, &config, &error));
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
+    g_clear_error (&error);
+    g_assert_cmpint (g_remove (database_path), ==, 0);
+    remove_manifest (directory, hash_global);
+    remove_manifest (directory, hash_base);
+    remove_manifest (directory, hash_imsi);
+    remove_manifest (directory, hash_gid);
+    remove_manifest (directory, hash_both_gids);
+    remove_manifest (directory, hash_france);
+    remove_manifest (directory, hash_france_iin);
+    remove_manifest (directory, hash_iin);
+    g_assert_cmpint (g_rmdir (manifest_directory), ==, 0);
+    g_assert_cmpint (g_rmdir (directory), ==, 0);
+}
+
+static void
+test_carrier_config_reference_database (void)
+{
+    const gchar          *database_path;
+    MMSitCarrierIdentity  identity = { 0 };
+    g_autoptr(MMSitCarrierConfig) config = NULL;
+    g_autoptr(GError)     error = NULL;
+
+    database_path = g_getenv ("MM_SIT_TEST_CARRIER_DATABASE");
+    if (!database_path) {
+        g_test_skip ("MM_SIT_TEST_CARRIER_DATABASE is not set");
+        return;
+    }
+
+    /* Synthetic subscriber digits with the same captured O2-DE MCC/MNC. */
+    identity.imsi = "262072000000000";
+    identity.iccid = "8900000000000000000";
+    identity.mccmnc = "26207";
+    g_assert_true (mm_sit_carrier_config_resolve (database_path, &identity, &config, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (config->carrier_id, ==, 1454);
+    g_assert_cmpstr (config->carrier_name, ==, "de_o2");
+    g_assert_cmpstr (config->manifest_sha1, ==, "c5a7aca02e9a6b8d20ee742c87a941b4cac55676");
 }
 
 typedef struct {
@@ -662,6 +905,9 @@ main (int argc,
     g_test_add_func ("/MM/sit/decode/radio", test_parse_radio);
     g_test_add_func ("/MM/sit/decode/sim-registration", test_parse_status_and_registration);
     g_test_add_func ("/MM/sit/decode/data-call", test_parse_data_call);
+    g_test_add_func ("/MM/sit/decode/carrier-sim-info", test_parse_carrier_sim_info);
+    g_test_add_func ("/MM/sit/carrier-config/resolve", test_carrier_config_resolver);
+    g_test_add_func ("/MM/sit/carrier-config/reference-database", test_carrier_config_reference_database);
     g_test_add_func ("/MM/sit/port/command-and-indication", test_port_command_and_indication);
     g_test_add_func ("/MM/sit/client/connect-sequence", test_client_connect_sequence);
     g_test_add_func ("/MM/sit/client/radio-transition", test_client_radio_transition);

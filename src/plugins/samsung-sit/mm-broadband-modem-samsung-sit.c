@@ -6,10 +6,13 @@
 #include <libmm-glib.h>
 
 #include "mm-bearer-samsung-sit.h"
+#include "mm-base-sim.h"
 #include "mm-broadband-modem-samsung-sit.h"
 #include "mm-iface-modem.h"
 #include "mm-iface-modem-3gpp.h"
 #include "mm-log-object.h"
+#include "mm-sit-carrier-config.h"
+#include "mm-utils.h"
 
 static void iface_modem_init      (MMIfaceModemInterface     *iface);
 static void iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface);
@@ -17,7 +20,14 @@ static void iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface);
 struct _MMBroadbandModemSamsungSitPrivate {
     MMSitClient *client;
     gchar       *operator_code;
+    gboolean     carrier_config_ready;
+    gchar       *carrier_config_imsi;
 };
+
+typedef struct {
+    MMSitCarrierConfig *config;
+    gchar              *imsi;
+} CarrierManifestContext;
 
 G_DEFINE_TYPE_EXTENDED (MMBroadbandModemSamsungSit,
                         mm_broadband_modem_samsung_sit,
@@ -44,11 +54,37 @@ update_registration (MMBroadbandModemSamsungSit *self,
 }
 
 static void
+carrier_manifest_context_free (CarrierManifestContext *ctx)
+{
+    mm_sit_carrier_config_free (ctx->config);
+    g_free (ctx->imsi);
+    g_free (ctx);
+}
+
+static void
+invalidate_carrier_config (MMBroadbandModemSamsungSit *self)
+{
+    self->priv->carrier_config_ready = FALSE;
+    g_clear_pointer (&self->priv->carrier_config_imsi, g_free);
+}
+
+static void
 sit_indication (MMSitClient              *client,
                 const MMSitMessage       *message,
                 MMBroadbandModemSamsungSit *self)
 {
     MMSitRegistration registration;
+
+    if (message->id == MM_SIT_MESSAGE_SIM_STATUS_CHANGED)
+        invalidate_carrier_config (self);
+    else if (message->id == MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO) {
+        MMSitCarrierSimInfo info;
+
+        if (mm_sit_message_parse_carrier_sim_info (message, &info, NULL) &&
+            self->priv->carrier_config_imsi &&
+            !g_str_equal (self->priv->carrier_config_imsi, info.imsi))
+            invalidate_carrier_config (self);
+    }
 
     if (message->id == MM_SIT_MESSAGE_SERVING_NETWORK &&
         mm_sit_message_parse_registration (message, &registration, NULL)) {
@@ -56,6 +92,201 @@ sit_indication (MMSitClient              *client,
                     registration.registered ? "yes" : "no");
         update_registration (self, &registration);
     }
+}
+
+static gchar *
+variant_to_hex (GVariant *value)
+{
+    const guint8 *data;
+    gsize         len;
+
+    if (!value)
+        return NULL;
+    data = g_variant_get_fixed_array (value, &len, sizeof (guint8));
+    if (!data || !len)
+        return NULL;
+    return mm_utils_bin2hexstr (data, len);
+}
+
+static void
+carrier_manifest_ready (MMSitClient *client,
+                        GAsyncResult *res,
+                        GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self;
+    CarrierManifestContext     *ctx;
+    MMSitCarrierConfig         *config;
+    MmGdbusModem               *skeleton = NULL;
+    GError                     *error = NULL;
+
+    self = g_task_get_source_object (task);
+    ctx = g_task_get_task_data (task);
+    config = ctx->config;
+    if (!mm_sit_client_set_carrier_manifest_finish (client, res, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    if (!self->priv->carrier_config_imsi ||
+        !g_str_equal (self->priv->carrier_config_imsi, ctx->imsi)) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_RETRY,
+                                 "SIM changed while provisioning Samsung carrier profile");
+        g_object_unref (task);
+        return;
+    }
+
+    self->priv->carrier_config_ready = TRUE;
+    g_object_get (self, MM_IFACE_MODEM_DBUS_SKELETON, &skeleton, NULL);
+    if (skeleton) {
+        g_autofree gchar *fallback_name = NULL;
+
+        if (!config->carrier_name || !config->carrier_name[0])
+            fallback_name = g_strdup_printf ("carrier-%u", config->carrier_id);
+        mm_gdbus_modem_set_carrier_configuration (
+            skeleton, fallback_name ? fallback_name : config->carrier_name);
+        mm_gdbus_modem_set_carrier_configuration_revision (
+            skeleton, config->manifest_sha1);
+        g_object_unref (skeleton);
+    }
+
+    mm_obj_info (self, "selected Samsung carrier profile %s (carrier ID %u)",
+                 (config->carrier_name && config->carrier_name[0]) ? config->carrier_name : "unnamed",
+                 config->carrier_id);
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+setup_carrier_config (MMIfaceModem        *iface,
+                      const gchar         *imsi,
+                      const gchar         *carrier_config_database,
+                      GAsyncReadyCallback  callback,
+                      gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self;
+    g_autoptr(MMBaseSim)        sim = NULL;
+    MMSitCarrierSimInfo         sit_info = { 0 };
+    MMSitCarrierIdentity        identity = { 0 };
+    g_autofree gchar           *gid1 = NULL;
+    g_autofree gchar           *gid2 = NULL;
+    g_autofree gchar           *directory = NULL;
+    CarrierManifestContext     *ctx;
+    MMSitCarrierConfig         *config = NULL;
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    task = g_task_new (self, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    g_object_get (self, MM_IFACE_MODEM_SIM, &sim, NULL);
+    identity.imsi = imsi;
+    if (sim) {
+        GVariant *gid;
+
+        identity.iccid = mm_gdbus_sim_get_sim_identifier (MM_GDBUS_SIM (sim));
+        identity.mccmnc = mm_gdbus_sim_get_operator_identifier (MM_GDBUS_SIM (sim));
+        identity.spn = mm_gdbus_sim_get_operator_name (MM_GDBUS_SIM (sim));
+        gid = mm_gdbus_sim_get_gid1 (MM_GDBUS_SIM (sim));
+        gid1 = variant_to_hex (gid);
+        gid = mm_gdbus_sim_get_gid2 (MM_GDBUS_SIM (sim));
+        gid2 = variant_to_hex (gid);
+        identity.gid1 = gid1;
+        identity.gid2 = gid2;
+    }
+
+    if (mm_sit_client_get_carrier_sim_info (client, &sit_info) &&
+        g_str_equal (sit_info.imsi, imsi) && !identity.iccid)
+        identity.iccid = sit_info.iccid;
+
+    if (!mm_sit_carrier_config_resolve (carrier_config_database, &identity, &config, &error)) {
+        invalidate_carrier_config (self);
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    g_free (self->priv->carrier_config_imsi);
+    self->priv->carrier_config_imsi = g_strdup (imsi);
+    directory = g_path_get_dirname (carrier_config_database);
+    ctx = g_new0 (CarrierManifestContext, 1);
+    ctx->config = config;
+    ctx->imsi = g_strdup (imsi);
+    g_task_set_task_data (task, ctx, (GDestroyNotify) carrier_manifest_context_free);
+    mm_sit_client_set_carrier_manifest (client,
+                                        directory,
+                                        config->manifest_sha1_bytes,
+                                        NULL,
+                                        (GAsyncReadyCallback) carrier_manifest_ready,
+                                        task);
+}
+
+static gboolean
+setup_carrier_config_finish (MMIfaceModem  *self,
+                             GAsyncResult  *res,
+                             GError       **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+void
+mm_broadband_modem_samsung_sit_ensure_carrier_config (MMBroadbandModemSamsungSit *self,
+                                                       GAsyncReadyCallback          callback,
+                                                       gpointer                     user_data)
+{
+    g_autoptr(MMBaseSim) sim = NULL;
+    g_autofree gchar    *database = NULL;
+    MMSitCarrierSimInfo  sit_info = { 0 };
+    const gchar         *imsi = NULL;
+    GTask               *task;
+
+    g_return_if_fail (MM_IS_BROADBAND_MODEM_SAMSUNG_SIT (self));
+
+    g_object_get (self,
+                  MM_IFACE_MODEM_SIM, &sim,
+                  MM_IFACE_MODEM_CARRIER_CONFIG_MAPPING, &database,
+                  NULL);
+    if (sim)
+        imsi = mm_gdbus_sim_get_imsi (MM_GDBUS_SIM (sim));
+    if (!imsi && self->priv->client &&
+        mm_sit_client_get_carrier_sim_info (self->priv->client, &sit_info))
+        imsi = sit_info.imsi;
+
+    if (self->priv->carrier_config_ready && imsi &&
+        self->priv->carrier_config_imsi &&
+        g_str_equal (self->priv->carrier_config_imsi, imsi)) {
+        task = g_task_new (self, NULL, callback, user_data);
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+    if (self->priv->carrier_config_ready)
+        invalidate_carrier_config (self);
+
+    if (!database || !database[0] || !imsi || !imsi[0]) {
+        task = g_task_new (self, NULL, callback, user_data);
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_NOT_FOUND,
+                                 "Samsung carrier configuration requires a database and SIM identity");
+        g_object_unref (task);
+        return;
+    }
+
+    setup_carrier_config (MM_IFACE_MODEM (self), imsi, database, callback, user_data);
+}
+
+gboolean
+mm_broadband_modem_samsung_sit_ensure_carrier_config_finish (MMBroadbandModemSamsungSit  *self,
+                                                              GAsyncResult                 *res,
+                                                              GError                      **error)
+{
+    g_return_val_if_fail (MM_IS_BROADBAND_MODEM_SAMSUNG_SIT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
 }
 
 MMSitClient *
@@ -391,6 +622,8 @@ iface_modem_init (MMIfaceModemInterface *iface)
     iface->modem_power_down_finish = modem_set_power_finish;
     iface->create_bearer = create_bearer;
     iface->create_bearer_finish = create_bearer_finish;
+    iface->setup_carrier_config = setup_carrier_config;
+    iface->setup_carrier_config_finish = setup_carrier_config_finish;
 }
 
 static void
@@ -418,7 +651,8 @@ mm_broadband_modem_samsung_sit_new (const gchar  *device,
                                     const gchar **drivers,
                                     const gchar  *plugin,
                                     guint16       vendor_id,
-                                    guint16       product_id)
+                                    guint16       product_id,
+                                    const gchar  *carrier_config_database)
 {
     return g_object_new (MM_TYPE_BROADBAND_MODEM_SAMSUNG_SIT,
                          MM_BASE_MODEM_DEVICE, device,
@@ -433,6 +667,7 @@ mm_broadband_modem_samsung_sit_new (const gchar  *device,
                          MM_IFACE_MODEM_3GPP_PS_NETWORK_SUPPORTED, TRUE,
                          MM_IFACE_MODEM_3GPP_EPS_NETWORK_SUPPORTED, TRUE,
                          MM_IFACE_MODEM_3GPP_5GS_NETWORK_SUPPORTED, TRUE,
+                         MM_IFACE_MODEM_CARRIER_CONFIG_MAPPING, carrier_config_database,
                          NULL);
 }
 
@@ -451,6 +686,7 @@ finalize (GObject *object)
     MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (object);
 
     g_free (self->priv->operator_code);
+    g_free (self->priv->carrier_config_imsi);
     G_OBJECT_CLASS (mm_broadband_modem_samsung_sit_parent_class)->finalize (object);
 }
 

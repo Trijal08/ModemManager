@@ -355,6 +355,9 @@ enable_gtk_doc = get_option('gtk_doc')
 
 enable_plugins = not get_option('auto_features').disabled()
 
+# Samsung's SIT userspace selects carrier manifests from the vendor cfg.db.
+sqlite3_dep = dependency('sqlite3', required: get_option('plugin_samsung_sit'))
+
 plugins_shared_reqs = {
   'fibocom': true,
   'foxconn': enable_mbim,
@@ -410,7 +413,7 @@ plugins_options_reqs = {
   'quectel': {'available': true, 'shared': ['quectel']},
   'rolling': {'available': true, 'shared': ['fibocom', 'mtk']},
   'samsung': {'available': true, 'shared': ['icera']},
-  'samsung-sit': {'available': true, 'shared': []},
+  'samsung-sit': {'available': sqlite3_dep.found(), 'shared': []},
   'sierra-legacy': {'available': true, 'shared': ['icera', 'sierra']},
   'sierra': {'available': true, 'shared': ['xmm']},
   'simtech': {'available': true, 'shared': []},

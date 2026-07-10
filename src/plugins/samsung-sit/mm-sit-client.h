@@ -35,6 +35,8 @@ gboolean mm_sit_client_open    (MMSitClient  *self,
                                 GError      **error);
 void     mm_sit_client_close   (MMSitClient  *self);
 gboolean mm_sit_client_is_open (MMSitClient  *self);
+gboolean mm_sit_client_get_carrier_sim_info (MMSitClient         *self,
+                                             MMSitCarrierSimInfo *out_info);
 
 void          mm_sit_client_command        (MMSitClient        *self,
                                             GByteArray         *request,
@@ -88,6 +90,16 @@ void     mm_sit_client_set_indication_filter        (MMSitClient        *self,
 gboolean mm_sit_client_set_indication_filter_finish (MMSitClient        *self,
                                                      GAsyncResult       *res,
                                                      GError            **error);
+
+void     mm_sit_client_set_carrier_manifest        (MMSitClient        *self,
+                                                    const gchar        *directory,
+                                                    const guint8        sha1[MM_SIT_SHA1_LENGTH],
+                                                    GCancellable       *cancellable,
+                                                    GAsyncReadyCallback callback,
+                                                    gpointer            user_data);
+gboolean mm_sit_client_set_carrier_manifest_finish (MMSitClient        *self,
+                                                    GAsyncResult       *res,
+                                                    GError            **error);
 
 void     mm_sit_client_connect_data        (MMSitClient        *self,
                                             const gchar        *apn,

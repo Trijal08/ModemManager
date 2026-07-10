@@ -49,12 +49,13 @@ if enable_tests and plugins_options['samsung-sit']
     'test-samsung-sit-protocol',
     sources: files(
       'samsung-sit/mm-sit-protocol.c',
+      'samsung-sit/mm-sit-carrier-config.c',
       'samsung-sit/mm-port-serial-sit.c',
       'samsung-sit/mm-sit-client.c',
       'samsung-sit/tests/test-sit-protocol.c',
     ),
     include_directories: [top_inc, src_inc, include_directories('samsung-sit')],
-    dependencies: [libhelpers_dep, libport_dep],
+    dependencies: [libhelpers_dep, libport_dep, sqlite3_dep],
   )
   test('samsung-sit-protocol', samsung_sit_protocol_test)
 endif
@@ -965,6 +966,7 @@ if plugins_options['samsung-sit']
     'samsung-sit/mm-broadband-modem-samsung-sit.c',
     'samsung-sit/mm-port-serial-sit.c',
     'samsung-sit/mm-plugin-samsung-sit.c',
+    'samsung-sit/mm-sit-carrier-config.c',
     'samsung-sit/mm-sit-client.c',
     'samsung-sit/mm-sit-protocol.c',
   )
@@ -977,6 +979,13 @@ if plugins_options['samsung-sit']
       'c_args': '-DMM_MODULE_NAME="samsung-sit"',
     },
   }}
+
+  # The common plugin build loop consumes one dependency list for all enabled
+  # modules. With --as-needed, SQLite is retained only by samsung-sit.
+  plugins_deps += sqlite3_dep
+  if enable_builtin_plugins
+    deps += sqlite3_dep
+  endif
 endif
 
 # plugin: sierra (legacy)

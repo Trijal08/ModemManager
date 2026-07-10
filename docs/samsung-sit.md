@@ -15,8 +15,9 @@ The control device is normally `/dev/wwan0sit0`; the legacy downstream name
   sequences, with registration/setup retries;
 - IPv4 address, DNS and MTU decoding, data-call deactivation and asynchronous
   data-call-list handling;
-- carrier-manifest, device-information, capability and indication-filter
-  request builders;
+- automatic Samsung carrier-profile selection from `cfg.db`, including the
+  captured `0x4602` SIM identity indication and `0x4600` manifest request;
+- device-information, capability and indication-filter request builders;
 - a native ModemManager bearer exposing static IPv4 configuration to clients;
 - `mm-sit-tool` for status, initialization, radio, connect, disconnect,
   monitoring and explicit raw requests.
@@ -37,10 +38,39 @@ DESTDIR="$pkgdir" meson install -C build
 ```
 
 This installs the `samsung-sit` ModemManager plugin and `mm-sit-tool`. The
-normal ModemManager dependencies (GLib/GIO and libgudev when udev is enabled)
-are sufficient; no QMI or MBIM library is used by SIT. A local reproducible
-development image used for this work is `modemmanager-dev:noble-20260710`
-(Meson 1.3.2, GLib 2.80).
+normal ModemManager dependencies plus SQLite 3 are required; no QMI or MBIM
+library is used by SIT. A local reproducible development image used for this
+work is `modemmanager-dev:noble-20260710` (Meson 1.3.2, GLib 2.80).
+
+## Carrier-profile selection
+
+The plugin uses ModemManager's existing carrier-configuration lifecycle: SIM
+properties are loaded first, then the SIT backend opens the Samsung `cfg.db`
+read-only, resolves the best carrier ID and sends the selected 20-byte manifest
+SHA-1 in `0x4600`. Bearer connection checks that this completed successfully,
+so a missing database or manifest produces a clear error instead of eventually
+failing PDP setup with cause 133.
+
+The default database is
+`/vendor/firmware/carrierconfig/cfg.db`. A deployment using another mount point
+may set the udev property `ID_MM_SIT_CARRIER_CONFIG_DIRECTORY` on the SIT port;
+the directory must contain `cfg.db`, `manifests/` and `confseqs/`, and the same
+path must be visible to the RFS server.
+
+Selection follows the vendor RIL ordering recovered from the local artifact:
+an available privilege-access-rule override, then MCC/MNC plus IMSI with ranked
+SPN/GID1/GID2 combinations, ICCID/IIN fallback, and finally the database's
+global fallback. Manifest identifiers are validated as SHA-1 values and the
+selected manifest file must exist before `0x4600` is sent. The selected symbolic
+name and hash are exported as ModemManager's carrier configuration and revision.
+
+The CP's unsolicited `0x4602` supplies ICCID and IMSI and is cached as a
+fallback. The normal s5300 AT port supplies MCC/MNC, SPN and GID1/GID2 when
+available, which is required to distinguish MVNO rows that share a home
+network. ModemManager does not currently expose UICC carrier-privilege access
+rules, so the resolver implements that highest-priority vendor path but the
+live backend cannot populate it yet. Neither subscriber identifier is written
+to the log.
 
 The kernel's WWAN `type` attribute identifies the SIT port automatically. The
 plugin is restricted to the `s5300-modem` driver and expects at least one
@@ -106,8 +136,8 @@ Unlike the smoke program it uses GLib and the normal target userspace, so it is
 not intended for the tiny freestanding initramfs phase.
 
 Current known limits are IPv4-only data-call decoding, automatic rather than
-manual network selection, and partial SIM decoding. Generic AT support remains
-available for identity and other standard modem features when the s5300 AT
-WWAN port is present. Protocol and socket-backed state-machine tests run
-without hardware; final service ordering, carrier files and live data transfer
-must be validated on the phone.
+manual network selection, and partial SIT-native SIM decoding. Generic AT
+support supplies the remaining identity and SIM-file fields when the s5300 AT
+WWAN port is present. Protocol, resolver and socket-backed state-machine tests
+run without hardware; final service ordering, carrier files and live data
+transfer must be validated on the phone.

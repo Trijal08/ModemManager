@@ -39,8 +39,9 @@ typedef enum {
     MM_SIT_MESSAGE_SET_INDICATION_FILTER       = 0x0928,
     MM_SIT_MESSAGE_SET_MODEM_CONFIG            = 0x093f,
     MM_SIT_MESSAGE_DEVICE_CAPABILITIES         = 0x0949,
-    MM_SIT_MESSAGE_OEM_CONFIG                  = 0x4605,
     MM_SIT_MESSAGE_CARRIER_CONFIG_MANIFEST     = 0x4600,
+    MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO     = 0x4602,
+    MM_SIT_MESSAGE_OEM_CONFIG                  = 0x4605,
 } MMSitMessageId;
 
 typedef enum {
@@ -85,6 +86,11 @@ typedef struct {
     gchar    dns2[16];
     guint16  mtu;
 } MMSitDataCall;
+
+typedef struct {
+    gchar iccid[21];
+    gchar imsi[16];
+} MMSitCarrierSimInfo;
 
 gboolean     mm_sit_frame_peek_length                 (const guint8          *data,
                                                        gsize                  data_len,
@@ -148,6 +154,9 @@ gboolean mm_sit_message_parse_registration            (const MMSitMessage    *me
                                                        GError               **error);
 gboolean mm_sit_message_parse_data_call               (const MMSitMessage    *message,
                                                        MMSitDataCall         *out_call,
+                                                       GError               **error);
+gboolean mm_sit_message_parse_carrier_sim_info        (const MMSitMessage    *message,
+                                                       MMSitCarrierSimInfo   *out_info,
                                                        GError               **error);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (MMSitMessage, mm_sit_message_free)

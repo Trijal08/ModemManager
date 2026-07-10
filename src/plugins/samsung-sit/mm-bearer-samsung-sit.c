@@ -76,6 +76,38 @@ connect_ready (MMSitClient *client,
 }
 
 static void
+carrier_config_ready (MMBroadbandModemSamsungSit *modem,
+                      GAsyncResult                *res,
+                      GTask                       *task)
+{
+    MMBaseBearer       *bearer;
+    MMBearerProperties *properties;
+    MMSitClient        *client;
+    const gchar        *apn;
+    GError             *error = NULL;
+
+    if (!mm_broadband_modem_samsung_sit_ensure_carrier_config_finish (modem, res, &error)) {
+        g_prefix_error (&error, "Could not provision Samsung carrier profile: ");
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    client = mm_broadband_modem_samsung_sit_peek_client (modem, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    bearer = g_task_get_source_object (task);
+    properties = mm_base_bearer_peek_config (bearer);
+    apn = mm_bearer_properties_get_apn (properties);
+    mm_sit_client_connect_data (client, apn, g_task_get_cancellable (task),
+                                (GAsyncReadyCallback) connect_ready, task);
+}
+
+static void
 connect (MMBaseBearer        *bearer,
          GCancellable        *cancellable,
          GAsyncReadyCallback  callback,
@@ -84,9 +116,7 @@ connect (MMBaseBearer        *bearer,
     MMBearerSamsungSit              *self = MM_BEARER_SAMSUNG_SIT (bearer);
     g_autoptr(MMBroadbandModemSamsungSit) modem = NULL;
     MMBearerProperties              *properties;
-    MMSitClient                     *client;
     const gchar                     *apn;
-    GError                          *error = NULL;
     GTask                           *task;
 
     task = g_task_new (bearer, cancellable, callback, user_data);
@@ -99,13 +129,6 @@ connect (MMBaseBearer        *bearer,
 
     g_object_get (bearer, MM_BASE_BEARER_MODEM, &modem, NULL);
     g_assert (modem);
-    client = mm_broadband_modem_samsung_sit_peek_client (modem, &error);
-    if (!client) {
-        g_task_return_error (task, error);
-        g_object_unref (task);
-        return;
-    }
-
     properties = mm_base_bearer_peek_config (bearer);
     apn = mm_bearer_properties_get_apn (properties);
     if (!apn || !apn[0]) {
@@ -117,8 +140,8 @@ connect (MMBaseBearer        *bearer,
 
     /* Keep the modem alive until the asynchronous setup sequence completes. */
     g_task_set_task_data (task, g_object_ref (modem), g_object_unref);
-    mm_sit_client_connect_data (client, apn, cancellable,
-                                (GAsyncReadyCallback) connect_ready, task);
+    mm_broadband_modem_samsung_sit_ensure_carrier_config (
+        modem, (GAsyncReadyCallback) carrier_config_ready, task);
 }
 
 static gboolean

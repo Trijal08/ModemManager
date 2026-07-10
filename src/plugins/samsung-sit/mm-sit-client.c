@@ -14,9 +14,11 @@ enum {
 static guint signals[SIGNAL_LAST];
 
 struct _MMSitClientPrivate {
-    gchar           *device;
-    MMPortSerialSit *port;
-    guint            unsolicited_handler_id;
+    gchar               *device;
+    MMPortSerialSit     *port;
+    guint                unsolicited_handler_id;
+    gboolean             has_carrier_sim_info;
+    MMSitCarrierSimInfo  carrier_sim_info;
 };
 
 G_DEFINE_TYPE (MMSitClient, mm_sit_client, G_TYPE_OBJECT)
@@ -46,6 +48,14 @@ port_indication (MMPortSerialSit    *port,
                  const MMSitMessage *message,
                  MMSitClient        *self)
 {
+    if (message->id == MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO) {
+        MMSitCarrierSimInfo info;
+
+        if (mm_sit_message_parse_carrier_sim_info (message, &info, NULL)) {
+            self->priv->carrier_sim_info = info;
+            self->priv->has_carrier_sim_info = TRUE;
+        }
+    }
     g_signal_emit (self, signals[SIGNAL_INDICATION], 0, message);
 }
 
@@ -108,6 +118,8 @@ mm_sit_client_close (MMSitClient *self)
 {
     g_return_if_fail (MM_IS_SIT_CLIENT (self));
 
+    self->priv->has_carrier_sim_info = FALSE;
+    memset (&self->priv->carrier_sim_info, 0, sizeof (self->priv->carrier_sim_info));
     if (!mm_port_serial_is_open (MM_PORT_SERIAL (self->priv->port)))
         return;
     if (self->priv->unsolicited_handler_id) {
@@ -123,6 +135,19 @@ mm_sit_client_is_open (MMSitClient *self)
 {
     g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
     return mm_port_serial_is_open (MM_PORT_SERIAL (self->priv->port));
+}
+
+gboolean
+mm_sit_client_get_carrier_sim_info (MMSitClient         *self,
+                                    MMSitCarrierSimInfo *out_info)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    g_return_val_if_fail (out_info != NULL, FALSE);
+
+    if (!self->priv->has_carrier_sim_info)
+        return FALSE;
+    *out_info = self->priv->carrier_sim_info;
+    return TRUE;
 }
 
 static void
@@ -509,6 +534,35 @@ gboolean
 mm_sit_client_set_indication_filter_finish (MMSitClient  *self,
                                             GAsyncResult *res,
                                             GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+void
+mm_sit_client_set_carrier_manifest (MMSitClient         *self,
+                                    const gchar         *directory,
+                                    const guint8         sha1[MM_SIT_SHA1_LENGTH],
+                                    GCancellable        *cancellable,
+                                    GAsyncReadyCallback  callback,
+                                    gpointer             user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GError               *error = NULL;
+
+    request = mm_sit_request_new_carrier_manifest (next_token (self), directory, sha1, &error);
+    if (!request) {
+        g_task_report_error (self, callback, user_data,
+                             mm_sit_client_set_carrier_manifest, error);
+        return;
+    }
+    run_checked_command (self, request, 10, cancellable, callback, user_data);
+}
+
+gboolean
+mm_sit_client_set_carrier_manifest_finish (MMSitClient  *self,
+                                           GAsyncResult *res,
+                                           GError      **error)
 {
     g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
     return g_task_propagate_boolean (G_TASK (res), error);
