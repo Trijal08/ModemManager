@@ -87,9 +87,18 @@ void     mm_sit_client_get_operator        (MMSitClient        *self,
                                             GAsyncReadyCallback callback,
                                             gpointer            user_data);
 gboolean mm_sit_client_get_operator_finish (MMSitClient        *self,
-                                            GAsyncResult       *res,
-                                            MMSitOperator      *out_operator,
-                                            GError            **error);
+                                             GAsyncResult       *res,
+                                             MMSitOperator      *out_operator,
+                                             GError            **error);
+
+void     mm_sit_client_get_signal        (MMSitClient        *self,
+                                          GCancellable       *cancellable,
+                                          GAsyncReadyCallback callback,
+                                          gpointer            user_data);
+gboolean mm_sit_client_get_signal_finish (MMSitClient        *self,
+                                          GAsyncResult       *res,
+                                          MMSitSignal        *out_signal,
+                                          GError            **error);
 
 void     mm_sit_client_set_indication_filter        (MMSitClient        *self,
                                                      guint32             filter,

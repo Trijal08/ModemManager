@@ -10,12 +10,15 @@
 #include "mm-broadband-modem-samsung-sit.h"
 #include "mm-iface-modem.h"
 #include "mm-iface-modem-3gpp.h"
+#include "mm-iface-modem-signal.h"
 #include "mm-log-object.h"
+#include "mm-modem-helpers.h"
 #include "mm-sit-carrier-config.h"
 #include "mm-utils.h"
 
 static void iface_modem_init      (MMIfaceModemInterface     *iface);
 static void iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface);
+static void iface_modem_signal_init (MMIfaceModemSignalInterface *iface);
 
 struct _MMBroadbandModemSamsungSitPrivate {
     MMSitClient *client;
@@ -35,7 +38,73 @@ G_DEFINE_TYPE_EXTENDED (MMBroadbandModemSamsungSit,
                         MM_TYPE_BROADBAND_MODEM,
                         0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
-                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP, iface_modem_3gpp_init))
+                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP, iface_modem_3gpp_init)
+                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_SIGNAL, iface_modem_signal_init))
+
+static gboolean
+sit_signal_get_lte_rssi (const MMSitSignal *signal,
+                         gdouble           *out_rssi)
+{
+    if (!signal->has_lte || signal->lte_signal_strength < 0 ||
+        signal->lte_signal_strength > 31)
+        return FALSE;
+
+    *out_rssi = -113.0 + (2.0 * signal->lte_signal_strength);
+    return TRUE;
+}
+
+static gboolean
+sit_signal_get_lte_rsrp (const MMSitSignal *signal,
+                         gdouble           *out_rsrp)
+{
+    /* Android's SIT/RIL ABI carries LTE RSRP as a positive dBm magnitude. */
+    if (!signal->has_lte || signal->lte_rsrp < 44 || signal->lte_rsrp > 140)
+        return FALSE;
+
+    *out_rsrp = -(gdouble) signal->lte_rsrp;
+    return TRUE;
+}
+
+static MMSignal *
+sit_signal_build_lte (const MMSitSignal *signal)
+{
+    g_autoptr(MMSignal) result = NULL;
+    gdouble             value;
+
+    if (!signal->has_lte)
+        return NULL;
+
+    result = mm_signal_new ();
+    if (sit_signal_get_lte_rssi (signal, &value))
+        mm_signal_set_rssi (result, value);
+    if (sit_signal_get_lte_rsrp (signal, &value))
+        mm_signal_set_rsrp (result, value);
+    /* RSRQ is also encoded as a positive dB magnitude in the Android ABI. */
+    if (signal->lte_rsrq >= 3 && signal->lte_rsrq <= 34)
+        mm_signal_set_rsrq (result, -(gdouble) signal->lte_rsrq);
+    /* RSSNR is signed and expressed in tenths of a dB. */
+    if (signal->lte_rssnr >= -200 && signal->lte_rssnr <= 300)
+        mm_signal_set_snr (result, signal->lte_rssnr / 10.0);
+
+    return g_steal_pointer (&result);
+}
+
+static gboolean
+sit_signal_get_quality (const MMSitSignal *signal,
+                        guint             *out_quality)
+{
+    gdouble value;
+
+    if (sit_signal_get_lte_rsrp (signal, &value)) {
+        *out_quality = MM_RSRP_TO_QUALITY (value);
+        return TRUE;
+    }
+    if (sit_signal_get_lte_rssi (signal, &value)) {
+        *out_quality = MM_RSSI_TO_QUALITY (value);
+        return TRUE;
+    }
+    return FALSE;
+}
 
 static void
 update_registration (MMBroadbandModemSamsungSit *self,
@@ -139,6 +208,24 @@ sit_indication (MMSitClient              *client,
         mm_obj_dbg (self, "SIT serving network changed (operator: %s)",
                     operator_info.plmn[0] ? operator_info.plmn : "unknown");
         update_operator (self, &operator_info);
+    }
+
+    if (message->id == MM_SIT_MESSAGE_SIGNAL_STRENGTH_CHANGED) {
+        MMSitSignal        signal;
+        g_autoptr(MMSignal) lte = NULL;
+        guint              quality;
+
+        if (!mm_sit_message_parse_signal (message, &signal, NULL))
+            return;
+
+        mm_obj_dbg (self, "SIT signal changed (schema: V%u, RAT mask: 0x%04x)",
+                    signal.version, signal.rat_mask);
+        lte = sit_signal_build_lte (&signal);
+        if (lte)
+            mm_iface_modem_signal_update (MM_IFACE_MODEM_SIGNAL (self),
+                                          NULL, NULL, NULL, NULL, lte, NULL);
+        if (sit_signal_get_quality (&signal, &quality))
+            mm_iface_modem_update_signal_quality (MM_IFACE_MODEM (self), quality);
     }
 }
 
@@ -374,6 +461,58 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
 
 /*****************************************************************************/
 /* Modem interface */
+
+static guint
+load_signal_quality_finish (MMIfaceModem  *self,
+                            GAsyncResult  *res,
+                            GError       **error)
+{
+    gssize value;
+
+    value = g_task_propagate_int (G_TASK (res), error);
+    return value < 0 ? 0 : value;
+}
+
+static void
+load_signal_quality_ready (MMSitClient *client,
+                           GAsyncResult *res,
+                           GTask        *task)
+{
+    MMSitSignal signal;
+    GError     *error = NULL;
+    guint       quality;
+
+    if (!mm_sit_client_get_signal_finish (client, res, &signal, &error))
+        g_task_return_error (task, error);
+    else if (!sit_signal_get_quality (&signal, &quality))
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_RETRY,
+                                 "SIT response did not contain a usable signal value");
+    else
+        g_task_return_int (task, quality);
+    g_object_unref (task);
+}
+
+static void
+load_signal_quality (MMIfaceModem        *iface,
+                     GAsyncReadyCallback callback,
+                     gpointer            user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_signal (client, NULL,
+                              (GAsyncReadyCallback) load_signal_quality_ready,
+                              task);
+}
 
 static MMModemPowerState
 load_power_state_finish (MMIfaceModem  *self,
@@ -783,6 +922,8 @@ iface_modem_init (MMIfaceModemInterface *iface)
 {
     iface->load_power_state = load_power_state;
     iface->load_power_state_finish = load_power_state_finish;
+    iface->load_signal_quality = load_signal_quality;
+    iface->load_signal_quality_finish = load_signal_quality_finish;
     iface->modem_power_up = modem_power_up;
     iface->modem_power_up_finish = modem_set_power_finish;
     iface->modem_power_down = modem_power_down;
@@ -812,6 +953,111 @@ iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface)
     iface->disable_unsolicited_events_finish = clear_unsolicited_events_finish;
     iface->cleanup_unsolicited_events = clear_unsolicited_events;
     iface->cleanup_unsolicited_events_finish = clear_unsolicited_events_finish;
+}
+
+/*****************************************************************************/
+/* Signal interface */
+
+static gboolean
+signal_check_support_finish (MMIfaceModemSignal  *self,
+                             GAsyncResult        *res,
+                             GError             **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+signal_check_support (MMIfaceModemSignal  *iface,
+                      GAsyncReadyCallback  callback,
+                      gpointer             user_data)
+{
+    GTask *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static gboolean
+signal_load_values_finish (MMIfaceModemSignal  *self,
+                           GAsyncResult        *res,
+                           MMSignal           **cdma,
+                           MMSignal           **evdo,
+                           MMSignal           **gsm,
+                           MMSignal           **umts,
+                           MMSignal           **lte,
+                           MMSignal           **nr5g,
+                           GError             **error)
+{
+    MMSitSignal *signal;
+
+    signal = g_task_propagate_pointer (G_TASK (res), error);
+    if (!signal)
+        return FALSE;
+
+    if (cdma)
+        *cdma = NULL;
+    if (evdo)
+        *evdo = NULL;
+    if (gsm)
+        *gsm = NULL;
+    if (umts)
+        *umts = NULL;
+    if (lte)
+        *lte = sit_signal_build_lte (signal);
+    if (nr5g)
+        *nr5g = NULL;
+    g_free (signal);
+    return TRUE;
+}
+
+static void
+signal_load_values_ready (MMSitClient *client,
+                          GAsyncResult *res,
+                          GTask        *task)
+{
+    MMSitSignal *signal;
+    GError      *error = NULL;
+
+    signal = g_new0 (MMSitSignal, 1);
+    if (!mm_sit_client_get_signal_finish (client, res, signal, &error)) {
+        g_free (signal);
+        g_task_return_error (task, error);
+    } else
+        g_task_return_pointer (task, signal, g_free);
+    g_object_unref (task);
+}
+
+static void
+signal_load_values (MMIfaceModemSignal  *iface,
+                    GCancellable        *cancellable,
+                    GAsyncReadyCallback  callback,
+                    gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, cancellable, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_signal (client, cancellable,
+                              (GAsyncReadyCallback) signal_load_values_ready,
+                              task);
+}
+
+static void
+iface_modem_signal_init (MMIfaceModemSignalInterface *iface)
+{
+    iface->check_support = signal_check_support;
+    iface->check_support_finish = signal_check_support_finish;
+    iface->load_values = signal_load_values;
+    iface->load_values_finish = signal_load_values_finish;
 }
 
 MMBroadbandModemSamsungSit *

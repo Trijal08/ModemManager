@@ -727,6 +727,133 @@ mm_sit_message_parse_operator (const MMSitMessage *message,
     return TRUE;
 }
 
+gboolean
+mm_sit_message_parse_signal (const MMSitMessage *message,
+                             MMSitSignal        *out_signal,
+                             GError            **error)
+{
+    const guint8 *data;
+    const guint8 *values;
+    gsize         len;
+    gsize         mask_offset;
+    gsize         values_len;
+
+    g_return_val_if_fail (out_signal != NULL, FALSE);
+
+    if (!message || (message->id != MM_SIT_MESSAGE_GET_SIGNAL_STRENGTH &&
+                     message->id != MM_SIT_MESSAGE_SIGNAL_STRENGTH_CHANGED)) {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                             "Message does not carry supported SIT signal data");
+        return FALSE;
+    }
+
+    if (message->id == MM_SIT_MESSAGE_GET_SIGNAL_STRENGTH) {
+        if (message->type != MM_SIT_MESSAGE_TYPE_RESPONSE ||
+            !message->has_status || message->status != 0) {
+            g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                                 "SIT signal-strength query failed");
+            return FALSE;
+        }
+        mask_offset = 12;
+    } else {
+        if (message->type != MM_SIT_MESSAGE_TYPE_INDICATION) {
+            g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                                 "SIT signal-strength indication has an invalid type");
+            return FALSE;
+        }
+        mask_offset = 8;
+    }
+
+    data = mm_sit_message_get_data (message, &len);
+    if (len < mask_offset + 2) {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                             "SIT signal-strength message is truncated");
+        return FALSE;
+    }
+
+    values = &data[mask_offset + 2];
+    values_len = len - mask_offset - 2;
+    memset (out_signal, 0, sizeof (*out_signal));
+    out_signal->rat_mask = read_le16 (&data[mask_offset]);
+    out_signal->gsm_timing_advance = G_MAXINT32;
+    out_signal->lte_cqi_table_index = G_MAXINT32;
+    out_signal->nr5g_timing_advance = G_MAXINT32;
+
+#define SIGNAL_VALUE(index) ((gint32) read_le32 (&values[(index) * 4]))
+
+    if (values_len == 60) {
+        out_signal->version = 1;
+        if (out_signal->rat_mask & (1 << 0)) {
+            out_signal->has_gsm = TRUE;
+            out_signal->gsm_signal_strength = SIGNAL_VALUE (0);
+            out_signal->gsm_bit_error_rate = SIGNAL_VALUE (1);
+            out_signal->has_wcdma = TRUE;
+            out_signal->wcdma_signal_strength = SIGNAL_VALUE (0);
+            out_signal->wcdma_bit_error_rate = SIGNAL_VALUE (1);
+        }
+        if (out_signal->rat_mask & (1 << 3)) {
+            out_signal->has_lte = TRUE;
+            out_signal->lte_signal_strength = SIGNAL_VALUE (7);
+            out_signal->lte_rsrp = SIGNAL_VALUE (8);
+            out_signal->lte_rsrq = SIGNAL_VALUE (9);
+            out_signal->lte_rssnr = SIGNAL_VALUE (10);
+            out_signal->lte_cqi = SIGNAL_VALUE (11);
+            out_signal->lte_timing_advance = SIGNAL_VALUE (12);
+        }
+    } else if (values_len == 108 || values_len == 196 || values_len == 200) {
+        out_signal->version = values_len == 108 ? 2 : values_len == 196 ? 4 : 5;
+        if (out_signal->rat_mask & (1 << 0)) {
+            out_signal->has_gsm = TRUE;
+            out_signal->gsm_signal_strength = SIGNAL_VALUE (0);
+            out_signal->gsm_bit_error_rate = SIGNAL_VALUE (1);
+            out_signal->gsm_timing_advance = SIGNAL_VALUE (2);
+        }
+        if (out_signal->rat_mask & (1 << 1)) {
+            out_signal->has_wcdma = TRUE;
+            out_signal->wcdma_signal_strength = SIGNAL_VALUE (3);
+            out_signal->wcdma_bit_error_rate = SIGNAL_VALUE (4);
+            out_signal->wcdma_rscp = SIGNAL_VALUE (5);
+            out_signal->wcdma_ecno = SIGNAL_VALUE (6);
+        }
+        if (out_signal->rat_mask & (1 << 2)) {
+            out_signal->has_lte = TRUE;
+            out_signal->lte_signal_strength = SIGNAL_VALUE (15);
+            out_signal->lte_rsrp = SIGNAL_VALUE (16);
+            out_signal->lte_rsrq = SIGNAL_VALUE (17);
+            out_signal->lte_rssnr = SIGNAL_VALUE (18);
+            if (values_len == 108) {
+                out_signal->lte_cqi = SIGNAL_VALUE (19);
+                out_signal->lte_timing_advance = SIGNAL_VALUE (20);
+            } else {
+                out_signal->lte_cqi_table_index = SIGNAL_VALUE (19);
+                out_signal->lte_cqi = SIGNAL_VALUE (20);
+                out_signal->lte_timing_advance = SIGNAL_VALUE (21);
+            }
+        }
+        if (out_signal->rat_mask & (1 << 6)) {
+            guint nr_offset = values_len == 108 ? 21 : 22;
+
+            out_signal->has_nr5g = TRUE;
+            out_signal->nr5g_ss_rsrp = SIGNAL_VALUE (nr_offset + 0);
+            out_signal->nr5g_ss_rsrq = SIGNAL_VALUE (nr_offset + 1);
+            out_signal->nr5g_ss_sinr = SIGNAL_VALUE (nr_offset + 2);
+            out_signal->nr5g_csi_rsrp = SIGNAL_VALUE (nr_offset + 3);
+            out_signal->nr5g_csi_rsrq = SIGNAL_VALUE (nr_offset + 4);
+            out_signal->nr5g_csi_sinr = SIGNAL_VALUE (nr_offset + 5);
+            if (values_len == 200)
+                out_signal->nr5g_timing_advance = SIGNAL_VALUE (49);
+        }
+    } else {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
+                     "Unsupported SIT signal-strength layout (%" G_GSIZE_FORMAT " bytes)",
+                     values_len);
+        return FALSE;
+    }
+
+#undef SIGNAL_VALUE
+    return TRUE;
+}
+
 static void
 format_ipv4 (gchar        destination[16],
              const guint8 address[4])

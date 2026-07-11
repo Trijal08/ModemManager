@@ -36,6 +36,8 @@ typedef enum {
     MM_SIT_MESSAGE_SET_RADIO_POWER             = 0x0800,
     MM_SIT_MESSAGE_GET_RADIO_POWER             = 0x0801,
     MM_SIT_MESSAGE_RADIO_STATE_CHANGED         = 0x0802,
+    MM_SIT_MESSAGE_GET_SIGNAL_STRENGTH          = 0x0900,
+    MM_SIT_MESSAGE_SIGNAL_STRENGTH_CHANGED      = 0x0906,
     MM_SIT_MESSAGE_DEVICE_INFO                 = 0x0922,
     MM_SIT_MESSAGE_SET_INDICATION_FILTER       = 0x0928,
     MM_SIT_MESSAGE_SET_MODEM_CONFIG            = 0x093f,
@@ -83,6 +85,40 @@ typedef struct {
     gchar    operator_short[33];
     gchar    operator_long[65];
 } MMSitOperator;
+
+typedef struct {
+    guint8   version;
+    guint16  rat_mask;
+
+    gboolean has_gsm;
+    gint32   gsm_signal_strength;
+    gint32   gsm_bit_error_rate;
+    gint32   gsm_timing_advance;
+
+    gboolean has_wcdma;
+    gint32   wcdma_signal_strength;
+    gint32   wcdma_bit_error_rate;
+    gint32   wcdma_rscp;
+    gint32   wcdma_ecno;
+
+    gboolean has_lte;
+    gint32   lte_signal_strength;
+    gint32   lte_rsrp;
+    gint32   lte_rsrq;
+    gint32   lte_rssnr;
+    gint32   lte_cqi_table_index;
+    gint32   lte_cqi;
+    gint32   lte_timing_advance;
+
+    gboolean has_nr5g;
+    gint32   nr5g_ss_rsrp;
+    gint32   nr5g_ss_rsrq;
+    gint32   nr5g_ss_sinr;
+    gint32   nr5g_csi_rsrp;
+    gint32   nr5g_csi_rsrq;
+    gint32   nr5g_csi_sinr;
+    gint32   nr5g_timing_advance;
+} MMSitSignal;
 
 typedef struct {
     guint16  cause;
@@ -161,6 +197,9 @@ gboolean mm_sit_message_parse_registration            (const MMSitMessage    *me
                                                        GError               **error);
 gboolean mm_sit_message_parse_operator                (const MMSitMessage    *message,
                                                        MMSitOperator         *out_operator,
+                                                       GError               **error);
+gboolean mm_sit_message_parse_signal                  (const MMSitMessage    *message,
+                                                       MMSitSignal           *out_signal,
                                                        GError               **error);
 gboolean mm_sit_message_parse_data_call               (const MMSitMessage    *message,
                                                        MMSitDataCall         *out_call,

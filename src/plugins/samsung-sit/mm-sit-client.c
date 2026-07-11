@@ -572,6 +572,61 @@ mm_sit_client_get_operator_finish (MMSitClient   *self,
     return TRUE;
 }
 
+static void
+get_signal_ready (MMSitClient *self,
+                  GAsyncResult *res,
+                  GTask *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    MMSitSignal            *signal;
+    GError                 *error = NULL;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    signal = g_new0 (MMSitSignal, 1);
+    if (response && mm_sit_message_parse_signal (response, signal, &error))
+        g_task_return_pointer (task, signal, g_free);
+    else {
+        g_free (signal);
+        g_task_return_error (task, error);
+    }
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_get_signal (MMSitClient        *self,
+                          GCancellable       *cancellable,
+                          GAsyncReadyCallback callback,
+                          gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_SIGNAL_STRENGTH,
+                                        next_token (self));
+    mm_sit_client_command (self, request, 5, cancellable,
+                           (GAsyncReadyCallback) get_signal_ready, task);
+}
+
+gboolean
+mm_sit_client_get_signal_finish (MMSitClient *self,
+                                 GAsyncResult *res,
+                                 MMSitSignal  *out_signal,
+                                 GError      **error)
+{
+    MMSitSignal *signal;
+
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    g_return_val_if_fail (out_signal != NULL, FALSE);
+
+    signal = g_task_propagate_pointer (G_TASK (res), error);
+    if (!signal)
+        return FALSE;
+    *out_signal = *signal;
+    g_free (signal);
+    return TRUE;
+}
+
 void
 mm_sit_client_set_indication_filter (MMSitClient        *self,
                                      guint32             filter,

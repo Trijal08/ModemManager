@@ -23,6 +23,16 @@ assert_bytes (GByteArray  *actual,
 }
 
 static void
+set_le32 (guint8 *data,
+          guint32 value)
+{
+    data[0] = value & 0xff;
+    data[1] = (value >> 8) & 0xff;
+    data[2] = (value >> 16) & 0xff;
+    data[3] = value >> 24;
+}
+
+static void
 test_parse_header (void)
 {
     static const guint8 raw[] = {
@@ -283,6 +293,112 @@ test_parse_status_and_registration (void)
     g_assert_cmpstr (operator_info.plmn, ==, "26203");
     g_assert_cmpstr (operator_info.operator_short, ==, "o2-de");
     g_assert_cmpstr (operator_info.operator_long, ==, "o2 - de");
+}
+
+static void
+test_parse_signal (void)
+{
+    guint8 response_v5[214] = { 0 };
+    guint8 indication_v5[210] = { 0 };
+    guint8 response_v4[210] = { 0 };
+    guint8 response_v2[122] = { 0 };
+    guint8 response_v1[74] = { 0 };
+    guint8 unsupported[114] = { 0 };
+    g_autoptr(MMSitMessage) message = NULL;
+    g_autoptr(GError)       error = NULL;
+    MMSitSignal             signal;
+
+#define INIT_SIGNAL_FRAME(frame, message_type, message_id) G_STMT_START { \
+    (frame)[0] = (message_type); \
+    (frame)[2] = (message_id) & 0xff; \
+    (frame)[3] = (message_id) >> 8; \
+    (frame)[4] = sizeof (frame) & 0xff; \
+    (frame)[5] = sizeof (frame) >> 8; \
+} G_STMT_END
+
+    INIT_SIGNAL_FRAME (response_v5, MM_SIT_MESSAGE_TYPE_RESPONSE,
+                       MM_SIT_MESSAGE_GET_SIGNAL_STRENGTH);
+    response_v5[12] = 1 << 2;
+    set_le32 (&response_v5[14 + 15 * 4], 27);
+    set_le32 (&response_v5[14 + 16 * 4], 83);
+    set_le32 (&response_v5[14 + 17 * 4], 11);
+    set_le32 (&response_v5[14 + 18 * 4], 10);
+    set_le32 (&response_v5[14 + 19 * 4], 1);
+    set_le32 (&response_v5[14 + 20 * 4], 11);
+    set_le32 (&response_v5[14 + 21 * 4], 2);
+    message = mm_sit_message_parse (response_v5, sizeof (response_v5), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_signal (message, &signal, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (signal.version, ==, 5);
+    g_assert_cmphex (signal.rat_mask, ==, 1 << 2);
+    g_assert_true (signal.has_lte);
+    g_assert_false (signal.has_gsm);
+    g_assert_cmpint (signal.lte_signal_strength, ==, 27);
+    g_assert_cmpint (signal.lte_rsrp, ==, 83);
+    g_assert_cmpint (signal.lte_rsrq, ==, 11);
+    g_assert_cmpint (signal.lte_rssnr, ==, 10);
+    g_assert_cmpint (signal.lte_cqi_table_index, ==, 1);
+    g_assert_cmpint (signal.lte_cqi, ==, 11);
+    g_assert_cmpint (signal.lte_timing_advance, ==, 2);
+
+    INIT_SIGNAL_FRAME (indication_v5, MM_SIT_MESSAGE_TYPE_INDICATION,
+                       MM_SIT_MESSAGE_SIGNAL_STRENGTH_CHANGED);
+    memcpy (&indication_v5[8], &response_v5[12], sizeof (indication_v5) - 8);
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (indication_v5, sizeof (indication_v5), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_signal (message, &signal, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (signal.version, ==, 5);
+    g_assert_cmpint (signal.lte_rsrp, ==, 83);
+
+    INIT_SIGNAL_FRAME (response_v4, MM_SIT_MESSAGE_TYPE_RESPONSE,
+                       MM_SIT_MESSAGE_GET_SIGNAL_STRENGTH);
+    response_v4[12] = 1 << 2;
+    set_le32 (&response_v4[14 + 16 * 4], 95);
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (response_v4, sizeof (response_v4), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_signal (message, &signal, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (signal.version, ==, 4);
+    g_assert_cmpint (signal.lte_rsrp, ==, 95);
+
+    INIT_SIGNAL_FRAME (response_v2, MM_SIT_MESSAGE_TYPE_RESPONSE,
+                       MM_SIT_MESSAGE_GET_SIGNAL_STRENGTH);
+    response_v2[12] = 1 << 2;
+    set_le32 (&response_v2[14 + 16 * 4], 101);
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (response_v2, sizeof (response_v2), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_signal (message, &signal, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (signal.version, ==, 2);
+    g_assert_cmpint (signal.lte_rsrp, ==, 101);
+    g_assert_cmpint (signal.lte_cqi_table_index, ==, G_MAXINT32);
+
+    INIT_SIGNAL_FRAME (response_v1, MM_SIT_MESSAGE_TYPE_RESPONSE,
+                       MM_SIT_MESSAGE_GET_SIGNAL_STRENGTH);
+    response_v1[12] = 1 << 3;
+    set_le32 (&response_v1[14 + 8 * 4], 105);
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (response_v1, sizeof (response_v1), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_signal (message, &signal, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (signal.version, ==, 1);
+    g_assert_cmpint (signal.lte_rsrp, ==, 105);
+
+    INIT_SIGNAL_FRAME (unsupported, MM_SIT_MESSAGE_TYPE_RESPONSE,
+                       MM_SIT_MESSAGE_GET_SIGNAL_STRENGTH);
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (unsupported, sizeof (unsupported), &error);
+    g_assert_no_error (error);
+    g_assert_false (mm_sit_message_parse_signal (message, &signal, &error));
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED);
+
+#undef INIT_SIGNAL_FRAME
 }
 
 static void
@@ -968,6 +1084,7 @@ main (int argc,
     g_test_add_func ("/MM/sit/build/config", test_build_config_requests);
     g_test_add_func ("/MM/sit/decode/radio", test_parse_radio);
     g_test_add_func ("/MM/sit/decode/sim-registration", test_parse_status_and_registration);
+    g_test_add_func ("/MM/sit/decode/signal", test_parse_signal);
     g_test_add_func ("/MM/sit/decode/data-call", test_parse_data_call);
     g_test_add_func ("/MM/sit/decode/carrier-sim-info", test_parse_carrier_sim_info);
     g_test_add_func ("/MM/sit/carrier-config/resolve", test_carrier_config_resolver);
