@@ -37,6 +37,7 @@ typedef enum {
     MM_SIT_MESSAGE_GET_RADIO_POWER             = 0x0801,
     MM_SIT_MESSAGE_RADIO_STATE_CHANGED         = 0x0802,
     MM_SIT_MESSAGE_GET_SIGNAL_STRENGTH          = 0x0900,
+    MM_SIT_MESSAGE_SET_SCREEN_STATE             = 0x0902,
     MM_SIT_MESSAGE_SIGNAL_STRENGTH_CHANGED      = 0x0906,
     MM_SIT_MESSAGE_DEVICE_INFO                 = 0x0922,
     MM_SIT_MESSAGE_SET_INDICATION_FILTER       = 0x0928,
@@ -177,6 +178,8 @@ GByteArray *mm_sit_request_new_get_data_call_list     (guint16                to
 GByteArray *mm_sit_request_new_set_fast_dormancy_info (guint16                token);
 GByteArray *mm_sit_request_new_set_indication_filter  (guint16                token,
                                                        guint32                filter);
+GByteArray *mm_sit_request_new_set_screen_state       (guint16                token,
+                                                       gboolean               screen_on);
 GByteArray *mm_sit_request_new_device_info            (guint16                token,
                                                        const gchar           *model,
                                                        const gchar           *build,

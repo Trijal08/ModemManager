@@ -650,6 +650,28 @@ mm_sit_client_set_indication_filter_finish (MMSitClient  *self,
 }
 
 void
+mm_sit_client_set_screen_state (MMSitClient        *self,
+                                gboolean            screen_on,
+                                GCancellable       *cancellable,
+                                GAsyncReadyCallback callback,
+                                gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+
+    request = mm_sit_request_new_set_screen_state (next_token (self), screen_on);
+    run_checked_command (self, request, 5, cancellable, callback, user_data);
+}
+
+gboolean
+mm_sit_client_set_screen_state_finish (MMSitClient  *self,
+                                       GAsyncResult *res,
+                                       GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+void
 mm_sit_client_set_carrier_manifest (MMSitClient         *self,
                                     const gchar         *directory,
                                     const guint8         sha1[MM_SIT_SHA1_LENGTH],

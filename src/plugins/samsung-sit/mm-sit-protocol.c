@@ -364,6 +364,17 @@ mm_sit_request_new_set_indication_filter (guint16 token,
 }
 
 GByteArray *
+mm_sit_request_new_set_screen_state (guint16  token,
+                                     gboolean screen_on)
+{
+    guint8 body[8] = { 0 };
+
+    write_le32 (&body[4], screen_on ? 1 : 0);
+    return mm_sit_request_new (MM_SIT_MESSAGE_SET_SCREEN_STATE,
+                               token, body, sizeof (body), NULL);
+}
+
+GByteArray *
 mm_sit_request_new_device_info (guint16      token,
                                 const gchar *model,
                                 const gchar *build,

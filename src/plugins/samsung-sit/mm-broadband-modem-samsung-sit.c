@@ -854,17 +854,39 @@ register_in_network (MMIfaceModem3gpp   *self,
 }
 
 static void
+set_screen_state_ready (MMSitClient *client,
+                        GAsyncResult *res,
+                        GTask        *task)
+{
+    GError *error = NULL;
+
+    if (!mm_sit_client_set_screen_state_finish (client, res, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
 set_unsolicited_events_ready (MMSitClient *client,
                               GAsyncResult *res,
                               GTask *task)
 {
     GError *error = NULL;
 
-    if (!mm_sit_client_set_indication_filter_finish (client, res, &error))
+    if (!mm_sit_client_set_indication_filter_finish (client, res, &error)) {
         g_task_return_error (task, error);
-    else
-        g_task_return_boolean (task, TRUE);
-    g_object_unref (task);
+        g_object_unref (task);
+        return;
+    }
+
+    /* Android maps the signal indication-filter bit to SET_SCREEN_STATE=1,
+     * which makes this modem emit a large SIGNAL_STRENGTH_IND every second.
+     * ModemManager has no display-state integration, so keep the modem in its
+     * low-rate screen-off policy and use explicit signal queries instead. */
+    mm_sit_client_set_screen_state (client, FALSE, NULL,
+                                    (GAsyncReadyCallback) set_screen_state_ready,
+                                    task);
 }
 
 static void

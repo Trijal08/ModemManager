@@ -169,6 +169,7 @@ test_build_config_requests (void)
     };
     g_autoptr(GByteArray) info = NULL;
     g_autoptr(GByteArray) manifest = NULL;
+    g_autoptr(GByteArray) screen_state = NULL;
     g_autoptr(GError)     error = NULL;
 
     info = mm_sit_request_new_device_info (2, "Pixel 9a", "TEST.BUILD", &error);
@@ -183,6 +184,12 @@ test_build_config_requests (void)
     g_assert_cmpuint (manifest->data[12], ==, 30);
     g_assert_cmpuint (manifest->data[0x110], ==, 20);
     g_assert_cmpmem (&manifest->data[0x114], 20, sha1, 20);
+
+    screen_state = mm_sit_request_new_set_screen_state (4, FALSE);
+    g_assert_cmpuint (screen_state->len, ==, 16);
+    g_assert_cmpuint (screen_state->data[2], ==, 0x02);
+    g_assert_cmpuint (screen_state->data[3], ==, 0x09);
+    g_assert_cmpmem (&screen_state->data[12], 4, "\0\0\0\0", 4);
 }
 
 static void

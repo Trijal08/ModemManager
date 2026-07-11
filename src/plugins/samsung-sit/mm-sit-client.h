@@ -109,6 +109,15 @@ gboolean mm_sit_client_set_indication_filter_finish (MMSitClient        *self,
                                                      GAsyncResult       *res,
                                                      GError            **error);
 
+void     mm_sit_client_set_screen_state        (MMSitClient        *self,
+                                                gboolean            screen_on,
+                                                GCancellable       *cancellable,
+                                                GAsyncReadyCallback callback,
+                                                gpointer            user_data);
+gboolean mm_sit_client_set_screen_state_finish (MMSitClient        *self,
+                                                GAsyncResult       *res,
+                                                GError            **error);
+
 void     mm_sit_client_set_carrier_manifest        (MMSitClient        *self,
                                                     const gchar        *directory,
                                                     const guint8        sha1[MM_SIT_SHA1_LENGTH],
