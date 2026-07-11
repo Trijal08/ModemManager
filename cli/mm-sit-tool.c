@@ -488,14 +488,32 @@ print_message (const MMSitMessage *message)
             for (i = 0; i < cells->len; i++) {
                 const MMSitCellInfoLte *cell = &g_array_index (cells, MMSitCellInfoLte, i);
 
-                g_print ("  [%u] PLMN=%s ECI=%u (0x%08x) eNodeB=%u sector=%u "
-                         "TAC=%u PCI=%u EARFCN=%u bandwidth=%u kHz "
-                         "RSRP=-%d dBm RSRQ=-%d dB SNR=%.1f dB TA=%d%s\n",
-                         i, cell->operator_id, cell->ci, cell->ci,
-                         cell->ci >> 8, cell->ci & 0xff,
-                         cell->tac, cell->physical_ci, cell->earfcn, cell->bandwidth,
-                         cell->rsrp, cell->rsrq, cell->rssnr / 10.0,
-                         cell->timing_advance, cell->registered ? " serving" : "");
+                g_print ("  [%u]", i);
+                if (cell->operator_id[0])
+                    g_print (" PLMN=%s", cell->operator_id);
+                if (cell->ci != G_MAXINT32)
+                    g_print (" ECI=%u (0x%08x) eNodeB=%u sector=%u",
+                             cell->ci, cell->ci, cell->ci >> 8, cell->ci & 0xff);
+                if (cell->tac != G_MAXINT32)
+                    g_print (" TAC=%u", cell->tac);
+                if (cell->physical_ci != G_MAXINT32)
+                    g_print (" PCI=%u", cell->physical_ci);
+                if (cell->earfcn != G_MAXINT32)
+                    g_print (" EARFCN=%u", cell->earfcn);
+                if (cell->bandwidth != G_MAXINT32)
+                    g_print (" bandwidth=%u kHz", cell->bandwidth);
+                if (cell->rsrp >= 44 && cell->rsrp <= 140)
+                    g_print (" RSRP=-%d dBm", cell->rsrp);
+                if (cell->rsrq >= 3 && cell->rsrq <= 34)
+                    g_print (" RSRQ=-%d dB", cell->rsrq);
+                if (cell->rssnr >= -200 && cell->rssnr <= 300)
+                    g_print (" SNR=%.1f dB", cell->rssnr / 10.0);
+                if (cell->registered &&
+                    cell->timing_advance >= 0 && cell->timing_advance < G_MAXINT32)
+                    g_print (" TA=%d", cell->timing_advance);
+                if (cell->registered)
+                    g_print (" serving");
+                g_print ("\n");
             }
         }
     } else if (message->id == MM_SIT_MESSAGE_DATA_CALL_LIST_CHANGED ||

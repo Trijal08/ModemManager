@@ -554,20 +554,30 @@ get_cell_info_ready (MMSitClient *client,
 
         cell = &g_array_index (cells, MMSitCellInfoLte, i);
         info = MM_CELL_INFO_LTE (mm_cell_info_lte_new_from_dictionary (NULL));
-        tac = g_strdup_printf ("%X", cell->tac);
-        ci = g_strdup_printf ("%X", cell->ci);
-        pci = g_strdup_printf ("%X", cell->physical_ci);
-        mm_cell_info_lte_set_operator_id (info, cell->operator_id);
-        mm_cell_info_lte_set_tac (info, tac);
-        mm_cell_info_lte_set_ci (info, ci);
-        mm_cell_info_lte_set_physical_ci (info, pci);
-        mm_cell_info_lte_set_earfcn (info, cell->earfcn);
-        mm_cell_info_lte_set_bandwidth (info, cell->bandwidth);
+        if (cell->operator_id[0])
+            mm_cell_info_lte_set_operator_id (info, cell->operator_id);
+        if (cell->tac != G_MAXINT32) {
+            tac = g_strdup_printf ("%X", cell->tac);
+            mm_cell_info_lte_set_tac (info, tac);
+        }
+        if (cell->ci != G_MAXINT32) {
+            ci = g_strdup_printf ("%X", cell->ci);
+            mm_cell_info_lte_set_ci (info, ci);
+        }
+        if (cell->physical_ci != G_MAXINT32) {
+            pci = g_strdup_printf ("%X", cell->physical_ci);
+            mm_cell_info_lte_set_physical_ci (info, pci);
+        }
+        if (cell->earfcn != G_MAXINT32)
+            mm_cell_info_lte_set_earfcn (info, cell->earfcn);
+        if (cell->bandwidth != G_MAXINT32)
+            mm_cell_info_lte_set_bandwidth (info, cell->bandwidth);
         if (cell->rsrp >= 44 && cell->rsrp <= 140)
             mm_cell_info_lte_set_rsrp (info, -(gdouble) cell->rsrp);
         if (cell->rsrq >= 3 && cell->rsrq <= 34)
             mm_cell_info_lte_set_rsrq (info, -(gdouble) cell->rsrq);
-        if (cell->timing_advance >= 0 && cell->timing_advance < G_MAXINT32)
+        if (cell->registered &&
+            cell->timing_advance >= 0 && cell->timing_advance < G_MAXINT32)
             mm_cell_info_lte_set_timing_advance (info, cell->timing_advance);
         if (cell->registered) {
             mm_cell_info_set_serving (MM_CELL_INFO (info), TRUE);
