@@ -82,6 +82,15 @@ gboolean mm_sit_client_get_registration_finish (MMSitClient        *self,
                                                 MMSitRegistration  *out_registration,
                                                 GError            **error);
 
+void     mm_sit_client_get_operator        (MMSitClient        *self,
+                                            GCancellable       *cancellable,
+                                            GAsyncReadyCallback callback,
+                                            gpointer            user_data);
+gboolean mm_sit_client_get_operator_finish (MMSitClient        *self,
+                                            GAsyncResult       *res,
+                                            MMSitOperator      *out_operator,
+                                            GError            **error);
+
 void     mm_sit_client_set_indication_filter        (MMSitClient        *self,
                                                      guint32             filter,
                                                      GCancellable       *cancellable,

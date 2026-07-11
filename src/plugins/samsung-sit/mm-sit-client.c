@@ -517,6 +517,61 @@ mm_sit_client_get_registration_finish (MMSitClient       *self,
     return TRUE;
 }
 
+static void
+get_operator_ready (MMSitClient *self,
+                    GAsyncResult *res,
+                    GTask *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    MMSitOperator          *operator_info;
+    GError                 *error = NULL;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    operator_info = g_new0 (MMSitOperator, 1);
+    if (response && mm_sit_message_parse_operator (response, operator_info, &error))
+        g_task_return_pointer (task, operator_info, g_free);
+    else {
+        g_free (operator_info);
+        g_task_return_error (task, error);
+    }
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_get_operator (MMSitClient        *self,
+                            GCancellable       *cancellable,
+                            GAsyncReadyCallback callback,
+                            gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_OPERATOR,
+                                        next_token (self));
+    mm_sit_client_command (self, request, 5, cancellable,
+                           (GAsyncReadyCallback) get_operator_ready, task);
+}
+
+gboolean
+mm_sit_client_get_operator_finish (MMSitClient   *self,
+                                   GAsyncResult  *res,
+                                   MMSitOperator *out_operator,
+                                   GError       **error)
+{
+    MMSitOperator *operator_info;
+
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    g_return_val_if_fail (out_operator != NULL, FALSE);
+
+    operator_info = g_task_propagate_pointer (G_TASK (res), error);
+    if (!operator_info)
+        return FALSE;
+    *out_operator = *operator_info;
+    g_free (operator_info);
+    return TRUE;
+}
+
 void
 mm_sit_client_set_indication_filter (MMSitClient        *self,
                                      guint32             filter,
@@ -577,7 +632,7 @@ typedef enum {
     CONNECT_STEP_CONFIG_0107,
     CONNECT_STEP_REGISTRATION,
     CONNECT_STEP_SETUP,
-    CONNECT_STEP_DATA_CALL_LIST,
+    CONNECT_STEP_FAST_DORMANCY,
     CONNECT_STEP_LAST,
 } ConnectStep;
 
@@ -754,8 +809,8 @@ connect_build_request (MMSitClient   *self,
         return mm_sit_request_new (0x0107, next_token (self), body_0107, sizeof (body_0107), error);
     case CONNECT_STEP_SETUP:
         return mm_sit_request_new_setup_data_call (next_token (self), ctx->apn, error);
-    case CONNECT_STEP_DATA_CALL_LIST:
-        return mm_sit_request_new_get_data_call_list (next_token (self));
+    case CONNECT_STEP_FAST_DORMANCY:
+        return mm_sit_request_new_set_fast_dormancy_info (next_token (self));
     case CONNECT_STEP_REGISTRATION:
     case CONNECT_STEP_LAST:
     default:

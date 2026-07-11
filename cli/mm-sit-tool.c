@@ -13,11 +13,11 @@
 
 static gchar    *opt_device;
 static gboolean  opt_verbose;
+static gboolean  opt_dump_payload;
 static gboolean  opt_hold;
 static gchar    *opt_configure;
 static gchar    *opt_model;
 static gchar    *opt_build_id;
-static gchar    *opt_capabilities;
 static gchar    *opt_carrier_directory;
 static gchar    *opt_carrier_sha1;
 static gint      opt_indication_filter = 0x7f;
@@ -27,6 +27,8 @@ static GOptionEntry entries[] = {
       "SIT device (default: first /dev/wwan*sit*, then /dev/umts_ipc0)", "PATH" },
     { "verbose", 'v', 0, G_OPTION_ARG_NONE, &opt_verbose,
       "Enable transport debug logging (payloads stay redacted)", NULL },
+    { "dump-payload", 0, 0, G_OPTION_ARG_NONE, &opt_dump_payload,
+      "Print full payloads as hex (may expose subscriber data)", NULL },
     { "hold", 'H', 0, G_OPTION_ARG_NONE, &opt_hold,
       "Keep the control channel open and monitor after connect", NULL },
     { "configure", 0, 0, G_OPTION_ARG_STRING, &opt_configure,
@@ -35,8 +37,6 @@ static GOptionEntry entries[] = {
       "Device model for the initialize command", "MODEL" },
     { "build-id", 0, 0, G_OPTION_ARG_STRING, &opt_build_id,
       "Build ID for the initialize command", "BUILD" },
-    { "capabilities", 0, 0, G_OPTION_ARG_STRING, &opt_capabilities,
-      "Six capability bytes for initialize", "HEX" },
     { "carrier-directory", 0, 0, G_OPTION_ARG_FILENAME, &opt_carrier_directory,
       "Carrier-config directory for initialize", "PATH" },
     { "carrier-sha1", 0, 0, G_OPTION_ARG_STRING, &opt_carrier_sha1,
@@ -53,6 +53,7 @@ typedef struct {
     MMSitRadioState    radio_state;
     MMSitSimStatus     sim_status;
     MMSitRegistration  registration;
+    MMSitOperator      operator_info;
     MMSitDataCall      data_call;
     MMSitMessage      *message;
 } WaitContext;
@@ -319,6 +320,37 @@ get_registration_sync (MMSitClient       *client,
 }
 
 static void
+get_operator_ready (MMSitClient *client,
+                    GAsyncResult *res,
+                    WaitContext *ctx)
+{
+    ctx->boolean_result = mm_sit_client_get_operator_finish (client, res,
+                                                              &ctx->operator_info,
+                                                              &ctx->error);
+    g_main_loop_quit (ctx->loop);
+}
+
+static gboolean
+get_operator_sync (MMSitClient   *client,
+                   MMSitOperator *out_operator,
+                   GError       **error)
+{
+    WaitContext ctx = { 0 };
+
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    mm_sit_client_get_operator (client, NULL,
+                                (GAsyncReadyCallback) get_operator_ready, &ctx);
+    g_main_loop_run (ctx.loop);
+    g_main_loop_unref (ctx.loop);
+    if (!ctx.boolean_result) {
+        g_propagate_error (error, ctx.error);
+        return FALSE;
+    }
+    *out_operator = ctx.operator_info;
+    return TRUE;
+}
+
+static void
 connect_ready (MMSitClient *client,
                GAsyncResult *res,
                WaitContext *ctx)
@@ -377,6 +409,43 @@ disconnect_sync (MMSitClient *client,
 }
 
 static void
+print_registration (const MMSitRegistration *registration)
+{
+    g_print ("packet registration: %s (state=%u rat=%u)\n",
+             registration->registered ? "registered" : "not registered",
+             registration->state,
+             registration->radio_technology);
+}
+
+static void
+print_operator (const MMSitOperator *operator_info)
+{
+    g_print ("operator: PLMN=%s short=\"%s\" long=\"%s\"\n",
+             operator_info->plmn[0] ? operator_info->plmn : "unknown",
+             operator_info->operator_short,
+             operator_info->operator_long);
+}
+
+static void
+print_payload (const MMSitMessage *message)
+{
+    const guint8 *payload;
+    gsize len;
+    gsize offset;
+
+    payload = mm_sit_message_get_payload (message, &len);
+    g_print ("  payload: %" G_GSIZE_FORMAT " bytes (may contain sensitive data)\n", len);
+    for (offset = 0; offset < len; offset += 16) {
+        gsize i;
+
+        g_print ("    %04" G_GSIZE_FORMAT ":", offset);
+        for (i = offset; i < MIN (offset + 16, len); i++)
+            g_print (" %02x", payload[i]);
+        g_print ("\n");
+    }
+}
+
+static void
 print_message (const MMSitMessage *message)
 {
     g_print ("%s type=%u id=0x%04x token=0x%04x length=%u",
@@ -385,6 +454,9 @@ print_message (const MMSitMessage *message)
     if (message->has_status)
         g_print (" status=%u", message->status);
     g_print ("\n");
+
+    if (opt_dump_payload)
+        print_payload (message);
 
     if (message->id == MM_SIT_MESSAGE_RADIO_STATE_CHANGED ||
         message->id == MM_SIT_MESSAGE_GET_RADIO_POWER ||
@@ -395,15 +467,17 @@ print_message (const MMSitMessage *message)
             g_print ("  radio-state: %s\n",
                      state == MM_SIT_RADIO_STATE_ON ? "on" :
                      state == MM_SIT_RADIO_STATE_OFF ? "off" : "unknown");
-    } else if (message->id == MM_SIT_MESSAGE_SERVING_NETWORK ||
-               message->id == MM_SIT_MESSAGE_GET_DATA_REGISTRATION) {
+    } else if (message->id == MM_SIT_MESSAGE_GET_DATA_REGISTRATION) {
         MMSitRegistration registration;
 
         if (mm_sit_message_parse_registration (message, &registration, NULL))
-            g_print ("  packet-registration: %s%s%s\n",
-                     registration.registered ? "registered" : "not registered",
-                     registration.plmn[0] ? " PLMN=" : "",
-                     registration.plmn);
+            print_registration (&registration);
+    } else if (message->id == MM_SIT_MESSAGE_GET_OPERATOR ||
+               message->id == MM_SIT_MESSAGE_SERVING_NETWORK) {
+        MMSitOperator operator_info;
+
+        if (mm_sit_message_parse_operator (message, &operator_info, NULL))
+            print_operator (&operator_info);
     } else if (message->id == MM_SIT_MESSAGE_DATA_CALL_LIST_CHANGED ||
                message->id == MM_SIT_MESSAGE_SETUP_DATA_CALL) {
         MMSitDataCall call;
@@ -496,28 +570,10 @@ static gboolean
 run_initialize (MMSitClient *client,
                 GError     **error)
 {
-    static const guint8 default_capabilities[6] = { 0x7e, 0x06, 0x08, 0x0f, 0x26, 0x0c };
-    const guint8 *capabilities = default_capabilities;
-    g_autoptr(GByteArray) parsed_capabilities = NULL;
     g_autoptr(GByteArray) request = NULL;
     g_autoptr(GByteArray) sha1 = NULL;
     guint8 oem_body[6] = { 0, 0, 0, 0, 0x33, 0x33 };
     guint8 modem_config[5] = { 0 };
-
-    if (opt_capabilities) {
-        parsed_capabilities = parse_hex (opt_capabilities, error);
-        if (!parsed_capabilities || parsed_capabilities->len != 6) {
-            if (parsed_capabilities)
-                g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-                                     "Capabilities must contain exactly six bytes");
-            return FALSE;
-        }
-        capabilities = parsed_capabilities->data;
-    }
-
-    request = mm_sit_request_new_device_capabilities (1, capabilities);
-    if (!run_request (client, request, 5, error))
-        return FALSE;
 
     if (opt_model || opt_build_id) {
         if (!opt_model || !opt_build_id) {
@@ -526,18 +582,18 @@ run_initialize (MMSitClient *client,
             return FALSE;
         }
         g_clear_pointer (&request, g_byte_array_unref);
-        request = mm_sit_request_new_device_info (2, opt_model, opt_build_id, error);
+        request = mm_sit_request_new_device_info (1, opt_model, opt_build_id, error);
         if (!request || !run_request (client, request, 5, error))
             return FALSE;
     }
 
     g_clear_pointer (&request, g_byte_array_unref);
-    request = mm_sit_request_new (MM_SIT_MESSAGE_OEM_CONFIG, 3,
+    request = mm_sit_request_new (MM_SIT_MESSAGE_OEM_CONFIG, 2,
                                   oem_body, sizeof (oem_body), error);
     if (!request || !run_request (client, request, 5, error))
         return FALSE;
     g_clear_pointer (&request, g_byte_array_unref);
-    request = mm_sit_request_new (MM_SIT_MESSAGE_SET_MODEM_CONFIG, 4,
+    request = mm_sit_request_new (MM_SIT_MESSAGE_SET_MODEM_CONFIG, 3,
                                   modem_config, sizeof (modem_config), error);
     if (!request || !run_request (client, request, 5, error))
         return FALSE;
@@ -556,7 +612,7 @@ run_initialize (MMSitClient *client,
             return FALSE;
         }
         g_clear_pointer (&request, g_byte_array_unref);
-        request = mm_sit_request_new_carrier_manifest (5,
+        request = mm_sit_request_new_carrier_manifest (4,
                                                        opt_carrier_directory,
                                                        sha1->data,
                                                        error);
@@ -565,8 +621,90 @@ run_initialize (MMSitClient *client,
     }
 
     g_clear_pointer (&request, g_byte_array_unref);
-    request = mm_sit_request_new_set_indication_filter (6, (guint32) opt_indication_filter);
+    request = mm_sit_request_new_set_indication_filter (5, (guint32) opt_indication_filter);
     return run_request (client, request, 5, error);
+}
+
+static gboolean
+message_name_matches (const gchar *known_names,
+                      const gchar *requested_name)
+{
+    g_auto(GStrv) aliases = NULL;
+    const gchar *requested = requested_name;
+    guint i;
+
+    if (g_ascii_strncasecmp (requested, "SIT_", 4) == 0)
+        requested += 4;
+    if (g_ascii_strcasecmp (known_names, requested) == 0)
+        return TRUE;
+
+    aliases = g_strsplit (known_names, " / ", -1);
+    for (i = 0; aliases[i]; i++) {
+        if (g_ascii_strcasecmp (aliases[i], requested) == 0)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static gboolean
+parse_message_id (const gchar  *text,
+                  guint16      *out_id,
+                  GError      **error)
+{
+    guint64 numeric_id;
+    guint matched_id = G_MAXUINT;
+    guint id;
+
+    if (g_ascii_isdigit (text[0])) {
+        if (!parse_uint64 (text, G_MAXUINT16, &numeric_id, error))
+            return FALSE;
+        *out_id = (guint16) numeric_id;
+        return TRUE;
+    }
+
+    for (id = 0; id <= G_MAXUINT16; id++) {
+        const gchar *known_names = mm_sit_message_id_get_string ((guint16) id);
+
+        if (g_str_equal (known_names, "UNKNOWN") ||
+            !message_name_matches (known_names, text))
+            continue;
+        if (matched_id != G_MAXUINT && matched_id != id) {
+            g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                         "Message name '%s' is ambiguous (0x%04x and 0x%04x); use a numeric ID",
+                         text, matched_id, id);
+            return FALSE;
+        }
+        matched_id = id;
+    }
+
+    if (matched_id == G_MAXUINT) {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                     "Unknown SIT message name '%s'; use 'ids' to list known names", text);
+        return FALSE;
+    }
+    *out_id = (guint16) matched_id;
+    return TRUE;
+}
+
+static void
+print_message_ids (const gchar *filter)
+{
+    g_autofree gchar *upper_filter = filter ? g_ascii_strup (filter, -1) : NULL;
+    guint id;
+
+    for (id = 0; id <= G_MAXUINT16; id++) {
+        const gchar *name = mm_sit_message_id_get_string ((guint16) id);
+
+        if (g_str_equal (name, "UNKNOWN"))
+            continue;
+        if (upper_filter) {
+            g_autofree gchar *upper_name = g_ascii_strup (name, -1);
+
+            if (!strstr (upper_name, upper_filter))
+                continue;
+        }
+        g_print ("0x%04x  %s\n", id, name);
+    }
 }
 
 static void
@@ -574,13 +712,18 @@ print_usage (const gchar *program)
 {
     g_printerr ("Usage:\n"
                 "  %s [OPTIONS] status\n"
+                "  %s [OPTIONS] registration\n"
+                "  %s [OPTIONS] operator\n"
                 "  %s [OPTIONS] radio on|off\n"
                 "  %s [OPTIONS] connect APN\n"
                 "  %s [OPTIONS] disconnect [CID]\n"
                 "  %s [OPTIONS] initialize\n"
                 "  %s [OPTIONS] monitor\n"
-                "  %s [OPTIONS] raw MESSAGE_ID [BODY_HEX]\n",
-                program, program, program, program, program, program, program);
+                "  %s [OPTIONS] query MESSAGE_ID\n"
+                "  %s [OPTIONS] raw MESSAGE_ID [BODY_HEX]\n"
+                "  %s ids [FILTER]\n",
+                program, program, program, program, program, program,
+                program, program, program, program, program);
 }
 
 int
@@ -608,6 +751,15 @@ main (int argc,
         g_printerr ("Option error: indication filter must be non-negative\n");
         return EXIT_FAILURE;
     }
+    command = argv[1];
+    if (g_str_equal (command, "ids")) {
+        if (argc > 3) {
+            g_printerr ("SIT command failed: ids accepts at most one filter\n");
+            return EXIT_FAILURE;
+        }
+        print_message_ids (argc == 3 ? argv[2] : NULL);
+        return EXIT_SUCCESS;
+    }
 
     if (!mm_log_setup (opt_verbose ? "DEBUG" : "WARN", NULL, FALSE,
                        FALSE, FALSE, FALSE, &error)) {
@@ -628,13 +780,14 @@ main (int argc,
         mm_log_shutdown ();
         return EXIT_FAILURE;
     }
-    g_signal_connect (client, "indication", G_CALLBACK (indication_received), NULL);
+    if (g_str_equal (command, "monitor") || opt_hold)
+        g_signal_connect (client, "indication", G_CALLBACK (indication_received), NULL);
 
-    command = argv[1];
     if (g_str_equal (command, "status")) {
         MMSitRadioState radio;
         MMSitSimStatus sim;
         MMSitRegistration registration;
+        MMSitOperator operator_info;
 
         if (argc != 2) {
             g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
@@ -651,9 +804,34 @@ main (int argc,
                  sim.present ? "present" : "not present", sim.card_state, sim.app_count);
         if (!get_registration_sync (client, &registration, &error))
             goto out;
-        g_print ("packet registration: %s%s%s\n",
-                 registration.registered ? "registered" : "not registered",
-                 registration.plmn[0] ? " PLMN=" : "", registration.plmn);
+        print_registration (&registration);
+        if (!get_operator_sync (client, &operator_info, &error))
+            goto out;
+        print_operator (&operator_info);
+        success = TRUE;
+    } else if (g_str_equal (command, "registration")) {
+        MMSitRegistration registration;
+
+        if (argc != 2) {
+            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "registration takes no arguments");
+            goto out;
+        }
+        if (!get_registration_sync (client, &registration, &error))
+            goto out;
+        print_registration (&registration);
+        success = TRUE;
+    } else if (g_str_equal (command, "operator")) {
+        MMSitOperator operator_info;
+
+        if (argc != 2) {
+            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "operator takes no arguments");
+            goto out;
+        }
+        if (!get_operator_sync (client, &operator_info, &error))
+            goto out;
+        print_operator (&operator_info);
         success = TRUE;
     } else if (g_str_equal (command, "radio")) {
         MMSitRadioState state;
@@ -722,18 +900,36 @@ main (int argc,
         }
         monitor (client);
         success = TRUE;
+    } else if (g_str_equal (command, "query")) {
+        g_autoptr(GByteArray) request = NULL;
+        g_autoptr(MMSitMessage) response = NULL;
+        guint16 id;
+
+        if (argc != 3) {
+            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "query requires MESSAGE_ID");
+            goto out;
+        }
+        if (!parse_message_id (argv[2], &id, &error))
+            goto out;
+        request = mm_sit_request_new_query (id, 1);
+        response = command_sync (client, request, 30, &error);
+        if (!response)
+            goto out;
+        print_message (response);
+        success = TRUE;
     } else if (g_str_equal (command, "raw")) {
         g_autoptr(GByteArray) body = NULL;
         g_autoptr(GByteArray) request = NULL;
         g_autoptr(MMSitMessage) response = NULL;
-        guint64 id;
+        guint16 id;
 
         if (argc < 3 || argc > 4) {
             g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
                                  "raw requires MESSAGE_ID and optional BODY_HEX");
             goto out;
         }
-        if (!parse_uint64 (argv[2], G_MAXUINT16, &id, &error))
+        if (!parse_message_id (argv[2], &id, &error))
             goto out;
         if (argc == 4) {
             body = parse_hex (argv[3], &error);

@@ -25,11 +25,12 @@ typedef enum {
     MM_SIT_MESSAGE_DEACTIVATE_DATA_CALL        = 0x0601,
     MM_SIT_MESSAGE_SET_INITIAL_ATTACH_APN      = 0x0603,
     MM_SIT_MESSAGE_DATA_CALL_LIST_CHANGED      = 0x0604,
-    MM_SIT_MESSAGE_GET_DATA_CALL_LIST          = 0x0605,
+    MM_SIT_MESSAGE_GET_DATA_CALL_LIST          = 0x0602,
+    MM_SIT_MESSAGE_SET_FAST_DORMANCY_INFO      = 0x0605,
     MM_SIT_MESSAGE_SET_DATA_PROFILE            = 0x0613,
     MM_SIT_MESSAGE_GET_VOICE_REGISTRATION      = 0x0700,
-    MM_SIT_MESSAGE_GET_NETWORK_REGISTRATION    = 0x0701,
-    MM_SIT_MESSAGE_GET_DATA_REGISTRATION       = 0x0702,
+    MM_SIT_MESSAGE_GET_DATA_REGISTRATION       = 0x0701,
+    MM_SIT_MESSAGE_GET_OPERATOR                = 0x0702,
     MM_SIT_MESSAGE_SERVING_NETWORK             = 0x070e,
     MM_SIT_MESSAGE_SET_PREFERRED_DATA_MODEM    = 0x0740,
     MM_SIT_MESSAGE_SET_RADIO_POWER             = 0x0800,
@@ -38,7 +39,7 @@ typedef enum {
     MM_SIT_MESSAGE_DEVICE_INFO                 = 0x0922,
     MM_SIT_MESSAGE_SET_INDICATION_FILTER       = 0x0928,
     MM_SIT_MESSAGE_SET_MODEM_CONFIG            = 0x093f,
-    MM_SIT_MESSAGE_DEVICE_CAPABILITIES         = 0x0949,
+    MM_SIT_MESSAGE_SET_AP_SYSTEM_TIME          = 0x0949,
     MM_SIT_MESSAGE_CARRIER_CONFIG_MANIFEST     = 0x4600,
     MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO     = 0x4602,
     MM_SIT_MESSAGE_OEM_CONFIG                  = 0x4605,
@@ -72,9 +73,16 @@ typedef struct {
 } MMSitSimStatus;
 
 typedef struct {
+    guint8   state;
+    guint8   radio_technology;
     gboolean registered;
-    gchar    plmn[7];
 } MMSitRegistration;
+
+typedef struct {
+    gchar    plmn[7];
+    gchar    operator_short[33];
+    gchar    operator_long[65];
+} MMSitOperator;
 
 typedef struct {
     guint16  cause;
@@ -130,10 +138,9 @@ GByteArray *mm_sit_request_new_deactivate_data_call   (guint16                to
                                                        guint8                 cid,
                                                        guint8                 reason);
 GByteArray *mm_sit_request_new_get_data_call_list     (guint16                token);
+GByteArray *mm_sit_request_new_set_fast_dormancy_info (guint16                token);
 GByteArray *mm_sit_request_new_set_indication_filter  (guint16                token,
                                                        guint32                filter);
-GByteArray *mm_sit_request_new_device_capabilities    (guint16                token,
-                                                       const guint8           capabilities[6]);
 GByteArray *mm_sit_request_new_device_info            (guint16                token,
                                                        const gchar           *model,
                                                        const gchar           *build,
@@ -151,6 +158,9 @@ gboolean mm_sit_message_parse_sim_status              (const MMSitMessage    *me
                                                        GError               **error);
 gboolean mm_sit_message_parse_registration            (const MMSitMessage    *message,
                                                        MMSitRegistration     *out_registration,
+                                                       GError               **error);
+gboolean mm_sit_message_parse_operator                (const MMSitMessage    *message,
+                                                       MMSitOperator         *out_operator,
                                                        GError               **error);
 gboolean mm_sit_message_parse_data_call               (const MMSitMessage    *message,
                                                        MMSitDataCall         *out_call,

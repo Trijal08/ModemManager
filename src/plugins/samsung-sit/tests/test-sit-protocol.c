@@ -69,6 +69,20 @@ test_parse_invalid (void)
 }
 
 static void
+test_message_id_names (void)
+{
+    g_assert_cmpstr (mm_sit_message_id_get_string (0x0000), ==, "GET_CALL_LIST");
+    g_assert_cmpstr (mm_sit_message_id_get_string (0x020b), ==,
+                     "GET_SIM_AUTHENTICATE / SIM_GET_ISIM_AUTH / SIM_GET_SIM_AUTH");
+    g_assert_cmpstr (mm_sit_message_id_get_string (MM_SIT_MESSAGE_GET_DATA_REGISTRATION), ==,
+                     "GET_DATA_REGISTRATION_STATE / GET_DATA_REGISTRATION");
+    g_assert_cmpstr (mm_sit_message_id_get_string (MM_SIT_MESSAGE_SET_AP_SYSTEM_TIME), ==,
+                     "SET_AP_SYSTEM_TIME");
+    g_assert_cmpstr (mm_sit_message_id_get_string (0x4605), ==, "SV_NUMBER / OEM_CONFIG");
+    g_assert_cmpstr (mm_sit_message_id_get_string (0xffff), ==, "UNKNOWN");
+}
+
+static void
 test_build_radio (void)
 {
     static const guint8 expected_set[] = {
@@ -98,6 +112,7 @@ test_build_data_requests (void)
     g_autoptr(GByteArray) setup = NULL;
     g_autoptr(GByteArray) deactivate = NULL;
     g_autoptr(GByteArray) list = NULL;
+    g_autoptr(GByteArray) fast_dormancy = NULL;
     g_autoptr(GError)     error = NULL;
 
     profile = mm_sit_request_new_set_data_profile (1, "internet", &error);
@@ -128,26 +143,23 @@ test_build_data_requests (void)
     g_assert_cmpuint (deactivate->data[12], ==, 1);
 
     list = mm_sit_request_new_get_data_call_list (5);
-    g_assert_cmpuint (list->len, ==, 16);
-    g_assert_cmpmem (&list->data[12], 4, "\x0a\x0a\x0a\x0a", 4);
+    g_assert_cmpuint (list->len, ==, 12);
+
+    fast_dormancy = mm_sit_request_new_set_fast_dormancy_info (6);
+    g_assert_cmpuint (fast_dormancy->len, ==, 16);
+    g_assert_cmpmem (&fast_dormancy->data[12], 4, "\x0a\x0a\x0a\x0a", 4);
 }
 
 static void
 test_build_config_requests (void)
 {
-    static const guint8 capabilities[6] = { 0x7e, 0x06, 0x08, 0x0f, 0x26, 0x0c };
     static const guint8 sha1[20] = {
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
         0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13,
     };
-    g_autoptr(GByteArray) caps = NULL;
     g_autoptr(GByteArray) info = NULL;
     g_autoptr(GByteArray) manifest = NULL;
     g_autoptr(GError)     error = NULL;
-
-    caps = mm_sit_request_new_device_capabilities (1, capabilities);
-    g_assert_cmpuint (caps->len, ==, 18);
-    g_assert_cmpmem (&caps->data[12], 6, capabilities, 6);
 
     info = mm_sit_request_new_device_info (2, "Pixel 9a", "TEST.BUILD", &error);
     g_assert_no_error (error);
@@ -215,11 +227,14 @@ static void
 test_parse_status_and_registration (void)
 {
     guint8 sim_response[18] = { 1, 0, 0, 2, 18, 0, 1, 0 };
-    guint8 reg_response[32] = { 1, 0, 2, 7, 32, 0, 2, 0 };
+    guint8 reg_response[86] = { 1, 0, 1, 7, 86, 0, 2, 0 };
+    guint8 operator_response[119] = { 1, 0, 2, 7, 119, 0, 3, 0 };
+    guint8 operator_indication[131] = { 2, 0, 0x0e, 7, 131, 0, 0, 0 };
     g_autoptr(MMSitMessage) message = NULL;
     g_autoptr(GError)       error = NULL;
     MMSitSimStatus          sim;
     MMSitRegistration       registration;
+    MMSitOperator           operator_info;
 
     sim_response[12] = 1;
     sim_response[13] = 3;
@@ -234,14 +249,40 @@ test_parse_status_and_registration (void)
     g_assert_true (sim.present);
     g_assert_cmpuint (sim.app_count, ==, 2);
 
-    memcpy (&reg_response[12], "26203#", 6);
+    reg_response[12] = 1;
+    reg_response[15] = 14;
     g_clear_pointer (&message, mm_sit_message_free);
     message = mm_sit_message_parse (reg_response, sizeof (reg_response), &error);
     g_assert_no_error (error);
     g_assert_true (mm_sit_message_parse_registration (message, &registration, &error));
     g_assert_no_error (error);
     g_assert_true (registration.registered);
-    g_assert_cmpstr (registration.plmn, ==, "26203");
+    g_assert_cmpuint (registration.state, ==, 1);
+    g_assert_cmpuint (registration.radio_technology, ==, 14);
+
+    memcpy (&operator_response[12], "26203#", 6);
+    memcpy (&operator_response[18], "o2-de", 6);
+    memcpy (&operator_response[50], "o2 - de", 8);
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (operator_response, sizeof (operator_response), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_operator (message, &operator_info, &error));
+    g_assert_no_error (error);
+    g_assert_cmpstr (operator_info.plmn, ==, "26203");
+    g_assert_cmpstr (operator_info.operator_short, ==, "o2-de");
+    g_assert_cmpstr (operator_info.operator_long, ==, "o2 - de");
+
+    memcpy (&operator_indication[9], "26203#", 6);
+    memcpy (&operator_indication[35], "o2-de", 6);
+    memcpy (&operator_indication[67], "o2 - de", 8);
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (operator_indication, sizeof (operator_indication), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_operator (message, &operator_info, &error));
+    g_assert_no_error (error);
+    g_assert_cmpstr (operator_info.plmn, ==, "26203");
+    g_assert_cmpstr (operator_info.operator_short, ==, "o2-de");
+    g_assert_cmpstr (operator_info.operator_long, ==, "o2 - de");
 }
 
 static void
@@ -701,7 +742,7 @@ client_test_peer (ClientTestContext *ctx)
         0x0107,
         MM_SIT_MESSAGE_GET_DATA_REGISTRATION,
         MM_SIT_MESSAGE_SETUP_DATA_CALL,
-        MM_SIT_MESSAGE_GET_DATA_CALL_LIST,
+        MM_SIT_MESSAGE_SET_FAST_DORMANCY_INFO,
     };
     guint i;
 
@@ -722,8 +763,9 @@ client_test_peer (ClientTestContext *ctx)
         }
 
         if (expected_ids[i] == MM_SIT_MESSAGE_GET_DATA_REGISTRATION) {
-            response_len = 32;
-            memcpy (&response[12], "26203", 5);
+            response_len = 86;
+            response[12] = 1;
+            response[15] = 14;
         } else if (expected_ids[i] == MM_SIT_MESSAGE_SETUP_DATA_CALL) {
             response_len = sizeof (response);
             response[14] = 1;
@@ -920,6 +962,7 @@ main (int argc,
 
     g_test_add_func ("/MM/sit/parse/header", test_parse_header);
     g_test_add_func ("/MM/sit/parse/invalid", test_parse_invalid);
+    g_test_add_func ("/MM/sit/message-id/names", test_message_id_names);
     g_test_add_func ("/MM/sit/build/radio", test_build_radio);
     g_test_add_func ("/MM/sit/build/data", test_build_data_requests);
     g_test_add_func ("/MM/sit/build/config", test_build_config_requests);

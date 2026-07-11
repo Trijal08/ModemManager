@@ -90,9 +90,22 @@ diagnostic client instead:
 
 ```sh
 mm-sit-tool status
+mm-sit-tool registration
+mm-sit-tool operator
 mm-sit-tool radio on
+mm-sit-tool ids SIGNAL
+mm-sit-tool query GET_SIGNAL_STRENGTH
+mm-sit-tool --dump-payload query GET_SIGNAL_STRENGTH
+mm-sit-tool raw 0x0900 00000000
 mm-sit-tool --hold --configure=rmnet0 connect YOUR_APN
 ```
+
+`ids` lists the message names identified from the downstream SIT RIL and
+accepts an optional case-insensitive filter. `query` and `raw` accept either a
+numeric message ID or an unambiguous symbolic name. `query` supplies the usual
+four-byte zero query body; `raw` sends exactly the body given by the caller.
+Payloads remain redacted unless `--dump-payload` is given. The payload dump is
+hexadecimal and includes response status bytes; it may expose subscriber data.
 
 Only one process should own the SIT device. Do not run `sit-smoke` or
 `mm-sit-tool` while ModemManager has the port open. In particular, closing the

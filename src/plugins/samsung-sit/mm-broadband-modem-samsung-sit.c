@@ -20,6 +20,7 @@ static void iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface);
 struct _MMBroadbandModemSamsungSitPrivate {
     MMSitClient *client;
     gchar       *operator_code;
+    gchar       *operator_name;
     gboolean     carrier_config_ready;
     gchar       *carrier_config_imsi;
 };
@@ -42,15 +43,62 @@ update_registration (MMBroadbandModemSamsungSit *self,
 {
     MMModem3gppRegistrationState state;
 
-    state = registration->registered ? MM_MODEM_3GPP_REGISTRATION_STATE_HOME :
-                                       MM_MODEM_3GPP_REGISTRATION_STATE_IDLE;
-    g_free (self->priv->operator_code);
-    self->priv->operator_code = registration->registered ? g_strdup (registration->plmn) : NULL;
+    switch (registration->state) {
+    case 0:
+        state = MM_MODEM_3GPP_REGISTRATION_STATE_IDLE;
+        break;
+    case 1:
+        state = MM_MODEM_3GPP_REGISTRATION_STATE_HOME;
+        break;
+    case 2:
+        state = MM_MODEM_3GPP_REGISTRATION_STATE_SEARCHING;
+        break;
+    case 3:
+        state = MM_MODEM_3GPP_REGISTRATION_STATE_DENIED;
+        break;
+    case 4:
+        state = MM_MODEM_3GPP_REGISTRATION_STATE_UNKNOWN;
+        break;
+    case 5:
+        state = MM_MODEM_3GPP_REGISTRATION_STATE_ROAMING;
+        break;
+    case 10:
+    case 12:
+    case 13:
+    case 14:
+        state = MM_MODEM_3GPP_REGISTRATION_STATE_EMERGENCY_ONLY;
+        break;
+    default:
+        state = MM_MODEM_3GPP_REGISTRATION_STATE_UNKNOWN;
+        break;
+    }
 
     mm_iface_modem_3gpp_update_ps_registration_state (MM_IFACE_MODEM_3GPP (self), state, TRUE);
     mm_iface_modem_3gpp_update_eps_registration_state (MM_IFACE_MODEM_3GPP (self), state, TRUE);
     mm_iface_modem_3gpp_update_5gs_registration_state (MM_IFACE_MODEM_3GPP (self), state, TRUE);
     mm_iface_modem_3gpp_apply_deferred_registration_state (MM_IFACE_MODEM_3GPP (self));
+}
+
+static void
+update_operator (MMBroadbandModemSamsungSit *self,
+                 const MMSitOperator        *operator_info)
+{
+    const gchar *operator_name;
+    gboolean     operator_changed;
+
+    operator_changed = g_strcmp0 (self->priv->operator_code,
+                                  operator_info->plmn[0] ? operator_info->plmn : NULL) != 0;
+    g_free (self->priv->operator_code);
+    self->priv->operator_code = operator_info->plmn[0] ? g_strdup (operator_info->plmn) : NULL;
+    if (!operator_info->plmn[0] || operator_changed)
+        g_clear_pointer (&self->priv->operator_name, g_free);
+
+    operator_name = operator_info->operator_long[0] ? operator_info->operator_long :
+                    operator_info->operator_short[0] ? operator_info->operator_short : NULL;
+    if (operator_info->plmn[0] && operator_name) {
+        g_free (self->priv->operator_name);
+        self->priv->operator_name = g_strdup (operator_name);
+    }
 }
 
 static void
@@ -73,7 +121,7 @@ sit_indication (MMSitClient              *client,
                 const MMSitMessage       *message,
                 MMBroadbandModemSamsungSit *self)
 {
-    MMSitRegistration registration;
+    MMSitOperator operator_info;
 
     if (message->id == MM_SIT_MESSAGE_SIM_STATUS_CHANGED)
         invalidate_carrier_config (self);
@@ -87,10 +135,10 @@ sit_indication (MMSitClient              *client,
     }
 
     if (message->id == MM_SIT_MESSAGE_SERVING_NETWORK &&
-        mm_sit_message_parse_registration (message, &registration, NULL)) {
-        mm_obj_dbg (self, "SIT serving network changed (registered: %s)",
-                    registration.registered ? "yes" : "no");
-        update_registration (self, &registration);
+        mm_sit_message_parse_operator (message, &operator_info, NULL)) {
+        mm_obj_dbg (self, "SIT serving network changed (operator: %s)",
+                    operator_info.plmn[0] ? operator_info.plmn : "unknown");
+        update_operator (self, &operator_info);
     }
 }
 
@@ -538,17 +586,17 @@ load_operator_code_ready (MMSitClient *client,
                           GTask *task)
 {
     MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
-    MMSitRegistration           registration;
+    MMSitOperator               operator_info;
     GError                     *error = NULL;
 
-    if (!mm_sit_client_get_registration_finish (client, res, &registration, &error))
+    if (!mm_sit_client_get_operator_finish (client, res, &operator_info, &error))
         g_task_return_error (task, error);
-    else if (!registration.registered)
+    else if (!operator_info.plmn[0])
         g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_RETRY,
-                                 "SIT modem is not registered");
+                                 "SIT operator response did not include a PLMN");
     else {
-        update_registration (self, &registration);
-        g_task_return_pointer (task, g_strdup (registration.plmn), g_free);
+        update_operator (self, &operator_info);
+        g_task_return_pointer (task, g_strdup (operator_info.plmn), g_free);
     }
     g_object_unref (task);
 }
@@ -576,8 +624,68 @@ load_operator_code (MMIfaceModem3gpp   *iface,
         g_object_unref (task);
         return;
     }
-    mm_sit_client_get_registration (client, NULL,
-                                    (GAsyncReadyCallback) load_operator_code_ready, task);
+    mm_sit_client_get_operator (client, NULL,
+                                (GAsyncReadyCallback) load_operator_code_ready, task);
+}
+
+static gchar *
+load_operator_name_finish (MMIfaceModem3gpp  *self,
+                           GAsyncResult      *res,
+                           GError           **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+static void
+load_operator_name_ready (MMSitClient *client,
+                          GAsyncResult *res,
+                          GTask *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    MMSitOperator               operator_info;
+    GError                     *error = NULL;
+
+    if (!mm_sit_client_get_operator_finish (client, res, &operator_info, &error))
+        g_task_return_error (task, error);
+    else if (!operator_info.plmn[0])
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_RETRY,
+                                 "SIT operator response did not include a PLMN");
+    else {
+        update_operator (self, &operator_info);
+        if (self->priv->operator_name)
+            g_task_return_pointer (task, g_strdup (self->priv->operator_name), g_free);
+        else
+            g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_RETRY,
+                                     "SIT operator response did not include a name");
+    }
+    g_object_unref (task);
+}
+
+static void
+load_operator_name (MMIfaceModem3gpp   *iface,
+                    GAsyncReadyCallback callback,
+                    gpointer            user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    if (self->priv->operator_name) {
+        g_task_return_pointer (task, g_strdup (self->priv->operator_name), g_free);
+        g_object_unref (task);
+        return;
+    }
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_operator (client, NULL,
+                                (GAsyncReadyCallback) load_operator_name_ready, task);
 }
 
 static gboolean
@@ -694,6 +802,8 @@ iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface)
     iface->register_in_network_finish = register_in_network_finish;
     iface->load_operator_code = load_operator_code;
     iface->load_operator_code_finish = load_operator_code_finish;
+    iface->load_operator_name = load_operator_name;
+    iface->load_operator_name_finish = load_operator_name_finish;
     iface->setup_unsolicited_events = set_unsolicited_events;
     iface->setup_unsolicited_events_finish = set_unsolicited_events_finish;
     iface->enable_unsolicited_events = set_unsolicited_events;
@@ -745,6 +855,7 @@ finalize (GObject *object)
     MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (object);
 
     g_free (self->priv->operator_code);
+    g_free (self->priv->operator_name);
     g_free (self->priv->carrier_config_imsi);
     G_OBJECT_CLASS (mm_broadband_modem_samsung_sit_parent_class)->finalize (object);
 }

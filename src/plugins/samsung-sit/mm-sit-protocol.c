@@ -5,6 +5,15 @@
 
 #include "mm-sit-protocol.h"
 
+typedef struct {
+    guint16      id;
+    const gchar *name;
+} MMSitMessageIdInfo;
+
+static const MMSitMessageIdInfo message_id_info[] = {
+#include "mm-sit-message-ids.inc"
+};
+
 static guint16
 read_le16 (const guint8 *data)
 {
@@ -148,33 +157,21 @@ mm_sit_message_get_payload (const MMSitMessage *self,
 const gchar *
 mm_sit_message_id_get_string (guint16 id)
 {
-    switch (id) {
-    case MM_SIT_MESSAGE_GET_SIM_STATUS:          return "GET_SIM_STATUS";
-    case MM_SIT_MESSAGE_SIM_IO:                  return "SIM_IO";
-    case MM_SIT_MESSAGE_SIM_STATUS_CHANGED:      return "SIM_STATUS_CHANGED";
-    case MM_SIT_MESSAGE_SETUP_DATA_CALL:         return "SETUP_DATA_CALL";
-    case MM_SIT_MESSAGE_DEACTIVATE_DATA_CALL:    return "DEACTIVATE_DATA_CALL";
-    case MM_SIT_MESSAGE_SET_INITIAL_ATTACH_APN:  return "SET_INITIAL_ATTACH_APN";
-    case MM_SIT_MESSAGE_DATA_CALL_LIST_CHANGED:  return "DATA_CALL_LIST_CHANGED";
-    case MM_SIT_MESSAGE_GET_DATA_CALL_LIST:      return "GET_DATA_CALL_LIST";
-    case MM_SIT_MESSAGE_SET_DATA_PROFILE:        return "SET_DATA_PROFILE";
-    case MM_SIT_MESSAGE_GET_VOICE_REGISTRATION:  return "GET_VOICE_REGISTRATION";
-    case MM_SIT_MESSAGE_GET_NETWORK_REGISTRATION:return "GET_NETWORK_REGISTRATION";
-    case MM_SIT_MESSAGE_GET_DATA_REGISTRATION:   return "GET_DATA_REGISTRATION";
-    case MM_SIT_MESSAGE_SERVING_NETWORK:         return "SERVING_NETWORK";
-    case MM_SIT_MESSAGE_SET_PREFERRED_DATA_MODEM:return "SET_PREFERRED_DATA_MODEM";
-    case MM_SIT_MESSAGE_SET_RADIO_POWER:         return "SET_RADIO_POWER";
-    case MM_SIT_MESSAGE_GET_RADIO_POWER:         return "GET_RADIO_POWER";
-    case MM_SIT_MESSAGE_RADIO_STATE_CHANGED:     return "RADIO_STATE_CHANGED";
-    case MM_SIT_MESSAGE_DEVICE_INFO:             return "DEVICE_INFO";
-    case MM_SIT_MESSAGE_SET_INDICATION_FILTER:   return "SET_INDICATION_FILTER";
-    case MM_SIT_MESSAGE_SET_MODEM_CONFIG:        return "SET_MODEM_CONFIG";
-    case MM_SIT_MESSAGE_DEVICE_CAPABILITIES:     return "DEVICE_CAPABILITIES";
-    case MM_SIT_MESSAGE_CARRIER_CONFIG_MANIFEST: return "CARRIER_CONFIG_MANIFEST";
-    case MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO: return "CARRIER_CONFIG_SIM_INFO";
-    case MM_SIT_MESSAGE_OEM_CONFIG:              return "OEM_CONFIG";
-    default:                                     return "UNKNOWN";
+    guint lower = 0;
+    guint upper = G_N_ELEMENTS (message_id_info);
+
+    while (lower < upper) {
+        guint middle = lower + (upper - lower) / 2;
+
+        if (message_id_info[middle].id < id)
+            lower = middle + 1;
+        else
+            upper = middle;
     }
+
+    if (lower < G_N_ELEMENTS (message_id_info) && message_id_info[lower].id == id)
+        return message_id_info[lower].name;
+    return "UNKNOWN";
 }
 
 GByteArray *
@@ -343,9 +340,15 @@ mm_sit_request_new_deactivate_data_call (guint16 token,
 GByteArray *
 mm_sit_request_new_get_data_call_list (guint16 token)
 {
+    return mm_sit_request_new_query (MM_SIT_MESSAGE_GET_DATA_CALL_LIST, token);
+}
+
+GByteArray *
+mm_sit_request_new_set_fast_dormancy_info (guint16 token)
+{
     const guint8 body[8] = { 0, 0, 0, 0, 0x0a, 0x0a, 0x0a, 0x0a };
 
-    return mm_sit_request_new (MM_SIT_MESSAGE_GET_DATA_CALL_LIST,
+    return mm_sit_request_new (MM_SIT_MESSAGE_SET_FAST_DORMANCY_INFO,
                                token, body, sizeof (body), NULL);
 }
 
@@ -357,18 +360,6 @@ mm_sit_request_new_set_indication_filter (guint16 token,
 
     write_le32 (&body[4], filter);
     return mm_sit_request_new (MM_SIT_MESSAGE_SET_INDICATION_FILTER,
-                               token, body, sizeof (body), NULL);
-}
-
-GByteArray *
-mm_sit_request_new_device_capabilities (guint16      token,
-                                        const guint8 capabilities[6])
-{
-    guint8 body[10] = { 0 };
-
-    g_return_val_if_fail (capabilities != NULL, NULL);
-    memcpy (&body[4], capabilities, 6);
-    return mm_sit_request_new (MM_SIT_MESSAGE_DEVICE_CAPABILITIES,
                                token, body, sizeof (body), NULL);
 }
 
@@ -622,6 +613,28 @@ copy_plmn (gchar        destination[7],
     destination[i] = '\0';
 }
 
+static void
+copy_operator_name (gchar        *destination,
+                    gsize         destination_len,
+                    const guint8 *source,
+                    gsize         source_len)
+{
+    const guint8 *terminator;
+    gsize         len;
+
+    g_assert (destination_len > 0);
+
+    len = MIN (source_len, destination_len - 1);
+    terminator = memchr (source, '\0', len);
+    if (terminator)
+        len = terminator - source;
+    memcpy (destination, source, len);
+    destination[len] = '\0';
+    g_strstrip (destination);
+    if (!g_utf8_validate (destination, -1, NULL))
+        destination[0] = '\0';
+}
+
 gboolean
 mm_sit_message_parse_registration (const MMSitMessage *message,
                                    MMSitRegistration  *out_registration,
@@ -629,14 +642,50 @@ mm_sit_message_parse_registration (const MMSitMessage *message,
 {
     const guint8 *data;
     gsize         len;
-    gsize         plmn_offset;
 
     g_return_val_if_fail (out_registration != NULL, FALSE);
 
-    if (!message || (message->id != MM_SIT_MESSAGE_GET_DATA_REGISTRATION &&
-                     message->id != MM_SIT_MESSAGE_SERVING_NETWORK)) {
+    if (!message || message->id != MM_SIT_MESSAGE_GET_DATA_REGISTRATION) {
         g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
                              "Message does not carry supported SIT registration data");
+        return FALSE;
+    }
+
+    data = mm_sit_message_get_data (message, &len);
+    if (message->type != MM_SIT_MESSAGE_TYPE_RESPONSE || len < 16) {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                             "SIT data-registration response is malformed");
+        return FALSE;
+    }
+    if (!message->has_status || message->status != 0) {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                             "SIT registration query failed");
+        return FALSE;
+    }
+
+    memset (out_registration, 0, sizeof (*out_registration));
+    out_registration->state = data[12];
+    out_registration->radio_technology = data[15];
+    out_registration->registered = (out_registration->state == 1 ||
+                                    out_registration->state == 5);
+    return TRUE;
+}
+
+gboolean
+mm_sit_message_parse_operator (const MMSitMessage *message,
+                               MMSitOperator      *out_operator,
+                               GError            **error)
+{
+    const guint8 *data;
+    gsize         len;
+    gsize         plmn_offset;
+
+    g_return_val_if_fail (out_operator != NULL, FALSE);
+
+    if (!message || (message->id != MM_SIT_MESSAGE_GET_OPERATOR &&
+                     message->id != MM_SIT_MESSAGE_SERVING_NETWORK)) {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                             "Message does not carry supported SIT operator data");
         return FALSE;
     }
 
@@ -644,19 +693,37 @@ mm_sit_message_parse_registration (const MMSitMessage *message,
     plmn_offset = (message->id == MM_SIT_MESSAGE_SERVING_NETWORK) ? 9 : 12;
     if (len <= plmn_offset) {
         g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                             "SIT registration message has no registration payload");
+                             "SIT operator message has no operator payload");
         return FALSE;
     }
     if (message->type == MM_SIT_MESSAGE_TYPE_RESPONSE &&
         (!message->has_status || message->status != 0)) {
         g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
-                             "SIT registration query failed");
+                             "SIT operator query failed");
         return FALSE;
     }
 
-    memset (out_registration, 0, sizeof (*out_registration));
-    copy_plmn (out_registration->plmn, &data[plmn_offset], len - plmn_offset);
-    out_registration->registered = out_registration->plmn[0] != '\0';
+    memset (out_operator, 0, sizeof (*out_operator));
+    copy_plmn (out_operator->plmn, &data[plmn_offset], len - plmn_offset);
+    if (message->id == MM_SIT_MESSAGE_GET_OPERATOR) {
+        if (len > 18)
+            copy_operator_name (out_operator->operator_short,
+                                sizeof (out_operator->operator_short),
+                                &data[18], len - 18);
+        if (len > 50)
+            copy_operator_name (out_operator->operator_long,
+                                sizeof (out_operator->operator_long),
+                                &data[50], len - 50);
+    } else {
+        if (len > 35)
+            copy_operator_name (out_operator->operator_short,
+                                sizeof (out_operator->operator_short),
+                                &data[35], len - 35);
+        if (len > 67)
+            copy_operator_name (out_operator->operator_long,
+                                sizeof (out_operator->operator_long),
+                                &data[67], len - 67);
+    }
     return TRUE;
 }
 
