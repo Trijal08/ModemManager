@@ -31,6 +31,7 @@ typedef enum {
     MM_SIT_MESSAGE_GET_VOICE_REGISTRATION      = 0x0700,
     MM_SIT_MESSAGE_GET_DATA_REGISTRATION       = 0x0701,
     MM_SIT_MESSAGE_GET_OPERATOR                = 0x0702,
+    MM_SIT_MESSAGE_GET_CELL_INFO_LIST          = 0x070c,
     MM_SIT_MESSAGE_SERVING_NETWORK             = 0x070e,
     MM_SIT_MESSAGE_SET_PREFERRED_DATA_MODEM    = 0x0740,
     MM_SIT_MESSAGE_SET_RADIO_POWER             = 0x0800,
@@ -122,6 +123,21 @@ typedef struct {
 } MMSitSignal;
 
 typedef struct {
+    gboolean registered;
+    guint8   connection_status;
+    gchar    operator_id[7];
+    guint32  ci;
+    guint32  physical_ci;
+    guint32  tac;
+    guint32  earfcn;
+    guint32  bandwidth;
+    gint32   rsrp;
+    gint32   rsrq;
+    gint32   rssnr;
+    gint32   timing_advance;
+} MMSitCellInfoLte;
+
+typedef struct {
     guint16  cause;
     guint8   cid;
     guint8   active;
@@ -203,6 +219,9 @@ gboolean mm_sit_message_parse_operator                (const MMSitMessage    *me
                                                        GError               **error);
 gboolean mm_sit_message_parse_signal                  (const MMSitMessage    *message,
                                                        MMSitSignal           *out_signal,
+                                                       GError               **error);
+gboolean mm_sit_message_parse_cell_info_list          (const MMSitMessage    *message,
+                                                       GArray               **out_cells,
                                                        GError               **error);
 gboolean mm_sit_message_parse_data_call               (const MMSitMessage    *message,
                                                        MMSitDataCall         *out_call,

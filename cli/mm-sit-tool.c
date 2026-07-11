@@ -451,7 +451,7 @@ print_message (const MMSitMessage *message)
     g_print ("%s type=%u id=0x%04x token=0x%04x length=%u",
              mm_sit_message_id_get_string (message->id),
              message->type, message->id, message->token, message->length);
-    if (message->has_status)
+    if (message->has_status && message->id != MM_SIT_MESSAGE_GET_CELL_INFO_LIST)
         g_print (" status=%u", message->status);
     g_print ("\n");
 
@@ -478,6 +478,26 @@ print_message (const MMSitMessage *message)
 
         if (mm_sit_message_parse_operator (message, &operator_info, NULL))
             print_operator (&operator_info);
+    } else if (message->id == MM_SIT_MESSAGE_GET_CELL_INFO_LIST) {
+        g_autoptr(GArray) cells = NULL;
+
+        if (mm_sit_message_parse_cell_info_list (message, &cells, NULL)) {
+            guint i;
+
+            g_print ("  LTE cells: %u\n", cells->len);
+            for (i = 0; i < cells->len; i++) {
+                const MMSitCellInfoLte *cell = &g_array_index (cells, MMSitCellInfoLte, i);
+
+                g_print ("  [%u] PLMN=%s ECI=%u (0x%08x) eNodeB=%u sector=%u "
+                         "TAC=%u PCI=%u EARFCN=%u bandwidth=%u kHz "
+                         "RSRP=-%d dBm RSRQ=-%d dB SNR=%.1f dB TA=%d%s\n",
+                         i, cell->operator_id, cell->ci, cell->ci,
+                         cell->ci >> 8, cell->ci & 0xff,
+                         cell->tac, cell->physical_ci, cell->earfcn, cell->bandwidth,
+                         cell->rsrp, cell->rsrq, cell->rssnr / 10.0,
+                         cell->timing_advance, cell->registered ? " serving" : "");
+            }
+        }
     } else if (message->id == MM_SIT_MESSAGE_DATA_CALL_LIST_CHANGED ||
                message->id == MM_SIT_MESSAGE_SETUP_DATA_CALL) {
         MMSitDataCall call;

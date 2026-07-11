@@ -865,6 +865,96 @@ mm_sit_message_parse_signal (const MMSitMessage *message,
     return TRUE;
 }
 
+gboolean
+mm_sit_message_parse_cell_info_list (const MMSitMessage *message,
+                                     GArray            **out_cells,
+                                     GError            **error)
+{
+    static const guint record_sizes[] = { 0xa4, 0x2b, 0x13c, 0x114, 0x110, 0x18c };
+    const guint8      *data;
+    gsize              len;
+    gsize              offset = 16;
+    guint32            count;
+    guint32            i;
+    g_autoptr(GArray)   cells = NULL;
+
+    g_return_val_if_fail (out_cells != NULL, FALSE);
+    *out_cells = NULL;
+    if (!message || message->id != MM_SIT_MESSAGE_GET_CELL_INFO_LIST ||
+        message->type != MM_SIT_MESSAGE_TYPE_RESPONSE) {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                             "Message is not a SIT cell-info-list response");
+        return FALSE;
+    }
+    data = mm_sit_message_get_data (message, &len);
+    if (len < offset) {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                             "SIT cell-info-list response is truncated");
+        return FALSE;
+    }
+
+    count = read_le32 (&data[12]);
+    cells = g_array_new (FALSE, FALSE, sizeof (MMSitCellInfoLte));
+    for (i = 0; i < count; i++) {
+        const guint8 *record;
+        const guint8 *lte;
+        guint         type;
+        guint         record_size;
+
+        if (offset + 3 > len) {
+            g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                                 "SIT cell-info record header is truncated");
+            return FALSE;
+        }
+        record = &data[offset];
+        type = record[0];
+        if (type >= G_N_ELEMENTS (record_sizes)) {
+            g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                         "Unknown SIT V5 cell-info type %u", type);
+            return FALSE;
+        }
+        record_size = record_sizes[type];
+        if (offset + record_size > len) {
+            g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                         "SIT V5 cell-info type %u is truncated", type);
+            return FALSE;
+        }
+
+        /* Raw type 2 is RIL_CELL_INFO_TYPE_LTE. Skip other valid V5 records
+         * until their ModemManager mappings are implemented. */
+        if (type == 2) {
+            MMSitCellInfoLte cell = { 0 };
+            guint            mnc_len;
+
+            lte = &record[3];
+            memcpy (cell.operator_id, lte, 3);
+            mnc_len = lte[5] == '#' ? 2 : 3;
+            memcpy (&cell.operator_id[3], &lte[3], mnc_len);
+            cell.operator_id[3 + mnc_len] = '\0';
+            cell.registered = record[1] == 1;
+            cell.connection_status = record[2];
+            cell.ci = read_le32 (&lte[6]);
+            cell.physical_ci = read_le32 (&lte[10]);
+            cell.tac = read_le32 (&lte[14]);
+            cell.earfcn = read_le32 (&lte[18]);
+            cell.bandwidth = read_le32 (&lte[22]);
+            cell.rsrp = (gint32) read_le32 (&lte[0x121]);
+            cell.rsrq = (gint32) read_le32 (&lte[0x125]);
+            cell.rssnr = (gint32) read_le32 (&lte[0x129]);
+            cell.timing_advance = (gint32) read_le32 (&lte[0x135]);
+            g_array_append_val (cells, cell);
+        }
+        offset += record_size;
+    }
+    if (offset != len) {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                     "SIT cell-info-list has %" G_GSIZE_FORMAT " trailing bytes", len - offset);
+        return FALSE;
+    }
+    *out_cells = g_steal_pointer (&cells);
+    return TRUE;
+}
+
 static void
 format_ipv4 (gchar        destination[16],
              const guint8 address[4])

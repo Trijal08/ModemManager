@@ -514,6 +514,94 @@ load_signal_quality (MMIfaceModem        *iface,
                               task);
 }
 
+static GList *
+get_cell_info_finish (MMIfaceModem  *self,
+                      GAsyncResult  *res,
+                      GError       **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+static void
+sit_cell_info_list_free (GList *list)
+{
+    g_list_free_full (list, g_object_unref);
+}
+
+static void
+get_cell_info_ready (MMSitClient *client,
+                     GAsyncResult *res,
+                     GTask        *task)
+{
+    g_autoptr(GArray) cells = NULL;
+    GList            *result = NULL;
+    GError           *error = NULL;
+    guint             i;
+
+    cells = mm_sit_client_get_cell_info_finish (client, res, &error);
+    if (!cells) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    for (i = 0; i < cells->len; i++) {
+        const MMSitCellInfoLte *cell;
+        MMCellInfoLte          *info;
+        g_autofree gchar       *tac = NULL;
+        g_autofree gchar       *ci = NULL;
+        g_autofree gchar       *pci = NULL;
+
+        cell = &g_array_index (cells, MMSitCellInfoLte, i);
+        info = MM_CELL_INFO_LTE (mm_cell_info_lte_new_from_dictionary (NULL));
+        tac = g_strdup_printf ("%X", cell->tac);
+        ci = g_strdup_printf ("%X", cell->ci);
+        pci = g_strdup_printf ("%X", cell->physical_ci);
+        mm_cell_info_lte_set_operator_id (info, cell->operator_id);
+        mm_cell_info_lte_set_tac (info, tac);
+        mm_cell_info_lte_set_ci (info, ci);
+        mm_cell_info_lte_set_physical_ci (info, pci);
+        mm_cell_info_lte_set_earfcn (info, cell->earfcn);
+        mm_cell_info_lte_set_bandwidth (info, cell->bandwidth);
+        if (cell->rsrp >= 44 && cell->rsrp <= 140)
+            mm_cell_info_lte_set_rsrp (info, -(gdouble) cell->rsrp);
+        if (cell->rsrq >= 3 && cell->rsrq <= 34)
+            mm_cell_info_lte_set_rsrq (info, -(gdouble) cell->rsrq);
+        if (cell->timing_advance >= 0 && cell->timing_advance < G_MAXINT32)
+            mm_cell_info_lte_set_timing_advance (info, cell->timing_advance);
+        if (cell->registered) {
+            mm_cell_info_set_serving (MM_CELL_INFO (info), TRUE);
+            mm_cell_info_lte_set_serving_cell_type (info, MM_SERVING_CELL_TYPE_PCELL);
+        }
+        result = g_list_append (result, info);
+    }
+
+    g_task_return_pointer (task, result, (GDestroyNotify) sit_cell_info_list_free);
+    g_object_unref (task);
+}
+
+static void
+get_cell_info (MMIfaceModem        *iface,
+               GAsyncReadyCallback callback,
+               gpointer            user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_cell_info (client, NULL,
+                                 (GAsyncReadyCallback) get_cell_info_ready,
+                                 task);
+}
+
 static MMModemPowerState
 load_power_state_finish (MMIfaceModem  *self,
                          GAsyncResult  *res,
@@ -946,6 +1034,8 @@ iface_modem_init (MMIfaceModemInterface *iface)
     iface->load_power_state_finish = load_power_state_finish;
     iface->load_signal_quality = load_signal_quality;
     iface->load_signal_quality_finish = load_signal_quality_finish;
+    iface->get_cell_info = get_cell_info;
+    iface->get_cell_info_finish = get_cell_info_finish;
     iface->modem_power_up = modem_power_up;
     iface->modem_power_up_finish = modem_set_power_finish;
     iface->modem_power_down = modem_power_down;

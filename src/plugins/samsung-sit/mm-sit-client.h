@@ -100,6 +100,14 @@ gboolean mm_sit_client_get_signal_finish (MMSitClient        *self,
                                           MMSitSignal        *out_signal,
                                           GError            **error);
 
+void    mm_sit_client_get_cell_info        (MMSitClient        *self,
+                                            GCancellable       *cancellable,
+                                            GAsyncReadyCallback callback,
+                                            gpointer            user_data);
+GArray *mm_sit_client_get_cell_info_finish (MMSitClient        *self,
+                                            GAsyncResult       *res,
+                                            GError            **error);
+
 void     mm_sit_client_set_indication_filter        (MMSitClient        *self,
                                                      guint32             filter,
                                                      GCancellable       *cancellable,

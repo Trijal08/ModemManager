@@ -409,6 +409,55 @@ test_parse_signal (void)
 }
 
 static void
+test_parse_cell_info_lte_v5 (void)
+{
+    guint8                   raw[332] = { 1, 0, 0x0c, 0x07, 0x4c, 0x01, 1, 0 };
+    guint8                  *record = &raw[16];
+    guint8                  *lte = &record[3];
+    g_autoptr(MMSitMessage)  message = NULL;
+    g_autoptr(GArray)        cells = NULL;
+    g_autoptr(GError)        error = NULL;
+    MMSitCellInfoLte        *cell;
+
+    set_le32 (&raw[8], 0x0d3f);
+    set_le32 (&raw[12], 1);
+    record[0] = 2;
+    record[1] = 1;
+    record[2] = 1;
+    memcpy (lte, "26203#", 6);
+    set_le32 (&lte[6], 0x019de53f);
+    set_le32 (&lte[10], 191);
+    set_le32 (&lte[14], 51510);
+    set_le32 (&lte[18], 3350);
+    set_le32 (&lte[22], 20000);
+    set_le32 (&lte[0x119], 1);
+    set_le32 (&lte[0x11d], 41);
+    set_le32 (&lte[0x121], 100);
+    set_le32 (&lte[0x125], 9);
+    set_le32 (&lte[0x129], 20);
+    set_le32 (&lte[0x131], 255);
+    set_le32 (&lte[0x135], 2);
+
+    message = mm_sit_message_parse (raw, sizeof (raw), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_cell_info_list (message, &cells, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (cells->len, ==, 1);
+    cell = &g_array_index (cells, MMSitCellInfoLte, 0);
+    g_assert_true (cell->registered);
+    g_assert_cmpstr (cell->operator_id, ==, "26203");
+    g_assert_cmphex (cell->ci, ==, 0x019de53f);
+    g_assert_cmpuint (cell->physical_ci, ==, 191);
+    g_assert_cmpuint (cell->tac, ==, 51510);
+    g_assert_cmpuint (cell->earfcn, ==, 3350);
+    g_assert_cmpuint (cell->bandwidth, ==, 20000);
+    g_assert_cmpint (cell->rsrp, ==, 100);
+    g_assert_cmpint (cell->rsrq, ==, 9);
+    g_assert_cmpint (cell->rssnr, ==, 20);
+    g_assert_cmpint (cell->timing_advance, ==, 2);
+}
+
+static void
 test_parse_data_call (void)
 {
     guint8 response[304] = { 1, 0, 0, 6, 0x30, 0x01, 1, 0 };
@@ -1092,6 +1141,7 @@ main (int argc,
     g_test_add_func ("/MM/sit/decode/radio", test_parse_radio);
     g_test_add_func ("/MM/sit/decode/sim-registration", test_parse_status_and_registration);
     g_test_add_func ("/MM/sit/decode/signal", test_parse_signal);
+    g_test_add_func ("/MM/sit/decode/cell-info-lte-v5", test_parse_cell_info_lte_v5);
     g_test_add_func ("/MM/sit/decode/data-call", test_parse_data_call);
     g_test_add_func ("/MM/sit/decode/carrier-sim-info", test_parse_carrier_sim_info);
     g_test_add_func ("/MM/sit/carrier-config/resolve", test_carrier_config_resolver);

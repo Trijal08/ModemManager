@@ -627,6 +627,47 @@ mm_sit_client_get_signal_finish (MMSitClient *self,
     return TRUE;
 }
 
+static void
+get_cell_info_ready (MMSitClient *self,
+                     GAsyncResult *res,
+                     GTask *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    GArray                 *cells = NULL;
+    GError                 *error = NULL;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (response && mm_sit_message_parse_cell_info_list (response, &cells, &error))
+        g_task_return_pointer (task, cells, (GDestroyNotify) g_array_unref);
+    else
+        g_task_return_error (task, error);
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_get_cell_info (MMSitClient        *self,
+                             GCancellable       *cancellable,
+                             GAsyncReadyCallback callback,
+                             gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_CELL_INFO_LIST, next_token (self));
+    mm_sit_client_command (self, request, 5, cancellable,
+                           (GAsyncReadyCallback) get_cell_info_ready, task);
+}
+
+GArray *
+mm_sit_client_get_cell_info_finish (MMSitClient  *self,
+                                    GAsyncResult *res,
+                                    GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), NULL);
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
 void
 mm_sit_client_set_indication_filter (MMSitClient        *self,
                                      guint32             filter,
