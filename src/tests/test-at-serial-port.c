@@ -85,6 +85,12 @@ static const ParseResponseTest parse_error_tests[] = {
     { "\r\nNO DIALTONE\r\n\r\nSomething extra\r\n", TRUE, TRUE}
 };
 
+static const ParseResponseTest parse_sms_prompt_tests[] = {
+    { "\r\n> ", TRUE, FALSE},
+    { "\n> ", TRUE, FALSE},
+    { "> ", FALSE, FALSE}
+};
+
 static void
 at_serial_echo_removal (void)
 {
@@ -155,6 +161,12 @@ at_serial_parse_error (void)
     _run_parse_test (parse_error_tests, G_N_ELEMENTS(parse_error_tests));
 }
 
+static void
+at_serial_parse_sms_prompt (void)
+{
+    _run_parse_test (parse_sms_prompt_tests, G_N_ELEMENTS(parse_sms_prompt_tests));
+}
+
 int main (int argc, char **argv)
 {
     g_test_init (&argc, &argv, NULL);
@@ -162,6 +174,7 @@ int main (int argc, char **argv)
     g_test_add_func ("/ModemManager/AT-serial/echo-removal", at_serial_echo_removal);
     g_test_add_func ("/ModemManager/AT-serial/parse-ok", at_serial_parse_ok);
     g_test_add_func ("/ModemManager/AT-serial/parse-error", at_serial_parse_error);
+    g_test_add_func ("/ModemManager/AT-serial/parse-sms-prompt", at_serial_parse_sms_prompt);
 
     return g_test_run ();
 }
