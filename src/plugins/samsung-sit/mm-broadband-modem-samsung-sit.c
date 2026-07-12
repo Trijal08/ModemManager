@@ -149,7 +149,7 @@ update_registration (MMBroadbandModemSamsungSit *self,
     mm_iface_modem_3gpp_apply_deferred_registration_state (MM_IFACE_MODEM_3GPP (self));
 }
 
-static void
+static gboolean
 update_operator (MMBroadbandModemSamsungSit *self,
                  const MMSitOperator        *operator_info)
 {
@@ -165,10 +165,13 @@ update_operator (MMBroadbandModemSamsungSit *self,
 
     operator_name = operator_info->operator_long[0] ? operator_info->operator_long :
                     operator_info->operator_short[0] ? operator_info->operator_short : NULL;
-    if (operator_info->plmn[0] && operator_name) {
+    if (operator_info->plmn[0] && operator_name &&
+        g_strcmp0 (self->priv->operator_name, operator_name) != 0) {
+        operator_changed = TRUE;
         g_free (self->priv->operator_name);
         self->priv->operator_name = g_strdup (operator_name);
     }
+    return operator_changed;
 }
 
 static void
@@ -208,7 +211,11 @@ sit_indication (MMSitClient              *client,
         mm_sit_message_parse_operator (message, &operator_info, NULL)) {
         mm_obj_dbg (self, "SIT serving network changed (operator: %s)",
                     operator_info.plmn[0] ? operator_info.plmn : "unknown");
-        update_operator (self, &operator_info);
+        /* Propagate a changed operator to the DBus properties: the initial
+         * load may have run while the CP was still (re-)camping and the
+         * core does not re-query without a registration transition. */
+        if (update_operator (self, &operator_info))
+            mm_iface_modem_3gpp_reload_current_registration_info (MM_IFACE_MODEM_3GPP (self), NULL, NULL);
     }
 
     if (message->id == MM_SIT_MESSAGE_SIGNAL_STRENGTH_CHANGED) {
