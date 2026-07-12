@@ -931,7 +931,10 @@ load_sim_slots_ready (MMSitClient *client,
             if (!fallback_port && port->iccid_len)
                 fallback_port = port;
         }
-        active = active_port != NULL;
+        /* Only the physical slot mapped to logical stack 0 is the active
+         * one in ModemManager's slot model; a secondary or stale active
+         * port must not mark the non-primary SIM as active. */
+        active = primary_port != NULL;
         identity_port = (primary_port && primary_port->state == 1) ? primary_port :
                         active_port ? active_port :
                         (primary_port && primary_port->iccid_len) ? primary_port :
