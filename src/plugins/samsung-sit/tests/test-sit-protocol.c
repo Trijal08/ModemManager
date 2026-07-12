@@ -23,6 +23,14 @@ assert_bytes (GByteArray  *actual,
 }
 
 static void
+set_le16 (guint8  *data,
+          guint16  value)
+{
+    data[0] = value & 0xff;
+    data[1] = value >> 8;
+}
+
+static void
 set_le32 (guint8 *data,
           guint32 value)
 {
@@ -112,6 +120,34 @@ test_build_radio (void)
     g_clear_pointer (&request, g_byte_array_unref);
     request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_RADIO_POWER, 0x43);
     assert_bytes (request, expected_get, sizeof (expected_get));
+}
+
+static void
+test_build_slot_mapping (void)
+{
+    static const guint8 expected[] = {
+        0x00, 0x00, 0x50, 0x02, 0x15, 0x00, 0x34, 0x12,
+        0x00, 0x00, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00, 0x00,
+    };
+    static const MMSitLogicalSlotMapping mappings[] = {
+        { .physical_slot_id = 1, .port_id = 0 },
+        { .physical_slot_id = 0, .port_id = 1 },
+    };
+    g_autoptr(GByteArray) request = NULL;
+    g_autoptr(GError)     error = NULL;
+
+    request = mm_sit_request_new_set_logical_slot_mapping (0x1234,
+                                                            mappings,
+                                                            G_N_ELEMENTS (mappings),
+                                                            &error);
+    g_assert_no_error (error);
+    assert_bytes (request, expected, sizeof (expected));
+
+    g_clear_pointer (&request, g_byte_array_unref);
+    request = mm_sit_request_new_set_logical_slot_mapping (1, mappings, 0, &error);
+    g_assert_null (request);
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
 }
 
 static void
@@ -300,6 +336,121 @@ test_parse_status_and_registration (void)
     g_assert_cmpstr (operator_info.plmn, ==, "26203");
     g_assert_cmpstr (operator_info.operator_short, ==, "o2-de");
     g_assert_cmpstr (operator_info.operator_long, ==, "o2 - de");
+}
+
+static void
+test_parse_sim_slot_status (void)
+{
+    static const guint8 eid[] = {
+        0x89, 0x01, 0x23, 0x45, 0x67, 0x89, 0x01, 0x23,
+        0x45, 0x67, 0x89, 0x01, 0x23, 0x45, 0x67, 0x89,
+    };
+    static const guint8 iccid[] = {
+        0x98, 0x10, 0x32, 0x54, 0x76, 0x98, 0x10, 0x32, 0x54, 0xf6,
+    };
+    guint8 indication[429] = { 0 };
+    guint8 response[433] = { 0 };
+    guint8 legacy[269] = { 0 };
+    guint8 *slot0;
+    guint8 *slot1;
+    g_autoptr(MMSitMessage) message = NULL;
+    g_autoptr(GError)       error = NULL;
+    MMSitSimSlotStatus      status;
+
+    indication[0] = MM_SIT_MESSAGE_TYPE_INDICATION;
+    set_le16 (&indication[2], MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED);
+    set_le16 (&indication[4], sizeof (indication));
+    indication[8] = 2;
+    slot0 = &indication[9];
+    slot0[0] = 1;
+    slot0[1] = 2;
+    slot0[2] = 0x3b;
+    slot0[3] = 0x9f;
+    slot0[35] = sizeof (eid);
+    memcpy (&slot0[36], eid, sizeof (eid));
+    slot0[52] = 2;
+    slot0[53 + 11] = 0xff;
+    slot0[53 + 12] = 0;
+    slot0[66 + 11] = 0xff;
+    slot0[66 + 12] = 0;
+
+    slot1 = &indication[9 + 105];
+    slot1[0] = 1;
+    slot1[1] = 1;
+    slot1[2] = 0x3b;
+    slot1[52] = 1;
+    slot1[53] = sizeof (iccid);
+    memcpy (&slot1[54], iccid, sizeof (iccid));
+    slot1[53 + 11] = 0;
+    slot1[53 + 12] = 1;
+
+    message = mm_sit_message_parse (indication, sizeof (indication), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_sim_slot_status (message, &status, &error));
+    g_assert_no_error (error);
+    g_assert_false (status.legacy);
+    g_assert_cmpuint (status.slot_count, ==, 2);
+    g_assert_cmpuint (status.slots[0].eid_len, ==, sizeof (eid));
+    g_assert_cmpmem (status.slots[0].eid, status.slots[0].eid_len, eid, sizeof (eid));
+    g_assert_cmpuint (status.slots[0].port_count, ==, 2);
+    g_assert_cmpuint (status.slots[0].ports[0].logical_slot_id, ==, 0xff);
+    g_assert_cmpuint (status.slots[1].port_count, ==, 1);
+    g_assert_cmpuint (status.slots[1].ports[0].logical_slot_id, ==, 0);
+    g_assert_cmpuint (status.slots[1].ports[0].state, ==, 1);
+    g_assert_cmpmem (status.slots[1].ports[0].iccid,
+                     status.slots[1].ports[0].iccid_len,
+                     iccid, sizeof (iccid));
+
+    response[0] = MM_SIT_MESSAGE_TYPE_RESPONSE;
+    set_le16 (&response[2], MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS);
+    set_le16 (&response[4], sizeof (response));
+    set_le16 (&response[6], 7);
+    response[12] = indication[8];
+    memcpy (&response[13], &indication[9], sizeof (indication) - 9);
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (response, sizeof (response), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_sim_slot_status (message, &status, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (status.slot_count, ==, 2);
+    g_assert_cmpuint (status.slots[1].ports[0].logical_slot_id, ==, 0);
+
+    response[12] = MM_SIT_MAX_SIM_SLOTS + 1;
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (response, sizeof (response), &error);
+    g_assert_no_error (error);
+    g_assert_false (mm_sit_message_parse_sim_slot_status (message, &status, &error));
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+
+    g_clear_error (&error);
+    legacy[0] = MM_SIT_MESSAGE_TYPE_INDICATION;
+    set_le16 (&legacy[2], MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED);
+    set_le16 (&legacy[4], sizeof (legacy));
+    legacy[8] = 2;
+    slot0 = &legacy[9];
+    slot0[0] = 1;
+    slot0[1] = 0;
+    slot0[2] = 1;
+    slot0[3] = 0x3b;
+    slot0[36] = 0xff;
+    slot0[48] = sizeof (eid);
+    memcpy (&slot0[49], eid, sizeof (eid));
+    slot1 = &legacy[9 + 65];
+    slot1[0] = 1;
+    slot1[1] = 1;
+    slot1[36] = 0;
+    slot1[37] = sizeof (iccid);
+    memcpy (&slot1[38], iccid, sizeof (iccid));
+
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (legacy, sizeof (legacy), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_sim_slot_status (message, &status, &error));
+    g_assert_no_error (error);
+    g_assert_true (status.legacy);
+    g_assert_cmpuint (status.slot_count, ==, 2);
+    g_assert_cmpuint (status.slots[1].ports[0].logical_slot_id, ==, 0);
+    g_assert_cmpuint (status.slots[1].ports[0].state, ==, 1);
 }
 
 static void
@@ -1136,10 +1287,12 @@ main (int argc,
     g_test_add_func ("/MM/sit/parse/invalid", test_parse_invalid);
     g_test_add_func ("/MM/sit/message-id/names", test_message_id_names);
     g_test_add_func ("/MM/sit/build/radio", test_build_radio);
+    g_test_add_func ("/MM/sit/build/slot-mapping", test_build_slot_mapping);
     g_test_add_func ("/MM/sit/build/data", test_build_data_requests);
     g_test_add_func ("/MM/sit/build/config", test_build_config_requests);
     g_test_add_func ("/MM/sit/decode/radio", test_parse_radio);
     g_test_add_func ("/MM/sit/decode/sim-registration", test_parse_status_and_registration);
+    g_test_add_func ("/MM/sit/decode/sim-slot-status", test_parse_sim_slot_status);
     g_test_add_func ("/MM/sit/decode/signal", test_parse_signal);
     g_test_add_func ("/MM/sit/decode/cell-info-lte-v5", test_parse_cell_info_lte_v5);
     g_test_add_func ("/MM/sit/decode/data-call", test_parse_data_call);

@@ -463,6 +463,96 @@ mm_sit_client_get_sim_status_finish (MMSitClient     *self,
 }
 
 static void
+get_sim_slot_status_ready (MMSitClient *self,
+                           GAsyncResult *res,
+                           GTask *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    MMSitSimSlotStatus     *status;
+    GError                 *error = NULL;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    status = g_new0 (MMSitSimSlotStatus, 1);
+    if (response && mm_sit_message_parse_sim_slot_status (response, status, &error))
+        g_task_return_pointer (task, status, g_free);
+    else {
+        g_free (status);
+        g_task_return_error (task, error);
+    }
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_get_sim_slot_status (MMSitClient        *self,
+                                   GCancellable       *cancellable,
+                                   GAsyncReadyCallback callback,
+                                   gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS,
+                                        next_token (self));
+    mm_sit_client_command (self, request, 5, cancellable,
+                           (GAsyncReadyCallback) get_sim_slot_status_ready, task);
+}
+
+gboolean
+mm_sit_client_get_sim_slot_status_finish (MMSitClient        *self,
+                                          GAsyncResult       *res,
+                                          MMSitSimSlotStatus *out_status,
+                                          GError            **error)
+{
+    MMSitSimSlotStatus *status;
+
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    g_return_val_if_fail (out_status != NULL, FALSE);
+
+    status = g_task_propagate_pointer (G_TASK (res), error);
+    if (!status)
+        return FALSE;
+    *out_status = *status;
+    g_free (status);
+    return TRUE;
+}
+
+void
+mm_sit_client_set_logical_slot_mapping (MMSitClient                  *self,
+                                        const MMSitLogicalSlotMapping *mappings,
+                                        guint                         mapping_count,
+                                        GCancellable                 *cancellable,
+                                        GAsyncReadyCallback           callback,
+                                        gpointer                      user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    g_autoptr(GError)     error = NULL;
+
+    request = mm_sit_request_new_set_logical_slot_mapping (next_token (self),
+                                                            mappings,
+                                                            mapping_count,
+                                                            &error);
+    if (!request) {
+        GTask *task;
+
+        task = g_task_new (self, cancellable, callback, user_data);
+        g_task_return_error (task, g_steal_pointer (&error));
+        g_object_unref (task);
+        return;
+    }
+    run_checked_command (self, request, 10, cancellable, callback, user_data);
+}
+
+gboolean
+mm_sit_client_set_logical_slot_mapping_finish (MMSitClient  *self,
+                                               GAsyncResult *res,
+                                               GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
 get_registration_ready (MMSitClient *self,
                         GAsyncResult *res,
                         GTask *task)

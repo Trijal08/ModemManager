@@ -73,6 +73,25 @@ gboolean mm_sit_client_get_sim_status_finish (MMSitClient        *self,
                                               MMSitSimStatus     *out_status,
                                               GError            **error);
 
+void     mm_sit_client_get_sim_slot_status        (MMSitClient        *self,
+                                                   GCancellable       *cancellable,
+                                                   GAsyncReadyCallback callback,
+                                                   gpointer            user_data);
+gboolean mm_sit_client_get_sim_slot_status_finish (MMSitClient        *self,
+                                                   GAsyncResult       *res,
+                                                   MMSitSimSlotStatus *out_status,
+                                                   GError            **error);
+
+void     mm_sit_client_set_logical_slot_mapping        (MMSitClient                  *self,
+                                                        const MMSitLogicalSlotMapping *mappings,
+                                                        guint                         mapping_count,
+                                                        GCancellable                 *cancellable,
+                                                        GAsyncReadyCallback           callback,
+                                                        gpointer                      user_data);
+gboolean mm_sit_client_set_logical_slot_mapping_finish (MMSitClient                  *self,
+                                                        GAsyncResult                 *res,
+                                                        GError                      **error);
+
 void     mm_sit_client_get_registration        (MMSitClient        *self,
                                                 GCancellable       *cancellable,
                                                 GAsyncReadyCallback callback,

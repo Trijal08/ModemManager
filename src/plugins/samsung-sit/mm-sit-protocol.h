@@ -10,6 +10,11 @@
 #define MM_SIT_STATUS_SIZE          4
 #define MM_SIT_MAX_APN_LENGTH       100
 #define MM_SIT_SHA1_LENGTH          20
+#define MM_SIT_MAX_SIM_SLOTS        4
+#define MM_SIT_MAX_SIM_PORTS        4
+#define MM_SIT_MAX_ATR_LENGTH       33
+#define MM_SIT_MAX_ICCID_LENGTH     10
+#define MM_SIT_MAX_EID_LENGTH       16
 
 typedef enum {
     MM_SIT_MESSAGE_TYPE_REQUEST    = 0,
@@ -21,6 +26,9 @@ typedef enum {
     MM_SIT_MESSAGE_GET_SIM_STATUS             = 0x0200,
     MM_SIT_MESSAGE_SIM_IO                     = 0x0208,
     MM_SIT_MESSAGE_SIM_STATUS_CHANGED         = 0x0210,
+    MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS        = 0x024d,
+    MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED    = 0x024e,
+    MM_SIT_MESSAGE_SET_LOGICAL_SLOT_MAPPING   = 0x0250,
     MM_SIT_MESSAGE_SETUP_DATA_CALL             = 0x0600,
     MM_SIT_MESSAGE_DEACTIVATE_DATA_CALL        = 0x0601,
     MM_SIT_MESSAGE_SET_INITIAL_ATTACH_APN      = 0x0603,
@@ -153,6 +161,34 @@ typedef struct {
     gchar imsi[16];
 } MMSitCarrierSimInfo;
 
+typedef struct {
+    guint8 iccid_len;
+    guint8 iccid[MM_SIT_MAX_ICCID_LENGTH];
+    guint8 logical_slot_id;
+    guint8 state;
+} MMSitSimPort;
+
+typedef struct {
+    guint8       card_state;
+    guint8       atr_len;
+    guint8       atr[MM_SIT_MAX_ATR_LENGTH];
+    guint8       eid_len;
+    guint8       eid[MM_SIT_MAX_EID_LENGTH];
+    guint8       port_count;
+    MMSitSimPort ports[MM_SIT_MAX_SIM_PORTS];
+} MMSitSimSlot;
+
+typedef struct {
+    gboolean     legacy;
+    guint8       slot_count;
+    MMSitSimSlot slots[MM_SIT_MAX_SIM_SLOTS];
+} MMSitSimSlotStatus;
+
+typedef struct {
+    guint8 physical_slot_id;
+    guint8 port_id;
+} MMSitLogicalSlotMapping;
+
 gboolean     mm_sit_frame_peek_length                 (const guint8          *data,
                                                        gsize                  data_len,
                                                        guint16               *out_length,
@@ -204,6 +240,11 @@ GByteArray *mm_sit_request_new_carrier_manifest       (guint16                to
                                                        const gchar           *directory,
                                                        const guint8           sha1[MM_SIT_SHA1_LENGTH],
                                                        GError               **error);
+GByteArray *mm_sit_request_new_set_logical_slot_mapping
+                                                      (guint16                token,
+                                                       const MMSitLogicalSlotMapping *mappings,
+                                                       guint                  mapping_count,
+                                                       GError               **error);
 
 gboolean mm_sit_message_parse_radio_state             (const MMSitMessage    *message,
                                                        MMSitRadioState       *out_state,
@@ -228,6 +269,9 @@ gboolean mm_sit_message_parse_data_call               (const MMSitMessage    *me
                                                        GError               **error);
 gboolean mm_sit_message_parse_carrier_sim_info        (const MMSitMessage    *message,
                                                        MMSitCarrierSimInfo   *out_info,
+                                                       GError               **error);
+gboolean mm_sit_message_parse_sim_slot_status         (const MMSitMessage    *message,
+                                                       MMSitSimSlotStatus    *out_status,
                                                        GError               **error);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (MMSitMessage, mm_sit_message_free)

@@ -52,6 +52,7 @@ typedef struct {
     gboolean           boolean_result;
     MMSitRadioState    radio_state;
     MMSitSimStatus     sim_status;
+    MMSitSimSlotStatus sim_slot_status;
     MMSitRegistration  registration;
     MMSitOperator      operator_info;
     MMSitDataCall      data_call;
@@ -289,6 +290,67 @@ get_sim_sync (MMSitClient    *client,
 }
 
 static void
+get_sim_slot_status_ready (MMSitClient *client,
+                           GAsyncResult *res,
+                           WaitContext *ctx)
+{
+    ctx->boolean_result = mm_sit_client_get_sim_slot_status_finish (client, res,
+                                                                    &ctx->sim_slot_status,
+                                                                    &ctx->error);
+    g_main_loop_quit (ctx->loop);
+}
+
+static gboolean
+get_sim_slot_status_sync (MMSitClient        *client,
+                          MMSitSimSlotStatus *out_status,
+                          GError            **error)
+{
+    WaitContext ctx = { 0 };
+
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    mm_sit_client_get_sim_slot_status (client, NULL,
+                                       (GAsyncReadyCallback) get_sim_slot_status_ready,
+                                       &ctx);
+    g_main_loop_run (ctx.loop);
+    g_main_loop_unref (ctx.loop);
+    if (!ctx.boolean_result) {
+        g_propagate_error (error, ctx.error);
+        return FALSE;
+    }
+    *out_status = ctx.sim_slot_status;
+    return TRUE;
+}
+
+static void
+set_sim_slot_mapping_ready (MMSitClient *client,
+                            GAsyncResult *res,
+                            WaitContext *ctx)
+{
+    ctx->boolean_result = mm_sit_client_set_logical_slot_mapping_finish (client, res,
+                                                                          &ctx->error);
+    g_main_loop_quit (ctx->loop);
+}
+
+static gboolean
+set_sim_slot_mapping_sync (MMSitClient                  *client,
+                           const MMSitLogicalSlotMapping *mappings,
+                           guint                         mapping_count,
+                           GError                      **error)
+{
+    WaitContext ctx = { 0 };
+
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    mm_sit_client_set_logical_slot_mapping (client, mappings, mapping_count, NULL,
+                                            (GAsyncReadyCallback) set_sim_slot_mapping_ready,
+                                            &ctx);
+    g_main_loop_run (ctx.loop);
+    g_main_loop_unref (ctx.loop);
+    if (!ctx.boolean_result)
+        g_propagate_error (error, ctx.error);
+    return ctx.boolean_result;
+}
+
+static void
 get_registration_ready (MMSitClient *client,
                         GAsyncResult *res,
                         WaitContext *ctx)
@@ -427,6 +489,34 @@ print_operator (const MMSitOperator *operator_info)
 }
 
 static void
+print_sim_slot_status (const MMSitSimSlotStatus *status)
+{
+    guint i;
+
+    g_print ("physical SIM slots: %u (%s layout)\n",
+             status->slot_count, status->legacy ? "legacy" : "port-aware");
+    for (i = 0; i < status->slot_count; i++) {
+        const MMSitSimSlot *slot = &status->slots[i];
+        guint               j;
+
+        g_print ("  slot %u: card-state=%u ATR=%u bytes EID=%s ports=%u\n",
+                 i + 1, slot->card_state, slot->atr_len,
+                 slot->eid_len ? "present" : "none", slot->port_count);
+        for (j = 0; j < slot->port_count; j++) {
+            const MMSitSimPort *port = &slot->ports[j];
+
+            g_print ("    port %u: ICCID=%s logical-stack=",
+                     j, port->iccid_len ? "present" : "none");
+            if (port->logical_slot_id == 0xff)
+                g_print ("unmapped");
+            else
+                g_print ("%u", port->logical_slot_id);
+            g_print (" state=%u\n", port->state);
+        }
+    }
+}
+
+static void
 print_payload (const MMSitMessage *message)
 {
     const guint8 *payload;
@@ -478,6 +568,12 @@ print_message (const MMSitMessage *message)
 
         if (mm_sit_message_parse_operator (message, &operator_info, NULL))
             print_operator (&operator_info);
+    } else if (message->id == MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS ||
+               message->id == MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED) {
+        MMSitSimSlotStatus status;
+
+        if (mm_sit_message_parse_sim_slot_status (message, &status, NULL))
+            print_sim_slot_status (&status);
     } else if (message->id == MM_SIT_MESSAGE_GET_CELL_INFO_LIST) {
         g_autoptr(GArray) cells = NULL;
 
@@ -752,6 +848,8 @@ print_usage (const gchar *program)
                 "  %s [OPTIONS] status\n"
                 "  %s [OPTIONS] registration\n"
                 "  %s [OPTIONS] operator\n"
+                "  %s [OPTIONS] slots\n"
+                "  %s [OPTIONS] slot-map PHYSICAL_SLOT [PORT]\n"
                 "  %s [OPTIONS] radio on|off\n"
                 "  %s [OPTIONS] connect APN\n"
                 "  %s [OPTIONS] disconnect [CID]\n"
@@ -761,7 +859,7 @@ print_usage (const gchar *program)
                 "  %s [OPTIONS] raw MESSAGE_ID [BODY_HEX]\n"
                 "  %s ids [FILTER]\n",
                 program, program, program, program, program, program,
-                program, program, program, program, program);
+                program, program, program, program, program, program, program);
 }
 
 int
@@ -871,6 +969,42 @@ main (int argc,
             goto out;
         print_operator (&operator_info);
         success = TRUE;
+    } else if (g_str_equal (command, "slots")) {
+        MMSitSimSlotStatus status;
+
+        if (argc != 2) {
+            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "slots takes no arguments");
+            goto out;
+        }
+        if (!get_sim_slot_status_sync (client, &status, &error))
+            goto out;
+        print_sim_slot_status (&status);
+        success = TRUE;
+    } else if (g_str_equal (command, "slot-map")) {
+        MMSitLogicalSlotMapping mapping;
+        guint64                 physical_slot;
+        guint64                 port = 0;
+
+        if (argc < 3 || argc > 4) {
+            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "slot-map requires a one-based physical slot and optional zero-based port");
+            goto out;
+        }
+        if (!parse_uint64 (argv[2], MM_SIT_MAX_SIM_SLOTS, &physical_slot, &error) ||
+            (argc == 4 && !parse_uint64 (argv[3], MM_SIT_MAX_SIM_PORTS - 1, &port, &error)))
+            goto out;
+        if (!physical_slot) {
+            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                 "Physical slot numbers start at 1");
+            goto out;
+        }
+        mapping.physical_slot_id = physical_slot - 1;
+        mapping.port_id = port;
+        success = set_sim_slot_mapping_sync (client, &mapping, 1, &error);
+        if (success)
+            g_print ("logical stack 0 mapped to physical slot %" G_GUINT64_FORMAT
+                     " port %" G_GUINT64_FORMAT "\n", physical_slot, port);
     } else if (g_str_equal (command, "radio")) {
         MMSitRadioState state;
 

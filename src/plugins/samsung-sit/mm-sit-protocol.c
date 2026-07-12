@@ -241,6 +241,30 @@ mm_sit_request_new_set_preferred_modem (guint16 token,
                                token, body, sizeof (body), NULL);
 }
 
+GByteArray *
+mm_sit_request_new_set_logical_slot_mapping (guint16                       token,
+                                             const MMSitLogicalSlotMapping *mappings,
+                                             guint                         mapping_count,
+                                             GError                      **error)
+{
+    guint8 body[13] = { 0 };
+    guint  i;
+
+    if (!mappings || mapping_count == 0 || mapping_count > MM_SIT_MAX_SIM_SLOTS) {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                     "Invalid SIT logical-slot mapping count %u", mapping_count);
+        return NULL;
+    }
+
+    body[4] = mapping_count;
+    for (i = 0; i < mapping_count; i++) {
+        body[5 + (2 * i)] = mappings[i].physical_slot_id;
+        body[6 + (2 * i)] = mappings[i].port_id;
+    }
+    return mm_sit_request_new (MM_SIT_MESSAGE_SET_LOGICAL_SLOT_MAPPING,
+                               token, body, sizeof (body), NULL);
+}
+
 static gboolean
 copy_apn (guint8       *destination,
           gsize         destination_len,
@@ -543,6 +567,125 @@ mm_sit_message_parse_sim_status (const MMSitMessage *message,
     out_status->ims_app_index = data[16];
     out_status->app_count = data[17];
     out_status->present = (out_status->card_state == 1);
+    return TRUE;
+}
+
+gboolean
+mm_sit_message_parse_sim_slot_status (const MMSitMessage *message,
+                                      MMSitSimSlotStatus *out_status,
+                                      GError            **error)
+{
+    const guint8 *payload;
+    const guint8 *records;
+    gsize         payload_len;
+    gsize         prefix_len;
+    gsize         record_len;
+    guint         i;
+
+    g_return_val_if_fail (out_status != NULL, FALSE);
+
+    if (!message ||
+        !((message->type == MM_SIT_MESSAGE_TYPE_RESPONSE &&
+           message->id == MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS) ||
+          (message->type == MM_SIT_MESSAGE_TYPE_INDICATION &&
+           message->id == MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED))) {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                             "Message does not carry SIT SIM slot status");
+        return FALSE;
+    }
+    if (message->type == MM_SIT_MESSAGE_TYPE_RESPONSE &&
+        (!message->has_status || message->status != 0)) {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_FAILED,
+                             "GET_SIM_SLOT_STATUS did not return a successful response");
+        return FALSE;
+    }
+
+    payload = mm_sit_message_get_payload (message, &payload_len);
+    prefix_len = message->type == MM_SIT_MESSAGE_TYPE_RESPONSE ? MM_SIT_STATUS_SIZE : 0;
+    if (payload_len < prefix_len + 1) {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                             "SIT SIM slot status is truncated");
+        return FALSE;
+    }
+
+    memset (out_status, 0, sizeof (*out_status));
+    out_status->slot_count = payload[prefix_len];
+    if (out_status->slot_count > MM_SIT_MAX_SIM_SLOTS) {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                     "SIT SIM slot status reports %u slots", out_status->slot_count);
+        return FALSE;
+    }
+
+    record_len = payload_len - prefix_len - 1;
+    if (record_len == MM_SIT_MAX_SIM_SLOTS * 105)
+        record_len = 105;
+    else if (record_len == MM_SIT_MAX_SIM_SLOTS * 65) {
+        record_len = 65;
+        out_status->legacy = TRUE;
+    } else {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                     "Unsupported SIT SIM slot status layout (%" G_GSIZE_FORMAT " bytes)",
+                     payload_len);
+        return FALSE;
+    }
+
+    records = &payload[prefix_len + 1];
+    for (i = 0; i < out_status->slot_count; i++) {
+        const guint8 *record = &records[i * record_len];
+        MMSitSimSlot *slot = &out_status->slots[i];
+
+        slot->card_state = record[0];
+        if (out_status->legacy) {
+            MMSitSimPort *port = &slot->ports[0];
+
+            slot->atr_len = record[2];
+            slot->eid_len = record[48];
+            port->logical_slot_id = record[36];
+            port->iccid_len = record[37];
+            port->state = record[1];
+            slot->port_count = 1;
+            if (slot->atr_len > MM_SIT_MAX_ATR_LENGTH ||
+                slot->eid_len > MM_SIT_MAX_EID_LENGTH ||
+                port->iccid_len > MM_SIT_MAX_ICCID_LENGTH) {
+                g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                             "SIT legacy SIM slot %u has invalid field lengths", i);
+                return FALSE;
+            }
+            memcpy (slot->atr, &record[3], slot->atr_len);
+            memcpy (port->iccid, &record[38], port->iccid_len);
+            memcpy (slot->eid, &record[49], slot->eid_len);
+        } else {
+            guint j;
+
+            slot->atr_len = record[1];
+            slot->eid_len = record[35];
+            slot->port_count = record[52];
+            if (slot->atr_len > MM_SIT_MAX_ATR_LENGTH ||
+                slot->eid_len > MM_SIT_MAX_EID_LENGTH ||
+                slot->port_count > MM_SIT_MAX_SIM_PORTS) {
+                g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                             "SIT SIM slot %u has invalid field lengths", i);
+                return FALSE;
+            }
+            memcpy (slot->atr, &record[2], slot->atr_len);
+            memcpy (slot->eid, &record[36], slot->eid_len);
+            for (j = 0; j < slot->port_count; j++) {
+                const guint8 *port_record = &record[53 + (13 * j)];
+                MMSitSimPort *port = &slot->ports[j];
+
+                port->iccid_len = port_record[0];
+                if (port->iccid_len > MM_SIT_MAX_ICCID_LENGTH) {
+                    g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                                 "SIT SIM slot %u port %u has an invalid ICCID length",
+                                 i, j);
+                    return FALSE;
+                }
+                memcpy (port->iccid, &port_record[1], port->iccid_len);
+                port->logical_slot_id = port_record[11];
+                port->state = port_record[12];
+            }
+        }
+    }
     return TRUE;
 }
 
