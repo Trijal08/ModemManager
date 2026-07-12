@@ -21,7 +21,8 @@ static void iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface);
 static void iface_modem_signal_init (MMIfaceModemSignalInterface *iface);
 
 struct _MMBroadbandModemSamsungSitPrivate {
-    MMSitClient *client;
+    GPtrArray   *clients;
+    MMSitClient *client; /* borrowed primary logical-stack client */
     gchar       *operator_code;
     gchar       *operator_name;
     gboolean     carrier_config_ready;
@@ -424,12 +425,20 @@ mm_broadband_modem_samsung_sit_ensure_carrier_config_finish (MMBroadbandModemSam
     return g_task_propagate_boolean (G_TASK (res), error);
 }
 
+static gint
+compare_sit_ports (gconstpointer a,
+                   gconstpointer b)
+{
+    return g_strcmp0 (mm_port_get_device (MM_PORT ((gpointer) a)),
+                      mm_port_get_device (MM_PORT ((gpointer) b)));
+}
+
 MMSitClient *
 mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
                                              GError                     **error)
 {
-    GList  *ports;
-    MMPort *port;
+    GList *ports;
+    GList *l;
 
     g_return_val_if_fail (MM_IS_BROADBAND_MODEM_SAMSUNG_SIT (self), NULL);
 
@@ -445,16 +454,27 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
         return NULL;
     }
 
-    port = MM_PORT (ports->data);
-    self->priv->client = mm_sit_client_new (mm_port_get_device (port));
-    if (!mm_sit_client_open (self->priv->client, error)) {
-        g_clear_object (&self->priv->client);
-        g_list_free_full (ports, g_object_unref);
-        return NULL;
+    ports = g_list_sort (ports, compare_sit_ports);
+    self->priv->clients = g_ptr_array_new_with_free_func (g_object_unref);
+    for (l = ports; l; l = g_list_next (l)) {
+        MMPort      *port = MM_PORT (l->data);
+        MMSitClient *client;
+
+        client = mm_sit_client_new (mm_port_get_device (port));
+        if (!mm_sit_client_open (client, error)) {
+            g_object_unref (client);
+            self->priv->client = NULL;
+            g_clear_pointer (&self->priv->clients, g_ptr_array_unref);
+            g_list_free_full (ports, g_object_unref);
+            return NULL;
+        }
+        g_ptr_array_add (self->priv->clients, client);
+        mm_obj_info (self, "opened Samsung SIT logical stack %u on %s",
+                     self->priv->clients->len - 1, mm_port_get_device (port));
     }
 
+    self->priv->client = g_ptr_array_index (self->priv->clients, 0);
     g_signal_connect (self->priv->client, "indication", G_CALLBACK (sit_indication), self);
-    mm_obj_info (self, "opened Samsung SIT control port %s", mm_port_get_device (port));
     g_list_free_full (ports, g_object_unref);
     return self->priv->client;
 }
@@ -729,6 +749,419 @@ modem_power_down (MMIfaceModem        *self,
                   gpointer             user_data)
 {
     modem_set_power (self, MM_SIT_RADIO_STATE_OFF, callback, user_data);
+}
+
+/*****************************************************************************/
+/* SIM slots */
+
+/* Right after CP boot the slot inventory is published before the CP maps a
+ * port to logical stack 0; the mapping lands a few seconds later (announced
+ * with SIM_SLOT_STATUS_CHANGED, which we do not consume during init). */
+#define LOAD_SIM_SLOTS_ATTEMPTS   10
+#define LOAD_SIM_SLOTS_RETRY_SECS 1
+
+typedef struct {
+    GPtrArray *sim_slots;
+    guint      primary_sim_slot;
+    guint      attempts_left;
+} LoadSimSlotsContext;
+
+static void
+sim_slot_free (MMBaseSim *sim)
+{
+    if (sim)
+        g_object_unref (sim);
+}
+
+static void
+load_sim_slots_context_free (LoadSimSlotsContext *ctx)
+{
+    g_clear_pointer (&ctx->sim_slots, g_ptr_array_unref);
+    g_free (ctx);
+}
+
+static gboolean
+load_sim_slots_finish (MMIfaceModem  *self,
+                       GAsyncResult  *res,
+                       GPtrArray    **sim_slots,
+                       guint         *primary_sim_slot,
+                       GError       **error)
+{
+    LoadSimSlotsContext *ctx;
+
+    if (!g_task_propagate_boolean (G_TASK (res), error))
+        return FALSE;
+
+    ctx = g_task_get_task_data (G_TASK (res));
+    if (sim_slots)
+        *sim_slots = g_steal_pointer (&ctx->sim_slots);
+    if (primary_sim_slot)
+        *primary_sim_slot = ctx->primary_sim_slot;
+    return TRUE;
+}
+
+static void load_sim_slots_ready (MMSitClient *client,
+                                  GAsyncResult *res,
+                                  GTask        *task);
+
+static gboolean
+load_sim_slots_retry (GTask *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return G_SOURCE_REMOVE;
+    }
+    mm_sit_client_get_sim_slot_status (client, NULL,
+                                       (GAsyncReadyCallback) load_sim_slots_ready,
+                                       task);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+load_sim_slots_ready (MMSitClient *client,
+                      GAsyncResult *res,
+                      GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    LoadSimSlotsContext        *ctx = g_task_get_task_data (task);
+    MMSitSimSlotStatus          status;
+    GError                     *error = NULL;
+    guint                       i;
+
+    if (!mm_sit_client_get_sim_slot_status_finish (client, res, &status, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    ctx->sim_slots = g_ptr_array_new_full (status.slot_count, (GDestroyNotify) sim_slot_free);
+    for (i = 0; i < status.slot_count; i++) {
+        const MMSitSimSlot *slot = &status.slots[i];
+        const MMSitSimPort *primary_port = NULL;
+        const MMSitSimPort *active_port = NULL;
+        const MMSitSimPort *fallback_port = NULL;
+        const MMSitSimPort *identity_port;
+        g_autofree gchar   *raw_iccid = NULL;
+        g_autofree gchar   *iccid = NULL;
+        g_autofree gchar   *eid = NULL;
+        g_autoptr(GError)   inner_error = NULL;
+        gboolean            active = FALSE;
+        guint               j;
+
+        for (j = 0; j < slot->port_count; j++) {
+            const MMSitSimPort *port = &slot->ports[j];
+
+            if (port->logical_slot_id == 0) {
+                ctx->primary_sim_slot = i + 1;
+                primary_port = port;
+            }
+            if (!active_port && port->state == 1)
+                active_port = port;
+            if (!fallback_port && port->iccid_len)
+                fallback_port = port;
+        }
+        active = active_port != NULL;
+        identity_port = (primary_port && primary_port->state == 1) ? primary_port :
+                        active_port ? active_port :
+                        (primary_port && primary_port->iccid_len) ? primary_port :
+                        fallback_port;
+
+        if (slot->card_state != 1) {
+            g_ptr_array_add (ctx->sim_slots, NULL);
+            continue;
+        }
+
+        if (identity_port && identity_port->iccid_len) {
+            raw_iccid = mm_utils_bin2hexstr (identity_port->iccid,
+                                             identity_port->iccid_len);
+            if (raw_iccid)
+                iccid = mm_3gpp_parse_iccid (raw_iccid, &inner_error);
+            if (!iccid)
+                mm_obj_warn (self, "couldn't decode ICCID for physical SIM slot %u: %s",
+                             i + 1, inner_error ? inner_error->message : "conversion failed");
+        }
+        if (slot->eid_len)
+            eid = mm_decode_eid ((const gchar *) slot->eid, slot->eid_len);
+
+        g_ptr_array_add (ctx->sim_slots,
+                         mm_base_sim_new_initialized (MM_BASE_MODEM (self),
+                                                      G_OBJECT (self),
+                                                      i + 1,
+                                                      active,
+                                                      iccid,
+                                                      NULL,
+                                                      eid,
+                                                      NULL,
+                                                      NULL,
+                                                      NULL));
+    }
+
+    if (!ctx->primary_sim_slot) {
+        if (ctx->attempts_left > 0) {
+            ctx->attempts_left--;
+            g_clear_pointer (&ctx->sim_slots, g_ptr_array_unref);
+            mm_obj_dbg (self, "SIT slot status has no mapping for logical stack 0 yet; retrying");
+            g_timeout_add_seconds (LOAD_SIM_SLOTS_RETRY_SECS,
+                                   (GSourceFunc) load_sim_slots_retry, task);
+            return;
+        }
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "SIT slot status has no mapping for logical stack 0");
+        g_object_unref (task);
+        return;
+    }
+
+    mm_obj_info (self, "loaded %u physical SIM slots; slot %u maps to logical stack 0",
+                 status.slot_count, ctx->primary_sim_slot);
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+load_sim_slots (MMIfaceModem        *iface,
+                GAsyncReadyCallback  callback,
+                gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    LoadSimSlotsContext        *ctx;
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    ctx = g_new0 (LoadSimSlotsContext, 1);
+    ctx->attempts_left = LOAD_SIM_SLOTS_ATTEMPTS;
+    g_task_set_task_data (task, ctx, (GDestroyNotify) load_sim_slots_context_free);
+    mm_sit_client_get_sim_slot_status (client, NULL,
+                                       (GAsyncReadyCallback) load_sim_slots_ready,
+                                       task);
+}
+
+static gboolean
+set_primary_sim_slot_finish (MMIfaceModem  *self,
+                             GAsyncResult  *res,
+                             GError       **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+/* The CP acknowledges SIM_SET_LOGICAL_SLOT_PORT_MAPPING before it re-runs SIM
+ * initialization on the new mapping; the updated table only becomes visible in
+ * SIM_GET_SLOT_STATUS once that completes.  Returning success right away made
+ * the core's reprobe read the old mapping, so poll the inventory until the
+ * requested slot actually owns logical stack 0. */
+#define SET_SLOT_VERIFY_ATTEMPTS 20
+#define SET_SLOT_VERIFY_MS       500
+
+typedef struct {
+    guint requested_slot;
+    guint verify_attempts_left;
+} SetPrimarySimSlotContext;
+
+static void set_primary_sim_slot_verify_ready (MMSitClient  *client,
+                                               GAsyncResult *res,
+                                               GTask        *task);
+
+static gboolean
+set_primary_sim_slot_verify (GTask *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return G_SOURCE_REMOVE;
+    }
+    mm_sit_client_get_sim_slot_status (client, NULL,
+                                       (GAsyncReadyCallback) set_primary_sim_slot_verify_ready,
+                                       task);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+set_primary_sim_slot_verify_ready (MMSitClient  *client,
+                                   GAsyncResult *res,
+                                   GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    SetPrimarySimSlotContext   *ctx = g_task_get_task_data (task);
+    MMSitSimSlotStatus          status;
+    g_autoptr(GError)           error = NULL;
+
+    if (mm_sit_client_get_sim_slot_status_finish (client, res, &status, &error) &&
+        ctx->requested_slot <= status.slot_count) {
+        const MMSitSimSlot *slot = &status.slots[ctx->requested_slot - 1];
+        guint               j;
+
+        for (j = 0; j < slot->port_count; j++) {
+            if (slot->ports[j].logical_slot_id == 0) {
+                mm_obj_info (self, "physical SIM slot %u now maps to logical stack 0",
+                             ctx->requested_slot);
+                g_task_return_boolean (task, TRUE);
+                g_object_unref (task);
+                return;
+            }
+        }
+    }
+
+    if (ctx->verify_attempts_left == 0) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "SIT slot mapping change was accepted but has not been applied");
+        g_object_unref (task);
+        return;
+    }
+    ctx->verify_attempts_left--;
+    g_timeout_add (SET_SLOT_VERIFY_MS, (GSourceFunc) set_primary_sim_slot_verify, task);
+}
+
+static void
+set_primary_sim_slot_mapping_ready (MMSitClient *client,
+                                    GAsyncResult *res,
+                                    GTask        *task)
+{
+    GError *error = NULL;
+
+    if (!mm_sit_client_set_logical_slot_mapping_finish (client, res, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    set_primary_sim_slot_verify (task);
+}
+
+static void
+set_primary_sim_slot_status_ready (MMSitClient *client,
+                                   GAsyncResult *res,
+                                   GTask        *task)
+{
+    SetPrimarySimSlotContext *ctx = g_task_get_task_data (task);
+    MMSitSimSlotStatus      status;
+    MMSitLogicalSlotMapping mapping;
+    GError                 *error = NULL;
+    guint                   requested_slot = ctx->requested_slot;
+    guint                   selected_port = 0;
+    gboolean                selected_port_found = FALSE;
+    guint                   i;
+    guint                   j;
+
+    if (!mm_sit_client_get_sim_slot_status_finish (client, res, &status, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    if (!requested_slot || requested_slot > status.slot_count) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_INVALID_ARGS,
+                                 "Physical SIM slot %u is out of range", requested_slot);
+        g_object_unref (task);
+        return;
+    }
+
+    for (i = 0; i < status.slot_count; i++) {
+        const MMSitSimSlot *slot = &status.slots[i];
+
+        for (j = 0; j < slot->port_count; j++) {
+            const MMSitSimPort *port = &slot->ports[j];
+
+            if (port->logical_slot_id == 0 && i + 1 == requested_slot) {
+                g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_EXISTS,
+                                         "Physical SIM slot %u already maps to logical stack 0",
+                                         requested_slot);
+                g_object_unref (task);
+                return;
+            }
+            if (port->logical_slot_id != 0 && port->logical_slot_id != 0xff) {
+                g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_UNSUPPORTED,
+                                         "Cannot switch the primary slot while logical stack %u is mapped",
+                                         port->logical_slot_id);
+                g_object_unref (task);
+                return;
+            }
+        }
+    }
+
+    if (status.slots[requested_slot - 1].card_state != 1) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_NOT_FOUND,
+                                 "No SIM is present in physical slot %u", requested_slot);
+        g_object_unref (task);
+        return;
+    }
+
+    for (j = 0; j < status.slots[requested_slot - 1].port_count; j++) {
+        const MMSitSimPort *port = &status.slots[requested_slot - 1].ports[j];
+
+        if (port->state == 1) {
+            selected_port = j;
+            selected_port_found = TRUE;
+            break;
+        }
+    }
+    for (j = 0;
+         !selected_port_found && j < status.slots[requested_slot - 1].port_count;
+         j++) {
+        if (status.slots[requested_slot - 1].ports[j].iccid_len) {
+            selected_port = j;
+            selected_port_found = TRUE;
+        }
+    }
+    if (!selected_port_found && status.slots[requested_slot - 1].port_count)
+        selected_port_found = TRUE;
+    if (!selected_port_found) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_NOT_FOUND,
+                                 "Physical SIM slot %u has no ports", requested_slot);
+        g_object_unref (task);
+        return;
+    }
+
+    mapping.physical_slot_id = requested_slot - 1;
+    mapping.port_id = selected_port;
+    mm_sit_client_set_logical_slot_mapping (client, &mapping, 1, NULL,
+                                            (GAsyncReadyCallback) set_primary_sim_slot_mapping_ready,
+                                            task);
+}
+
+static void
+set_primary_sim_slot (MMIfaceModem        *iface,
+                      guint                sim_slot,
+                      GAsyncReadyCallback  callback,
+                      gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    SetPrimarySimSlotContext   *ctx;
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    ctx = g_new0 (SetPrimarySimSlotContext, 1);
+    ctx->requested_slot = sim_slot;
+    ctx->verify_attempts_left = SET_SLOT_VERIFY_ATTEMPTS;
+    g_task_set_task_data (task, ctx, g_free);
+    mm_sit_client_get_sim_slot_status (client, NULL,
+                                       (GAsyncReadyCallback) set_primary_sim_slot_status_ready,
+                                       task);
 }
 
 static MMBaseBearer *
@@ -1050,6 +1483,10 @@ iface_modem_init (MMIfaceModemInterface *iface)
     iface->modem_power_up_finish = modem_set_power_finish;
     iface->modem_power_down = modem_power_down;
     iface->modem_power_down_finish = modem_set_power_finish;
+    iface->load_sim_slots = load_sim_slots;
+    iface->load_sim_slots_finish = load_sim_slots_finish;
+    iface->set_primary_sim_slot = set_primary_sim_slot;
+    iface->set_primary_sim_slot_finish = set_primary_sim_slot_finish;
     iface->create_bearer = create_bearer;
     iface->create_bearer_finish = create_bearer_finish;
     iface->setup_carrier_config = setup_carrier_config;
@@ -1213,7 +1650,8 @@ dispose (GObject *object)
 {
     MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (object);
 
-    g_clear_object (&self->priv->client);
+    self->priv->client = NULL;
+    g_clear_pointer (&self->priv->clients, g_ptr_array_unref);
     G_OBJECT_CLASS (mm_broadband_modem_samsung_sit_parent_class)->dispose (object);
 }
 
