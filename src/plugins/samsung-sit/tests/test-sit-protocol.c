@@ -1223,8 +1223,9 @@ test_client_connect_sequence (void)
 static gpointer
 client_radio_test_peer (ClientTestContext *ctx)
 {
+    /* The client always sends the power request first (a parked CP claims
+     * "on" without ever searching), then polls the resulting state. */
     static const guint16 expected_ids[] = {
-        MM_SIT_MESSAGE_GET_RADIO_POWER,
         MM_SIT_MESSAGE_SET_RADIO_POWER,
         MM_SIT_MESSAGE_GET_RADIO_POWER,
     };
@@ -1253,7 +1254,7 @@ client_radio_test_peer (ClientTestContext *ctx)
         response[6] = header[6];
         response[7] = header[7];
         if (response_len == 16)
-            response[12] = (i == 0) ? MM_SIT_RADIO_STATE_OFF : MM_SIT_RADIO_STATE_ON;
+            response[12] = MM_SIT_RADIO_STATE_ON;
         else
             response[10] = MM_SIT_RADIO_STATE_ON;
         g_assert_true (write_all (ctx->peer_fd, response, response_len));
@@ -1295,6 +1296,7 @@ test_client_radio_transition (void)
     g_assert_no_error (error);
 
     peer = g_thread_new ("sit-radio-test-peer", (GThreadFunc) client_radio_test_peer, &ctx);
+    g_assert_false (mm_sit_client_radio_state_trusted (client));
     mm_sit_client_set_radio_state (client, MM_SIT_RADIO_STATE_ON, NULL,
                                    (GAsyncReadyCallback) client_radio_test_ready, &ctx);
     timeout_id = g_timeout_add_seconds (5, (GSourceFunc) client_test_timeout, &ctx);
@@ -1303,13 +1305,16 @@ test_client_radio_transition (void)
     if (!ctx.timed_out)
         g_source_remove (timeout_id);
     g_thread_join (g_steal_pointer (&peer));
-    mm_sit_client_close (client);
-    close (ctx.peer_fd);
-    g_main_loop_unref (ctx.loop);
 
     g_assert_false (ctx.timed_out);
     g_assert_no_error (ctx.error);
     g_assert_true (ctx.completed);
+    g_assert_true (mm_sit_client_radio_state_trusted (client));
+
+    mm_sit_client_close (client);
+    g_assert_false (mm_sit_client_radio_state_trusted (client));
+    close (ctx.peer_fd);
+    g_main_loop_unref (ctx.loop);
 }
 
 static gpointer

@@ -37,6 +37,7 @@ void     mm_sit_client_close   (MMSitClient  *self);
 gboolean mm_sit_client_is_open (MMSitClient  *self);
 gboolean mm_sit_client_get_carrier_sim_info (MMSitClient         *self,
                                              MMSitCarrierSimInfo *out_info);
+gboolean mm_sit_client_radio_state_trusted  (MMSitClient         *self);
 
 void          mm_sit_client_command        (MMSitClient        *self,
                                             GByteArray         *request,

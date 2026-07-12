@@ -661,10 +661,18 @@ load_power_state_ready (MMSitClient *client,
     MMSitRadioState  state;
 
     state = mm_sit_client_get_radio_state_finish (client, res, &error);
-    if (error)
+    if (error) {
         g_task_return_error (task, error);
-    else
-        g_task_return_int (task, state);
+        g_object_unref (task);
+        return;
+    }
+    /* A freshly booted CP claims the radio is on while it is actually
+     * parked (it never starts a PLMN search).  Report low power until this
+     * client has driven an explicit radio transition, so the core runs the
+     * power-up sequence instead of trusting the hollow "on". */
+    if (state == MM_SIT_RADIO_STATE_ON && !mm_sit_client_radio_state_trusted (client))
+        state = MM_SIT_RADIO_STATE_OFF;
+    g_task_return_int (task, state);
     g_object_unref (task);
 }
 

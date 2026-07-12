@@ -20,6 +20,7 @@ struct _MMSitClientPrivate {
     gboolean             has_carrier_sim_info;
     MMSitCarrierSimInfo  carrier_sim_info;
     gboolean             boot_config_done;
+    gboolean             radio_state_trusted;
 };
 
 G_DEFINE_TYPE (MMSitClient, mm_sit_client, G_TYPE_OBJECT)
@@ -122,6 +123,7 @@ mm_sit_client_close (MMSitClient *self)
     self->priv->has_carrier_sim_info = FALSE;
     memset (&self->priv->carrier_sim_info, 0, sizeof (self->priv->carrier_sim_info));
     self->priv->boot_config_done = FALSE;
+    self->priv->radio_state_trusted = FALSE;
     if (!mm_port_serial_is_open (MM_PORT_SERIAL (self->priv->port)))
         return;
     if (self->priv->unsolicited_handler_id) {
@@ -150,6 +152,13 @@ mm_sit_client_get_carrier_sim_info (MMSitClient         *self,
         return FALSE;
     *out_info = self->priv->carrier_sim_info;
     return TRUE;
+}
+
+gboolean
+mm_sit_client_radio_state_trusted (MMSitClient *self)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return self->priv->radio_state_trusted;
 }
 
 static void
@@ -282,13 +291,9 @@ typedef struct {
     MMSitRadioState state;
     guint           poll_attempts;
     guint           retry_id;
-    gboolean        request_sent;
 } SetRadioContext;
 
 static void set_radio_poll (GTask *task);
-static void set_radio_request_ready (MMSitClient *self,
-                                     GAsyncResult *res,
-                                     GTask *task);
 
 static void
 set_radio_context_free (SetRadioContext *ctx)
@@ -324,18 +329,9 @@ set_radio_poll_ready (MMSitClient *self,
         return;
     }
     if (state == ctx->state) {
+        self->priv->radio_state_trusted = TRUE;
         g_task_return_boolean (task, TRUE);
         g_object_unref (task);
-        return;
-    }
-
-    if (!ctx->request_sent) {
-        g_autoptr(GByteArray) request = NULL;
-
-        ctx->request_sent = TRUE;
-        request = mm_sit_request_new_set_radio_power (next_token (self), ctx->state);
-        run_checked_command (self, request, 30, g_task_get_cancellable (task),
-                             (GAsyncReadyCallback) set_radio_request_ready, task);
         return;
     }
 
@@ -383,8 +379,9 @@ mm_sit_client_set_radio_state (MMSitClient        *self,
                                GAsyncReadyCallback callback,
                                gpointer            user_data)
 {
-    SetRadioContext *ctx;
-    GTask           *task;
+    SetRadioContext       *ctx;
+    GTask                 *task;
+    g_autoptr(GByteArray)  request = NULL;
 
     task = g_task_new (self, cancellable, callback, user_data);
     if (state != MM_SIT_RADIO_STATE_OFF && state != MM_SIT_RADIO_STATE_ON) {
@@ -397,7 +394,14 @@ mm_sit_client_set_radio_state (MMSitClient        *self,
     ctx = g_new0 (SetRadioContext, 1);
     ctx->state = state;
     g_task_set_task_data (task, ctx, (GDestroyNotify) set_radio_context_free);
-    set_radio_poll (task);
+
+    /* Always send the request, even when the CP already reports the target
+     * state: a freshly booted CP claims the radio is on while it is parked
+     * (never searching), and only an explicit SET_RADIO_POWER starts the
+     * PLMN search (HW-verified; the downstream RIL sends it too). */
+    request = mm_sit_request_new_set_radio_power (next_token (self), state);
+    run_checked_command (self, request, 30, cancellable,
+                         (GAsyncReadyCallback) set_radio_request_ready, task);
 }
 
 gboolean
