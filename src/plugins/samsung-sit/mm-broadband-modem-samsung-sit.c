@@ -467,6 +467,14 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
         MMPort      *port = MM_PORT (l->data);
         MMSitClient *client;
 
+        /* An explicitly ignored port is grabbed with its detected type, so
+         * it still shows up in this lookup; it must not be opened. */
+        if (mm_port_get_port_group (port) == MM_PORT_GROUP_IGNORED) {
+            mm_obj_dbg (self, "skipping ignored Samsung SIT port %s",
+                        mm_port_get_device (port));
+            continue;
+        }
+
         client = mm_sit_client_new (mm_port_get_device (port));
         if (!mm_sit_client_open (client, error)) {
             g_object_unref (client);
@@ -479,10 +487,17 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
         mm_obj_info (self, "opened Samsung SIT logical stack %u on %s",
                      self->priv->clients->len - 1, mm_port_get_device (port));
     }
+    g_list_free_full (ports, g_object_unref);
+
+    if (!self->priv->clients->len) {
+        g_clear_pointer (&self->priv->clients, g_ptr_array_unref);
+        g_set_error_literal (error, MM_CORE_ERROR, MM_CORE_ERROR_NOT_FOUND,
+                             "No usable Samsung SIT control port available");
+        return NULL;
+    }
 
     self->priv->client = g_ptr_array_index (self->priv->clients, 0);
     g_signal_connect (self->priv->client, "indication", G_CALLBACK (sit_indication), self);
-    g_list_free_full (ports, g_object_unref);
     return self->priv->client;
 }
 
