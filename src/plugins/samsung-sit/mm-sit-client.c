@@ -560,14 +560,17 @@ mm_sit_client_set_logical_slot_mapping_finish (MMSitClient  *self,
 
 /*
  * The 0x0701 data-registration state byte only reports registered once the
- * data-call machinery has run: on hardware the CP holds it at 0 through a
- * successful EPS attach until the AP drives SET_PREFERRED_DATA_MODEM /
- * SETUP_DATA_CALL, exactly like the vendor RIL's AllowData flow.  Gating
- * ModemManager's 3GPP registration on it therefore deadlocks the core (it
- * requires registration before it connects the bearer that would run those
- * steps).  Treat a serving PLMN in the operator response as registered --
- * the camped state that lets the connect sequence do the real work -- and
- * keep 0x0701 for the technology and the not-camped state detail.
+ * data-call prelude has run: while merely camped the CP answers state 0
+ * with the serving RAT (the downstream capture shows 0/rat=14 during the
+ * whole camped window, flipping to 1 only ~1.4 s after the initial-attach
+ * APN and data profiles are set, right before SETUP_DATA_CALL) -- the
+ * vendor RIL's AllowData flow.  Gating ModemManager's 3GPP registration on
+ * it therefore deadlocks the core (it requires registration before it
+ * connects the bearer that would run those steps).  When 0x0701 reports
+ * exactly that hollow idle state, treat a serving PLMN in the operator
+ * response as registered -- the camped state that lets the connect
+ * sequence do the real work.  Meaningful non-registered states (searching,
+ * denied, ...) are preserved.
  */
 static void
 get_registration_operator_ready (MMSitClient *self,
@@ -584,7 +587,7 @@ get_registration_operator_ready (MMSitClient *self,
     if (response &&
         mm_sit_message_parse_operator (response, &operator_info, &error) &&
         operator_info.plmn[0] != '\0' &&
-        !registration->registered) {
+        registration->state == 0) {
         registration->registered = TRUE;
         registration->state = 1;
     }
