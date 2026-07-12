@@ -713,6 +713,54 @@ modem_set_power_ready (MMSitClient *client,
 }
 
 static void
+power_up_radio (GTask *task)
+{
+    MMBroadbandModemSamsungSit *self;
+    MMSitClient                *client;
+    GError                     *error = NULL;
+
+    self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_set_radio_state (client, MM_SIT_RADIO_STATE_ON, NULL,
+                                   (GAsyncReadyCallback) modem_set_power_ready,
+                                   task);
+}
+
+static void
+power_up_carrier_config_ready (MMBroadbandModemSamsungSit *self,
+                               GAsyncResult               *res,
+                               GTask                      *task)
+{
+    g_autoptr(GError) error = NULL;
+
+    if (!mm_broadband_modem_samsung_sit_ensure_carrier_config_finish (self, res, &error))
+        mm_obj_warn (self, "couldn't provision carrier configuration before radio-on: %s",
+                     error->message);
+    power_up_radio (task);
+}
+
+static void
+power_up_boot_config_ready (MMSitClient  *client,
+                            GAsyncResult *res,
+                            GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self;
+    g_autoptr(GError)           error = NULL;
+
+    self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
+    if (!mm_sit_client_send_boot_config_finish (client, res, &error))
+        mm_obj_warn (self, "couldn't send boot configuration before radio-on: %s",
+                     error->message);
+    mm_broadband_modem_samsung_sit_ensure_carrier_config (
+        self, (GAsyncReadyCallback) power_up_carrier_config_ready, task);
+}
+
+static void
 modem_set_power (MMIfaceModem        *iface,
                  MMSitRadioState      state,
                  GAsyncReadyCallback  callback,
@@ -728,6 +776,15 @@ modem_set_power (MMIfaceModem        *iface,
     if (!client) {
         g_task_return_error (task, error);
         g_object_unref (task);
+        return;
+    }
+    /* The CP parks a radio-on that arrives before its boot configuration
+     * and carrier manifest (radio reports "on" but never searches), so
+     * mirror the downstream bring-up order before requesting the radio. */
+    if (state == MM_SIT_RADIO_STATE_ON) {
+        mm_sit_client_send_boot_config (client, NULL,
+                                        (GAsyncReadyCallback) power_up_boot_config_ready,
+                                        task);
         return;
     }
     mm_sit_client_set_radio_state (client, state, NULL,

@@ -399,6 +399,58 @@ mm_sit_request_new_set_screen_state (guint16  token,
 }
 
 GByteArray *
+mm_sit_request_new_set_ap_system_time (guint16     token,
+                                       GDateTime   *time,
+                                       GError     **error)
+{
+    guint8 body[10] = { 0 };
+    gint   year;
+
+    if (!time) {
+        g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                             "AP system time is required");
+        return NULL;
+    }
+
+    year = g_date_time_get_year (time);
+    if (year < 1900 || year > 1900 + 0xff) {
+        g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                     "AP system time year %d is out of range", year);
+        return NULL;
+    }
+
+    /* Captured layout: reserved @8, then year-1900, month, day, hour,
+     * minute, second as single bytes @12. */
+    body[4] = year - 1900;
+    body[5] = g_date_time_get_month (time);
+    body[6] = g_date_time_get_day_of_month (time);
+    body[7] = g_date_time_get_hour (time);
+    body[8] = g_date_time_get_minute (time);
+    body[9] = g_date_time_get_second (time);
+    return mm_sit_request_new (MM_SIT_MESSAGE_SET_AP_SYSTEM_TIME,
+                               token, body, sizeof (body), NULL);
+}
+
+GByteArray *
+mm_sit_request_new_oem_config (guint16 token)
+{
+    /* Software-version handshake: ASCII "33" @12, constant in the corpus. */
+    static const guint8 body[6] = { 0, 0, 0, 0, 0x33, 0x33 };
+
+    return mm_sit_request_new (MM_SIT_MESSAGE_OEM_CONFIG,
+                               token, body, sizeof (body), NULL);
+}
+
+GByteArray *
+mm_sit_request_new_set_modem_config (guint16 token)
+{
+    guint8 body[5] = { 0 };
+
+    return mm_sit_request_new (MM_SIT_MESSAGE_SET_MODEM_CONFIG,
+                               token, body, sizeof (body), NULL);
+}
+
+GByteArray *
 mm_sit_request_new_device_info (guint16      token,
                                 const gchar *model,
                                 const gchar *build,

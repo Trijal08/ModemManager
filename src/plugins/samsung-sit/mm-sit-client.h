@@ -155,6 +155,14 @@ gboolean mm_sit_client_set_carrier_manifest_finish (MMSitClient        *self,
                                                     GAsyncResult       *res,
                                                     GError            **error);
 
+void     mm_sit_client_send_boot_config        (MMSitClient        *self,
+                                                GCancellable       *cancellable,
+                                                GAsyncReadyCallback callback,
+                                                gpointer            user_data);
+gboolean mm_sit_client_send_boot_config_finish (MMSitClient        *self,
+                                                GAsyncResult       *res,
+                                                GError            **error);
+
 void     mm_sit_client_connect_data        (MMSitClient        *self,
                                             const gchar        *apn,
                                             GCancellable       *cancellable,

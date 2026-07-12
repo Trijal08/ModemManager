@@ -19,6 +19,7 @@ struct _MMSitClientPrivate {
     guint                unsolicited_handler_id;
     gboolean             has_carrier_sim_info;
     MMSitCarrierSimInfo  carrier_sim_info;
+    gboolean             boot_config_done;
 };
 
 G_DEFINE_TYPE (MMSitClient, mm_sit_client, G_TYPE_OBJECT)
@@ -120,6 +121,7 @@ mm_sit_client_close (MMSitClient *self)
 
     self->priv->has_carrier_sim_info = FALSE;
     memset (&self->priv->carrier_sim_info, 0, sizeof (self->priv->carrier_sim_info));
+    self->priv->boot_config_done = FALSE;
     if (!mm_port_serial_is_open (MM_PORT_SERIAL (self->priv->port)))
         return;
     if (self->priv->unsolicited_handler_id) {
@@ -876,6 +878,124 @@ gboolean
 mm_sit_client_set_carrier_manifest_finish (MMSitClient  *self,
                                            GAsyncResult *res,
                                            GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+/* Identity handshake the downstream RIL performs once per CP boot before
+ * turning the radio on: the CP parks a radio-on request that arrives before
+ * it has digested this batch (and the carrier-config manifest), leaving the
+ * radio in state "on" but never searching.  The device strings are the
+ * captured corpus values; the CP answers 0x0922 with a capability list. */
+#define BOOT_CONFIG_DEVICE_MODEL "Pixel 9a"
+#define BOOT_CONFIG_DEVICE_BUILD "BP4A.251205.006"
+
+typedef enum {
+    BOOT_CONFIG_STEP_AP_TIME,
+    BOOT_CONFIG_STEP_DEVICE_INFO,
+    BOOT_CONFIG_STEP_OEM_CONFIG,
+    BOOT_CONFIG_STEP_MODEM_CONFIG,
+    BOOT_CONFIG_STEP_LAST,
+} BootConfigStep;
+
+typedef struct {
+    BootConfigStep step;
+} BootConfigContext;
+
+static void boot_config_step (GTask *task);
+
+static void
+boot_config_step_ready (MMSitClient *self,
+                        GAsyncResult *res,
+                        GTask *task)
+{
+    BootConfigContext *ctx = g_task_get_task_data (task);
+    GError            *error = NULL;
+
+    if (!g_task_propagate_boolean (G_TASK (res), &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    ctx->step++;
+    boot_config_step (task);
+}
+
+static void
+boot_config_step (GTask *task)
+{
+    MMSitClient           *self = g_task_get_source_object (task);
+    BootConfigContext     *ctx = g_task_get_task_data (task);
+    g_autoptr(GByteArray)  request = NULL;
+    GError                *error = NULL;
+
+    if (g_task_return_error_if_cancelled (task)) {
+        g_object_unref (task);
+        return;
+    }
+
+    switch (ctx->step) {
+    case BOOT_CONFIG_STEP_AP_TIME: {
+        g_autoptr(GDateTime) now = g_date_time_new_now_local ();
+
+        request = mm_sit_request_new_set_ap_system_time (next_token (self), now, &error);
+        break;
+    }
+    case BOOT_CONFIG_STEP_DEVICE_INFO:
+        request = mm_sit_request_new_device_info (next_token (self),
+                                                  BOOT_CONFIG_DEVICE_MODEL,
+                                                  BOOT_CONFIG_DEVICE_BUILD,
+                                                  &error);
+        break;
+    case BOOT_CONFIG_STEP_OEM_CONFIG:
+        request = mm_sit_request_new_oem_config (next_token (self));
+        break;
+    case BOOT_CONFIG_STEP_MODEM_CONFIG:
+        request = mm_sit_request_new_set_modem_config (next_token (self));
+        break;
+    case BOOT_CONFIG_STEP_LAST:
+        self->priv->boot_config_done = TRUE;
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    default:
+        g_assert_not_reached ();
+    }
+
+    if (!request) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    run_checked_command (self, request, 10, g_task_get_cancellable (task),
+                         (GAsyncReadyCallback) boot_config_step_ready, task);
+}
+
+void
+mm_sit_client_send_boot_config (MMSitClient        *self,
+                                GCancellable       *cancellable,
+                                GAsyncReadyCallback callback,
+                                gpointer            user_data)
+{
+    BootConfigContext *ctx;
+    GTask             *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    if (self->priv->boot_config_done) {
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+    ctx = g_new0 (BootConfigContext, 1);
+    g_task_set_task_data (task, ctx, g_free);
+    boot_config_step (task);
+}
+
+gboolean
+mm_sit_client_send_boot_config_finish (MMSitClient  *self,
+                                       GAsyncResult *res,
+                                       GError      **error)
 {
     g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
     return g_task_propagate_boolean (G_TASK (res), error);

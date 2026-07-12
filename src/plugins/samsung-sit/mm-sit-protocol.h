@@ -232,6 +232,11 @@ GByteArray *mm_sit_request_new_set_indication_filter  (guint16                to
                                                        guint32                filter);
 GByteArray *mm_sit_request_new_set_screen_state       (guint16                token,
                                                        gboolean               screen_on);
+GByteArray *mm_sit_request_new_set_ap_system_time     (guint16                token,
+                                                       GDateTime             *time,
+                                                       GError               **error);
+GByteArray *mm_sit_request_new_oem_config             (guint16                token);
+GByteArray *mm_sit_request_new_set_modem_config       (guint16                token);
 GByteArray *mm_sit_request_new_device_info            (guint16                token,
                                                        const gchar           *model,
                                                        const gchar           *build,

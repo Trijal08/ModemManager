@@ -229,6 +229,41 @@ test_build_config_requests (void)
 }
 
 static void
+test_build_boot_config_requests (void)
+{
+    /* Byte values from the downstream tegu-sit.trace boot capture. */
+    static const guint8 expected_time[] = {
+        0x00, 0x00, 0x49, 0x09, 0x12, 0x00, 0x42, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x7e, 0x06, 0x08, 0x0f,
+        0x26, 0x0c,
+    };
+    static const guint8 expected_oem[] = {
+        0x00, 0x00, 0x05, 0x46, 0x0e, 0x00, 0x43, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x33, 0x33,
+    };
+    static const guint8 expected_modem[] = {
+        0x00, 0x00, 0x3f, 0x09, 0x0d, 0x00, 0x44, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+    g_autoptr(GDateTime)  when = NULL;
+    g_autoptr(GByteArray) request = NULL;
+    g_autoptr(GError)     error = NULL;
+
+    when = g_date_time_new_local (2026, 6, 8, 15, 38, 12.0);
+    request = mm_sit_request_new_set_ap_system_time (0x42, when, &error);
+    g_assert_no_error (error);
+    assert_bytes (request, expected_time, sizeof (expected_time));
+
+    g_clear_pointer (&request, g_byte_array_unref);
+    request = mm_sit_request_new_oem_config (0x43);
+    assert_bytes (request, expected_oem, sizeof (expected_oem));
+
+    g_clear_pointer (&request, g_byte_array_unref);
+    request = mm_sit_request_new_set_modem_config (0x44);
+    assert_bytes (request, expected_modem, sizeof (expected_modem));
+}
+
+static void
 test_parse_radio (void)
 {
     static const guint8 get_response[] = {
@@ -1277,6 +1312,106 @@ test_client_radio_transition (void)
     g_assert_true (ctx.completed);
 }
 
+static gpointer
+client_boot_config_test_peer (ClientTestContext *ctx)
+{
+    static const guint16 expected_ids[] = {
+        MM_SIT_MESSAGE_SET_AP_SYSTEM_TIME,
+        MM_SIT_MESSAGE_DEVICE_INFO,
+        MM_SIT_MESSAGE_OEM_CONFIG,
+        MM_SIT_MESSAGE_SET_MODEM_CONFIG,
+    };
+    guint i;
+
+    for (i = 0; i < G_N_ELEMENTS (expected_ids); i++) {
+        guint8  header[MM_SIT_HEADER_SIZE];
+        guint8  response[12] = { 0 };
+        guint16 request_len;
+
+        g_assert_true (read_all (ctx->peer_fd, header, sizeof (header)));
+        request_len = header[4] | (((guint16) header[5]) << 8);
+        g_assert_cmpuint (header[2] | (((guint16) header[3]) << 8), ==, expected_ids[i]);
+        if (request_len > MM_SIT_HEADER_SIZE) {
+            g_autofree guint8 *body = g_malloc (request_len - MM_SIT_HEADER_SIZE);
+
+            g_assert_true (read_all (ctx->peer_fd, body, request_len - MM_SIT_HEADER_SIZE));
+        }
+
+        response[0] = MM_SIT_MESSAGE_TYPE_RESPONSE;
+        response[2] = header[2];
+        response[3] = header[3];
+        response[4] = sizeof (response);
+        response[6] = header[6];
+        response[7] = header[7];
+        g_assert_true (write_all (ctx->peer_fd, response, sizeof (response)));
+    }
+    return NULL;
+}
+
+static void
+client_boot_config_test_ready (MMSitClient       *client,
+                               GAsyncResult      *res,
+                               ClientTestContext *ctx)
+{
+    ctx->completed = mm_sit_client_send_boot_config_finish (client, res, &ctx->error);
+    g_main_loop_quit (ctx->loop);
+}
+
+static void
+test_client_boot_config (void)
+{
+    ClientTestContext          ctx = { 0 };
+    gint                       sockets[2];
+    guint                      timeout_id;
+    g_autoptr(GThread)         peer = NULL;
+    g_autoptr(MMPortSerialSit) port = NULL;
+    g_autoptr(MMSitClient)     client = NULL;
+    g_autoptr(GError)          error = NULL;
+
+    g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    ctx.peer_fd = sockets[1];
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    port = MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+                                             MM_PORT_DEVICE, "test-sit-boot-config",
+                                             MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+                                             MM_PORT_TYPE, MM_PORT_TYPE_SIT,
+                                             MM_PORT_SERIAL_FD, sockets[0],
+                                             NULL));
+    client = mm_sit_client_new_from_port (port);
+    g_assert_true (mm_sit_client_open (client, &error));
+    g_assert_no_error (error);
+
+    peer = g_thread_new ("sit-boot-config-test-peer",
+                         (GThreadFunc) client_boot_config_test_peer, &ctx);
+    mm_sit_client_send_boot_config (client, NULL,
+                                    (GAsyncReadyCallback) client_boot_config_test_ready, &ctx);
+    timeout_id = g_timeout_add_seconds (5, (GSourceFunc) client_test_timeout, &ctx);
+    g_main_loop_run (ctx.loop);
+    g_thread_join (g_steal_pointer (&peer));
+
+    g_assert_false (ctx.timed_out);
+    g_assert_no_error (ctx.error);
+    g_assert_true (ctx.completed);
+
+    /* A second run must complete without any further CP traffic: the batch
+     * is sent once per CP boot (the peer thread is already gone, so any
+     * write here would time out). */
+    ctx.completed = FALSE;
+    mm_sit_client_send_boot_config (client, NULL,
+                                    (GAsyncReadyCallback) client_boot_config_test_ready, &ctx);
+    g_main_loop_run (ctx.loop);
+
+    if (!ctx.timed_out)
+        g_source_remove (timeout_id);
+    mm_sit_client_close (client);
+    close (ctx.peer_fd);
+    g_main_loop_unref (ctx.loop);
+
+    g_assert_false (ctx.timed_out);
+    g_assert_no_error (ctx.error);
+    g_assert_true (ctx.completed);
+}
+
 int
 main (int argc,
       char **argv)
@@ -1290,6 +1425,7 @@ main (int argc,
     g_test_add_func ("/MM/sit/build/slot-mapping", test_build_slot_mapping);
     g_test_add_func ("/MM/sit/build/data", test_build_data_requests);
     g_test_add_func ("/MM/sit/build/config", test_build_config_requests);
+    g_test_add_func ("/MM/sit/build/boot-config", test_build_boot_config_requests);
     g_test_add_func ("/MM/sit/decode/radio", test_parse_radio);
     g_test_add_func ("/MM/sit/decode/sim-registration", test_parse_status_and_registration);
     g_test_add_func ("/MM/sit/decode/sim-slot-status", test_parse_sim_slot_status);
@@ -1302,6 +1438,7 @@ main (int argc,
     g_test_add_func ("/MM/sit/port/command-and-indication", test_port_command_and_indication);
     g_test_add_func ("/MM/sit/client/connect-sequence", test_client_connect_sequence);
     g_test_add_func ("/MM/sit/client/radio-transition", test_client_radio_transition);
+    g_test_add_func ("/MM/sit/client/boot-config", test_client_boot_config);
 
     return g_test_run ();
 }
