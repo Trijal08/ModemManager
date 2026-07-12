@@ -552,24 +552,74 @@ mm_sit_client_set_logical_slot_mapping_finish (MMSitClient  *self,
     return g_task_propagate_boolean (G_TASK (res), error);
 }
 
+/*
+ * The 0x0701 data-registration state byte only reports registered once the
+ * data-call machinery has run: on hardware the CP holds it at 0 through a
+ * successful EPS attach until the AP drives SET_PREFERRED_DATA_MODEM /
+ * SETUP_DATA_CALL, exactly like the vendor RIL's AllowData flow.  Gating
+ * ModemManager's 3GPP registration on it therefore deadlocks the core (it
+ * requires registration before it connects the bearer that would run those
+ * steps).  Treat a serving PLMN in the operator response as registered --
+ * the camped state that lets the connect sequence do the real work -- and
+ * keep 0x0701 for the technology and the not-camped state detail.
+ */
+static void
+get_registration_operator_ready (MMSitClient *self,
+                                 GAsyncResult *res,
+                                 GTask *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    g_autoptr(GError)       error = NULL;
+    MMSitRegistration      *registration = g_task_get_task_data (task);
+    MMSitRegistration      *result;
+    MMSitOperator           operator_info;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (response &&
+        mm_sit_message_parse_operator (response, &operator_info, &error) &&
+        operator_info.plmn[0] != '\0' &&
+        !registration->registered) {
+        registration->registered = TRUE;
+        registration->state = 1;
+    }
+
+    result = g_new (MMSitRegistration, 1);
+    *result = *registration;
+    g_task_return_pointer (task, result, g_free);
+    g_object_unref (task);
+}
+
 static void
 get_registration_ready (MMSitClient *self,
                         GAsyncResult *res,
                         GTask *task)
 {
     g_autoptr(MMSitMessage) response = NULL;
-    MMSitRegistration     *registration;
+    g_autoptr(GByteArray)   request = NULL;
+    MMSitRegistration      *registration;
     GError                 *error = NULL;
 
     response = mm_sit_client_command_finish (self, res, &error);
     registration = g_new0 (MMSitRegistration, 1);
-    if (response && mm_sit_message_parse_registration (response, registration, &error))
-        g_task_return_pointer (task, registration, g_free);
-    else {
+    if (!response || !mm_sit_message_parse_registration (response, registration, &error)) {
         g_free (registration);
         g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
     }
-    g_object_unref (task);
+
+    if (registration->registered) {
+        g_task_return_pointer (task, registration, g_free);
+        g_object_unref (task);
+        return;
+    }
+
+    g_task_set_task_data (task, registration, g_free);
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_OPERATOR,
+                                        next_token (self));
+    mm_sit_client_command (self, request, 5, g_task_get_cancellable (task),
+                           (GAsyncReadyCallback) get_registration_operator_ready,
+                           task);
 }
 
 void
