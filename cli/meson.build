@@ -56,7 +56,7 @@ if plugins_options['samsung-sit']
       src_inc,
       include_directories('../src/plugins/samsung-sit'),
     ],
-    dependencies: [libhelpers_dep, libport_dep],
+    dependencies: [libhelpers_dep, libport_dep, samsung_sit_ffi_dep],
     c_args: '-DMM_MODULE_NAME="samsung-sit"',
     install: true,
   )

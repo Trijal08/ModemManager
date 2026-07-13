@@ -55,7 +55,7 @@ if enable_tests and plugins_options['samsung-sit']
       'samsung-sit/tests/test-sit-protocol.c',
     ),
     include_directories: [top_inc, src_inc, include_directories('samsung-sit')],
-    dependencies: [libhelpers_dep, libport_dep, sqlite3_dep],
+    dependencies: [libhelpers_dep, libport_dep, sqlite3_dep, samsung_sit_ffi_dep],
   )
   test('samsung-sit-protocol', samsung_sit_protocol_test)
 endif
@@ -983,8 +983,10 @@ if plugins_options['samsung-sit']
   # The common plugin build loop consumes one dependency list for all enabled
   # modules. With --as-needed, SQLite is retained only by samsung-sit.
   plugins_deps += sqlite3_dep
+  plugins_deps += samsung_sit_ffi_dep
   if enable_builtin_plugins
     deps += sqlite3_dep
+    deps += samsung_sit_ffi_dep
   endif
 endif
 

@@ -357,6 +357,9 @@ enable_plugins = not get_option('auto_features').disabled()
 
 # Samsung's SIT userspace selects carrier manifests from the vendor cfg.db.
 sqlite3_dep = dependency('sqlite3', required: get_option('plugin_samsung_sit'))
+# The SIT wire codec lives in the Rust samsung-sit-ffi static library; the plugin
+# links it through a plain C ABI, so no Rust toolchain is needed to build MM.
+samsung_sit_ffi_dep = dependency('samsung-sit-ffi', required: get_option('plugin_samsung_sit'))
 
 plugins_shared_reqs = {
   'fibocom': true,
@@ -413,7 +416,7 @@ plugins_options_reqs = {
   'quectel': {'available': true, 'shared': ['quectel']},
   'rolling': {'available': true, 'shared': ['fibocom', 'mtk']},
   'samsung': {'available': true, 'shared': ['icera']},
-  'samsung-sit': {'available': sqlite3_dep.found(), 'shared': []},
+  'samsung-sit': {'available': sqlite3_dep.found() and samsung_sit_ffi_dep.found(), 'shared': []},
   'sierra-legacy': {'available': true, 'shared': ['icera', 'sierra']},
   'sierra': {'available': true, 'shared': ['xmm']},
   'simtech': {'available': true, 'shared': []},

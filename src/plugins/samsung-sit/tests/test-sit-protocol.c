@@ -605,7 +605,9 @@ test_parse_cell_info_lte_v5 (void)
     g_autoptr(GError)        error = NULL;
     MMSitCellInfoLte        *cell;
 
-    set_le32 (&raw[8], 0x0d3f);
+    /* Offset 8 is the transport status word (zero on success), per a live
+     * cellmapper capture; the record count follows at offset 12. */
+    set_le32 (&raw[8], 0);
     set_le32 (&raw[12], 1);
     record[0] = 2;
     record[1] = 1;
