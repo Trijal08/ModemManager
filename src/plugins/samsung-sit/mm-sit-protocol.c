@@ -793,3 +793,51 @@ mm_sit_message_parse_data_call (const MMSitMessage *message,
     out_call->mtu = (guint16) dc.mtu;
     return TRUE;
 }
+
+gboolean
+mm_sit_message_parse_data_call_list (const MMSitMessage *message,
+                                     GArray            **out_calls,
+                                     GError            **error)
+{
+    const guint8       *data;
+    gsize               len;
+    SamsungSitDataCall *calls = NULL;
+    gsize               count = 0;
+    SamsungSitStatus    status;
+    GArray             *array;
+    gsize               i;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_calls != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_data_call_list (data, len, &calls, &count);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+
+    array = g_array_sized_new (FALSE, FALSE, sizeof (MMSitDataCall), count);
+    for (i = 0; i < count; i++) {
+        MMSitDataCall call;
+
+        memset (&call, 0, sizeof (call));
+        call.cause  = calls[i].cause;
+        call.cid    = calls[i].cid;
+        call.active = calls[i].active;
+        if (calls[i].address.has_v4) {
+            call.has_ipv4 = TRUE;
+            format_ipv4 (call.ipv4, calls[i].address.v4);
+        }
+        if (calls[i].dns[0].has_v4)
+            format_ipv4 (call.dns1, calls[i].dns[0].v4);
+        if (calls[i].dns[1].has_v4)
+            format_ipv4 (call.dns2, calls[i].dns[1].v4);
+        call.mtu = (guint16) calls[i].mtu;
+        g_array_append_val (array, call);
+    }
+    samsung_sit_data_call_list_free (calls, count);
+
+    *out_calls = array;
+    return TRUE;
+}

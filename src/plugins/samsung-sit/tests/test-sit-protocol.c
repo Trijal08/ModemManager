@@ -685,6 +685,44 @@ test_parse_data_call (void)
 }
 
 static void
+test_parse_data_call_list (void)
+{
+    /* DATA_CALL_LIST_CHANGED (0x0604) with two PDNs: a default + a second call,
+     * items back-to-back at the 132-byte base stride. Synthetic private IPs. */
+    guint8 ind[273] = { 2, 0, 0x04, 0x06, 0x11, 0x01, 0, 0 }; /* len = 273 */
+    g_autoptr(MMSitMessage) message = NULL;
+    g_autoptr(GError)       error = NULL;
+    g_autoptr(GArray)       calls = NULL;
+    const MMSitDataCall    *c0, *c1;
+
+    ind[8] = 2; /* count */
+    /* item 0 @9: cid 2, 10.0.0.2, mtu 1500 */
+    ind[11] = 2; ind[12] = 1; ind[13] = 1;
+    ind[14] = 10; ind[15] = 0; ind[16] = 0; ind[17] = 2;
+    ind[136] = 0xdc; ind[137] = 0x05;
+    /* item 1 @141: cid 3, 10.0.0.3, mtu 1428 */
+    ind[143] = 3; ind[144] = 1; ind[145] = 1;
+    ind[146] = 10; ind[147] = 0; ind[148] = 0; ind[149] = 3;
+    ind[268] = 0x94; ind[269] = 0x05;
+
+    message = mm_sit_message_parse (ind, sizeof (ind), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_data_call_list (message, &calls, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (calls->len, ==, 2);
+
+    c0 = &g_array_index (calls, MMSitDataCall, 0);
+    g_assert_cmpuint (c0->cid, ==, 2);
+    g_assert_cmpstr (c0->ipv4, ==, "10.0.0.2");
+    g_assert_cmpuint (c0->mtu, ==, 1500);
+
+    c1 = &g_array_index (calls, MMSitDataCall, 1);
+    g_assert_cmpuint (c1->cid, ==, 3);
+    g_assert_cmpstr (c1->ipv4, ==, "10.0.0.3");
+    g_assert_cmpuint (c1->mtu, ==, 1428);
+}
+
+static void
 test_parse_carrier_sim_info (void)
 {
     guint8 raw[207] = { 0 };
@@ -1439,6 +1477,7 @@ main (int argc,
     g_test_add_func ("/MM/sit/decode/signal", test_parse_signal);
     g_test_add_func ("/MM/sit/decode/cell-info-lte-v5", test_parse_cell_info_lte_v5);
     g_test_add_func ("/MM/sit/decode/data-call", test_parse_data_call);
+    g_test_add_func ("/MM/sit/decode/data-call-list", test_parse_data_call_list);
     g_test_add_func ("/MM/sit/decode/carrier-sim-info", test_parse_carrier_sim_info);
     g_test_add_func ("/MM/sit/carrier-config/resolve", test_carrier_config_resolver);
     g_test_add_func ("/MM/sit/carrier-config/reference-database", test_carrier_config_reference_database);

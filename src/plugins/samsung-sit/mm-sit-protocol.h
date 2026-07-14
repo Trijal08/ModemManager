@@ -269,8 +269,15 @@ gboolean mm_sit_message_parse_signal                  (const MMSitMessage    *me
 gboolean mm_sit_message_parse_cell_info_list          (const MMSitMessage    *message,
                                                        GArray               **out_cells,
                                                        GError               **error);
+/* Returns only the first (default) call. TODO: remove once every caller uses
+ * mm_sit_message_parse_data_call_list -- it drops the other PDNs of a
+ * DATA_CALL_LIST_CHANGED. */
 gboolean mm_sit_message_parse_data_call               (const MMSitMessage    *message,
                                                        MMSitDataCall         *out_call,
+                                                       GError               **error);
+/* Parses every PDN of a data-call message into a GArray of MMSitDataCall. */
+gboolean mm_sit_message_parse_data_call_list          (const MMSitMessage    *message,
+                                                       GArray               **out_calls,
                                                        GError               **error);
 gboolean mm_sit_message_parse_carrier_sim_info        (const MMSitMessage    *message,
                                                        MMSitCarrierSimInfo   *out_info,

@@ -1028,7 +1028,7 @@ typedef struct {
     guint          setup_attempts;
     guint          retry_id;
     MMSitDataCall  call;
-    MMSitDataCall  indicated_call;
+    GArray        *indicated_calls; /* latest DATA_CALL_LIST_CHANGED list */
     MMSitClient   *client;
     gulong         indication_handler_id;
 } ConnectContext;
@@ -1042,9 +1042,33 @@ connect_context_free (ConnectContext *ctx)
         g_source_remove (ctx->retry_id);
     if (ctx->indication_handler_id)
         g_signal_handler_disconnect (ctx->client, ctx->indication_handler_id);
+    g_clear_pointer (&ctx->indicated_calls, g_array_unref);
     g_clear_object (&ctx->client);
     g_free (ctx->apn);
     g_free (ctx);
+}
+
+/* Pick the connected call we set up. Prefer the entry whose cid matches the one
+ * the SETUP response assigned; once known, a non-matching list must not be used
+ * (a DATA_CALL_LIST_CHANGED may also carry an IMS/tethering PDN). Before the cid
+ * is known (0), fall back to the first call that already has an address. */
+static const MMSitDataCall *
+connect_pick_call (GArray *calls, guint8 cid)
+{
+    const MMSitDataCall *fallback = NULL;
+    guint                i;
+
+    for (i = 0; i < calls->len; i++) {
+        const MMSitDataCall *c = &g_array_index (calls, MMSitDataCall, i);
+
+        if (!c->has_ipv4)
+            continue;
+        if (cid && c->cid == cid)
+            return c;
+        if (!fallback)
+            fallback = c;
+    }
+    return cid ? NULL : fallback;
 }
 
 static void
@@ -1052,19 +1076,25 @@ connect_indication (MMSitClient        *self,
                     const MMSitMessage *message,
                     GTask              *task)
 {
-    ConnectContext *ctx = g_task_get_task_data (task);
-    MMSitDataCall   call;
+    ConnectContext      *ctx = g_task_get_task_data (task);
+    g_autoptr(GArray)    calls = NULL;
+    const MMSitDataCall *chosen;
 
     if (message->id != MM_SIT_MESSAGE_DATA_CALL_LIST_CHANGED ||
-        !mm_sit_message_parse_data_call (message, &call, NULL) ||
-        !call.has_ipv4)
+        !mm_sit_message_parse_data_call_list (message, &calls, NULL))
         return;
 
-    ctx->indicated_call = call;
-    if (ctx->step == CONNECT_STEP_SETUP && ctx->retry_id) {
+    /* Keep the latest list so connect_setup_ready can match our cid once the
+     * SETUP response assigns one. */
+    g_clear_pointer (&ctx->indicated_calls, g_array_unref);
+    ctx->indicated_calls = g_array_ref (calls);
+
+    /* Advance a retrying SETUP only once our own call has an address. */
+    if (ctx->step == CONNECT_STEP_SETUP && ctx->retry_id &&
+        (chosen = connect_pick_call (calls, ctx->call.cid))) {
         g_source_remove (ctx->retry_id);
         ctx->retry_id = 0;
-        ctx->call = call;
+        ctx->call = *chosen;
         ctx->step++;
         connect_step (task);
     }
@@ -1144,8 +1174,14 @@ connect_setup_ready (MMSitClient *self,
         return;
     }
 
-    if (!ctx->call.has_ipv4 && ctx->indicated_call.has_ipv4)
-        ctx->call = ctx->indicated_call;
+    /* The SETUP response assigns the cid but may not carry the address yet; take
+     * it from the matching entry of the latest DATA_CALL_LIST_CHANGED list. */
+    if (!ctx->call.has_ipv4 && ctx->indicated_calls) {
+        const MMSitDataCall *m = connect_pick_call (ctx->indicated_calls, ctx->call.cid);
+
+        if (m)
+            ctx->call = *m;
+    }
 
     if (ctx->call.has_ipv4) {
         ctx->step++;
