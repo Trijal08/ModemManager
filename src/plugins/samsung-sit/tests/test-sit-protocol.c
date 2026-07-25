@@ -685,6 +685,73 @@ test_parse_data_call (void)
 }
 
 static void
+test_build_call_requests (void)
+{
+    /* Byte-pinned against a live MO call capture (research/ims.md): DIAL is
+     * 104 B with the number in a fixed 82-byte slot, ANSWER is header-only,
+     * HANGUP carries {u32 call_id, u32 = 1}. */
+    g_autoptr(GByteArray) dial = NULL;
+    g_autoptr(GByteArray) answer = NULL;
+    g_autoptr(GByteArray) hangup = NULL;
+    g_autoptr(GError)     error = NULL;
+
+    dial = mm_sit_request_new_dial (0x1234, "+15550101", &error);
+    g_assert_no_error (error);
+    g_assert_nonnull (dial);
+    g_assert_cmpuint (dial->len, ==, 104);
+    g_assert_cmpuint (dial->data[0], ==, 0);      /* request */
+    g_assert_cmpuint (dial->data[2], ==, 0x01);   /* DIAL */
+    g_assert_cmpuint (dial->data[3], ==, 0x00);
+    g_assert_cmpuint (dial->data[0x0c], ==, 0x01); /* voice call type */
+    g_assert_cmpuint (dial->data[0x0e], ==, 9);    /* number length */
+    g_assert_cmpmem (dial->data + 0x0f, 9, "+15550101", 9);
+    g_assert_cmpuint (dial->data[0x61], ==, 0x10); /* '+' -> international TON */
+
+    answer = mm_sit_request_new_answer (0x1235);
+    g_assert_nonnull (answer);
+    g_assert_cmpuint (answer->len, ==, 12);
+    g_assert_cmpuint (answer->data[2], ==, 0x04);
+
+    hangup = mm_sit_request_new_hangup (0x1236, 7);
+    g_assert_nonnull (hangup);
+    g_assert_cmpuint (hangup->len, ==, 20);
+    g_assert_cmpuint (hangup->data[2], ==, 0x08);
+    g_assert_cmpuint (hangup->data[12], ==, 7);
+}
+
+static void
+test_parse_call_list (void)
+{
+    /* GET_CALL_LIST response: u32 count then fixed-stride records. One MO
+     * call in ALERTING with a 4-digit number. */
+    guint8 resp[12 + 4 + 0x20] = { 1, 0, 0x00, 0x00, sizeof (resp), 0, 1, 0 };
+    g_autoptr(MMSitMessage) message = NULL;
+    g_autoptr(GError)       error = NULL;
+    g_autoptr(GArray)       calls = NULL;
+    const MMSitCall        *c;
+    const guint             rec = 16;
+
+    resp[12] = 1;                 /* count */
+    resp[rec + 0x00] = 3;         /* state: ALERTING */
+    resp[rec + 0x04] = 2;         /* index */
+    resp[rec + 0x0a] = 0;         /* MO */
+    resp[rec + 0x0e] = 4;         /* numLen */
+    memcpy (resp + rec + 0x0f, "0155", 4);
+
+    message = mm_sit_message_parse (resp, sizeof (resp), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_call_list (message, &calls, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (calls->len, ==, 1);
+
+    c = &g_array_index (calls, MMSitCall, 0);
+    g_assert_cmpuint (c->state, ==, 3);
+    g_assert_cmpuint (c->index, ==, 2);
+    g_assert_false (c->incoming);
+    g_assert_cmpstr (c->number, ==, "0155");
+}
+
+static void
 test_parse_data_call_list (void)
 {
     /* DATA_CALL_LIST_CHANGED (0x0604) with two PDNs: a default + a second call,
@@ -1478,6 +1545,8 @@ main (int argc,
     g_test_add_func ("/MM/sit/decode/cell-info-lte-v5", test_parse_cell_info_lte_v5);
     g_test_add_func ("/MM/sit/decode/data-call", test_parse_data_call);
     g_test_add_func ("/MM/sit/decode/data-call-list", test_parse_data_call_list);
+    g_test_add_func ("/MM/sit/build/call-requests", test_build_call_requests);
+    g_test_add_func ("/MM/sit/decode/call-list", test_parse_call_list);
     g_test_add_func ("/MM/sit/decode/carrier-sim-info", test_parse_carrier_sim_info);
     g_test_add_func ("/MM/sit/carrier-config/resolve", test_carrier_config_resolver);
     g_test_add_func ("/MM/sit/carrier-config/reference-database", test_carrier_config_reference_database);

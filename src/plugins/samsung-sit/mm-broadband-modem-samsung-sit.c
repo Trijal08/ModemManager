@@ -12,6 +12,8 @@
 #include "mm-iface-modem-3gpp.h"
 #include "mm-iface-modem-signal.h"
 #include "mm-log-object.h"
+#include "mm-call-samsung-sit.h"
+#include "mm-iface-modem-voice.h"
 #include "mm-modem-helpers.h"
 #include "mm-sit-carrier-config.h"
 #include "mm-utils.h"
@@ -19,6 +21,7 @@
 static void iface_modem_init      (MMIfaceModemInterface     *iface);
 static void iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface);
 static void iface_modem_signal_init (MMIfaceModemSignalInterface *iface);
+static void iface_modem_voice_init (MMIfaceModemVoiceInterface *iface);
 
 struct _MMBroadbandModemSamsungSitPrivate {
     GPtrArray   *clients;
@@ -40,7 +43,8 @@ G_DEFINE_TYPE_EXTENDED (MMBroadbandModemSamsungSit,
                         0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP, iface_modem_3gpp_init)
-                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_SIGNAL, iface_modem_signal_init))
+                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_SIGNAL, iface_modem_signal_init)
+                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_VOICE, iface_modem_voice_init))
 
 static gboolean
 sit_signal_get_lte_rssi (const MMSitSignal *signal,
@@ -195,6 +199,13 @@ sit_indication (MMSitClient              *client,
                 MMBroadbandModemSamsungSit *self)
 {
     MMSitOperator operator_info;
+
+    if (message->id == MM_SIT_MESSAGE_CALL_STATE_CHANGED) {
+        /* Empty poke -- the state is not in the indication, so re-read the
+         * list and let the voice interface diff it against its call objects. */
+        mm_obj_dbg (self, "SIT call state changed; reloading call list");
+        mm_iface_modem_voice_reload_all_calls (MM_IFACE_MODEM_VOICE (self), NULL, NULL);
+    }
 
     if (message->id == MM_SIT_MESSAGE_SIM_STATUS_CHANGED)
         invalidate_carrier_config (self);
@@ -1698,6 +1709,172 @@ signal_load_values (MMIfaceModemSignal  *iface,
     mm_sit_client_get_signal (client, cancellable,
                               (GAsyncReadyCallback) signal_load_values_ready,
                               task);
+}
+
+/*****************************************************************************/
+/* Voice interface (CS calls)
+ *
+ * The CS call group is native SIT (0x00xx), completely independent of the
+ * AIMS/IMS group: DIAL/ANSWER/HANGUP are typed requests and GET_CALL_LIST is
+ * the poll.  The CP does not push call state; it pokes an empty
+ * CALL_STATE_CHANGED indication and the AP re-reads the list, which is the
+ * classic RIL pattern and maps directly onto load_call_list.
+ *
+ * In-call audio is deliberately absent here.  The media is a modem <-> AoC
+ * DMA that never reaches the AP, so there is no audio channel for MM to
+ * describe: setup_in_call_audio_channel stays unimplemented and the audio
+ * binding is done by the audio layer (UCM + tegu-call-audio) off the call
+ * state MM publishes.
+ */
+
+static gboolean
+modem_voice_check_support_finish (MMIfaceModemVoice  *self,
+                                  GAsyncResult       *res,
+                                  GError            **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+modem_voice_check_support (MMIfaceModemVoice   *self,
+                           GAsyncReadyCallback  callback,
+                           gpointer             user_data)
+{
+    GTask *task;
+
+    /* Every SIT CP speaks the CS call group; there is no capability query
+     * for it, and the port is the same one already in use. */
+    task = g_task_new (self, NULL, callback, user_data);
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static MMBaseCall *
+modem_voice_create_call (MMIfaceModemVoice *self,
+                         MMCallDirection    direction,
+                         const gchar       *number,
+                         const guint        dtmf_tone_duration)
+{
+    return mm_call_samsung_sit_new (MM_BASE_MODEM (self),
+                                    direction,
+                                    number,
+                                    dtmf_tone_duration);
+}
+
+static MMCallState
+sit_call_state_to_mm (guint32 state)
+{
+    /* Raw RIL_CallState, as carried in the GET_CALL_LIST records. */
+    switch (state) {
+    case 0: return MM_CALL_STATE_ACTIVE;
+    case 1: return MM_CALL_STATE_HELD;
+    case 2: return MM_CALL_STATE_DIALING;
+    case 3: return MM_CALL_STATE_RINGING_OUT;
+    case 4: return MM_CALL_STATE_RINGING_IN;
+    case 5: return MM_CALL_STATE_WAITING;
+    default: return MM_CALL_STATE_UNKNOWN;
+    }
+}
+
+static gboolean
+modem_voice_load_call_list_finish (MMIfaceModemVoice  *self,
+                                   GAsyncResult       *res,
+                                   GList             **out_call_info_list,
+                                   GError            **error)
+{
+    GList *list;
+
+    list = g_task_propagate_pointer (G_TASK (res), error);
+    if (!list && error && *error)
+        return FALSE;
+
+    *out_call_info_list = list;
+    return TRUE;
+}
+
+/* The core's call_info_free() is static in mm-modem-helpers.c, so plugins
+ * carry their own (cinterion does the same). */
+static void
+sit_call_info_free (MMCallInfo *info)
+{
+    g_free (info->number);
+    g_slice_free (MMCallInfo, info);
+}
+
+static void
+call_info_list_free (GList *list)
+{
+    g_list_free_full (list, (GDestroyNotify) sit_call_info_free);
+}
+
+static void
+get_call_list_ready (MMSitClient  *client,
+                     GAsyncResult *res,
+                     GTask        *task)
+{
+    g_autoptr(GArray)  calls = NULL;
+    GError            *error = NULL;
+    GList             *call_info_list = NULL;
+    guint              i;
+
+    calls = mm_sit_client_get_call_list_finish (client, res, &error);
+    if (!calls) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    for (i = 0; i < calls->len; i++) {
+        const MMSitCall *call;
+        MMCallInfo      *info;
+
+        call = &g_array_index (calls, MMSitCall, i);
+
+        info            = g_slice_new0 (MMCallInfo);
+        info->index     = call->index;
+        info->state     = sit_call_state_to_mm (call->state);
+        info->direction = call->incoming ? MM_CALL_DIRECTION_INCOMING : MM_CALL_DIRECTION_OUTGOING;
+        info->number    = call->number[0] ? g_strdup (call->number) : NULL;
+
+        call_info_list = g_list_append (call_info_list, info);
+    }
+
+    /* An empty list is a valid answer -- it is how a cleared call is
+     * reported -- so return the (possibly NULL) list as success. */
+    g_task_return_pointer (task, call_info_list, (GDestroyNotify) call_info_list_free);
+    g_object_unref (task);
+}
+
+static void
+modem_voice_load_call_list (MMIfaceModemVoice   *iface,
+                            GAsyncReadyCallback  callback,
+                            gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_call_list (client, NULL,
+                                 (GAsyncReadyCallback) get_call_list_ready,
+                                 task);
+}
+
+static void
+iface_modem_voice_init (MMIfaceModemVoiceInterface *iface)
+{
+    iface->check_support           = modem_voice_check_support;
+    iface->check_support_finish    = modem_voice_check_support_finish;
+    iface->create_call             = modem_voice_create_call;
+    iface->load_call_list          = modem_voice_load_call_list;
+    iface->load_call_list_finish   = modem_voice_load_call_list_finish;
 }
 
 static void

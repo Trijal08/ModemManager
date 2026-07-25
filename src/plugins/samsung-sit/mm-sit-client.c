@@ -817,6 +817,124 @@ mm_sit_client_get_cell_info_finish (MMSitClient  *self,
     return g_task_propagate_pointer (G_TASK (res), error);
 }
 
+static void
+get_call_list_ready (MMSitClient  *self,
+                     GAsyncResult *res,
+                     GTask        *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    GArray                 *calls = NULL;
+    GError                 *error = NULL;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (response && mm_sit_message_parse_call_list (response, &calls, &error))
+        g_task_return_pointer (task, calls, (GDestroyNotify) g_array_unref);
+    else
+        g_task_return_error (task, error);
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_get_call_list (MMSitClient        *self,
+                             GCancellable       *cancellable,
+                             GAsyncReadyCallback callback,
+                             gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_get_call_list (next_token (self));
+    mm_sit_client_command (self, request, 5, cancellable,
+                           (GAsyncReadyCallback) get_call_list_ready, task);
+}
+
+GArray *
+mm_sit_client_get_call_list_finish (MMSitClient  *self,
+                                    GAsyncResult *res,
+                                    GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), NULL);
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+void
+mm_sit_client_dial (MMSitClient        *self,
+                    const gchar        *number,
+                    GCancellable       *cancellable,
+                    GAsyncReadyCallback callback,
+                    gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GError               *error = NULL;
+
+    request = mm_sit_request_new_dial (next_token (self), number, &error);
+    if (!request) {
+        GTask *task;
+
+        task = g_task_new (self, cancellable, callback, user_data);
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    /* The CP acks DIAL quickly; call *progress* then arrives as
+     * CALL_STATE_CHANGED indications, not in this response. */
+    run_checked_command (self, request, 30, cancellable, callback, user_data);
+}
+
+gboolean
+mm_sit_client_dial_finish (MMSitClient  *self,
+                           GAsyncResult *res,
+                           GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+void
+mm_sit_client_answer (MMSitClient        *self,
+                      GCancellable       *cancellable,
+                      GAsyncReadyCallback callback,
+                      gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+
+    request = mm_sit_request_new_answer (next_token (self));
+    run_checked_command (self, request, 30, cancellable, callback, user_data);
+}
+
+gboolean
+mm_sit_client_answer_finish (MMSitClient  *self,
+                             GAsyncResult *res,
+                             GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+void
+mm_sit_client_hangup (MMSitClient        *self,
+                      guint32             call_id,
+                      GCancellable       *cancellable,
+                      GAsyncReadyCallback callback,
+                      gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+
+    request = mm_sit_request_new_hangup (next_token (self), call_id);
+    run_checked_command (self, request, 30, cancellable, callback, user_data);
+}
+
+gboolean
+mm_sit_client_hangup_finish (MMSitClient  *self,
+                             GAsyncResult *res,
+                             GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
 void
 mm_sit_client_set_indication_filter (MMSitClient        *self,
                                      guint32             filter,

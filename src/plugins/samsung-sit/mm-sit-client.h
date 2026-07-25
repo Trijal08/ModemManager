@@ -128,6 +128,42 @@ GArray *mm_sit_client_get_cell_info_finish (MMSitClient        *self,
                                             GAsyncResult       *res,
                                             GError            **error);
 
+/* CS voice call control. Progress is reported out-of-band as
+ * CALL_STATE_CHANGED indications, not in these responses. */
+void     mm_sit_client_get_call_list        (MMSitClient        *self,
+                                             GCancellable       *cancellable,
+                                             GAsyncReadyCallback callback,
+                                             gpointer            user_data);
+GArray  *mm_sit_client_get_call_list_finish (MMSitClient        *self,
+                                             GAsyncResult       *res,
+                                             GError            **error);
+
+void     mm_sit_client_dial                 (MMSitClient        *self,
+                                             const gchar        *number,
+                                             GCancellable       *cancellable,
+                                             GAsyncReadyCallback callback,
+                                             gpointer            user_data);
+gboolean mm_sit_client_dial_finish          (MMSitClient        *self,
+                                             GAsyncResult       *res,
+                                             GError            **error);
+
+void     mm_sit_client_answer               (MMSitClient        *self,
+                                             GCancellable       *cancellable,
+                                             GAsyncReadyCallback callback,
+                                             gpointer            user_data);
+gboolean mm_sit_client_answer_finish        (MMSitClient        *self,
+                                             GAsyncResult       *res,
+                                             GError            **error);
+
+void     mm_sit_client_hangup               (MMSitClient        *self,
+                                             guint32             call_id,
+                                             GCancellable       *cancellable,
+                                             GAsyncReadyCallback callback,
+                                             gpointer            user_data);
+gboolean mm_sit_client_hangup_finish        (MMSitClient        *self,
+                                             GAsyncResult       *res,
+                                             GError            **error);
+
 void     mm_sit_client_set_indication_filter        (MMSitClient        *self,
                                                      guint32             filter,
                                                      GCancellable       *cancellable,

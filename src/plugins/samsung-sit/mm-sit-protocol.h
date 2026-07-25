@@ -23,6 +23,14 @@ typedef enum {
 } MMSitMessageType;
 
 typedef enum {
+    /* CS voice call group (native SIT, independent of the AIMS/IMS group) */
+    MM_SIT_MESSAGE_GET_CALL_LIST              = 0x0000,
+    MM_SIT_MESSAGE_DIAL                       = 0x0001,
+    MM_SIT_MESSAGE_ANSWER                     = 0x0004,
+    MM_SIT_MESSAGE_HANGUP                     = 0x0008,
+    /* Empty poke: the CP never pushes call state, it just tells the AP to
+     * re-read GET_CALL_LIST. */
+    MM_SIT_MESSAGE_CALL_STATE_CHANGED         = 0x0009,
     MM_SIT_MESSAGE_GET_SIM_STATUS             = 0x0200,
     MM_SIT_MESSAGE_SIM_IO                     = 0x0208,
     MM_SIT_MESSAGE_SIM_STATUS_CHANGED         = 0x0210,
@@ -156,6 +164,16 @@ typedef struct {
     guint16  mtu;
 } MMSitDataCall;
 
+/* One entry of a GET_CALL_LIST response. 'state' is the raw RIL_CallState
+ * (0 ACTIVE, 1 HOLDING, 2 DIALING, 3 ALERTING, 4 INCOMING, 5 WAITING); the
+ * codec passes through values it does not model rather than flattening them. */
+typedef struct {
+    guint32  state;
+    guint32  index;
+    gboolean incoming;
+    gchar    number[84];
+} MMSitCall;
+
 typedef struct {
     gchar iccid[21];
     gchar imsi[16];
@@ -227,6 +245,13 @@ GByteArray *mm_sit_request_new_deactivate_data_call   (guint16                to
                                                        guint8                 cid,
                                                        guint8                 reason);
 GByteArray *mm_sit_request_new_get_data_call_list     (guint16                token);
+GByteArray *mm_sit_request_new_dial                   (guint16                token,
+                                                       const gchar           *number,
+                                                       GError               **error);
+GByteArray *mm_sit_request_new_answer                 (guint16                token);
+GByteArray *mm_sit_request_new_hangup                 (guint16                token,
+                                                       guint32                call_id);
+GByteArray *mm_sit_request_new_get_call_list          (guint16                token);
 GByteArray *mm_sit_request_new_set_fast_dormancy_info (guint16                token);
 GByteArray *mm_sit_request_new_set_indication_filter  (guint16                token,
                                                        guint32                filter);
@@ -277,6 +302,12 @@ gboolean mm_sit_message_parse_data_call               (const MMSitMessage    *me
                                                        GError               **error);
 /* Parses every PDN of a data-call message into a GArray of MMSitDataCall. */
 gboolean mm_sit_message_parse_data_call_list          (const MMSitMessage    *message,
+                                                       GArray               **out_calls,
+                                                       GError               **error);
+
+/* Fills *out_calls with a GArray of MMSitCall (may be empty, never NULL on
+ * success); the caller owns it. */
+gboolean mm_sit_message_parse_call_list               (const MMSitMessage    *message,
                                                        GArray               **out_calls,
                                                        GError               **error);
 gboolean mm_sit_message_parse_carrier_sim_info        (const MMSitMessage    *message,

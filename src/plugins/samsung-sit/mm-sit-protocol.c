@@ -360,6 +360,55 @@ mm_sit_request_new_get_data_call_list (guint16 token)
 }
 
 GByteArray *
+mm_sit_request_new_dial (guint16       token,
+                         const gchar  *number,
+                         GError      **error)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    g_return_val_if_fail (number != NULL, NULL);
+
+    status = samsung_sit_build_dial (token, number, &buffer, &len);
+    return finish_build (status, buffer, len, error);
+}
+
+GByteArray *
+mm_sit_request_new_answer (guint16 token)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_answer (token, &buffer, &len);
+    return finish_build (status, buffer, len, NULL);
+}
+
+GByteArray *
+mm_sit_request_new_hangup (guint16 token,
+                           guint32 call_id)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_hangup (token, call_id, &buffer, &len);
+    return finish_build (status, buffer, len, NULL);
+}
+
+GByteArray *
+mm_sit_request_new_get_call_list (guint16 token)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_get_call_list (token, &buffer, &len);
+    return finish_build (status, buffer, len, NULL);
+}
+
+GByteArray *
 mm_sit_request_new_set_fast_dormancy_info (guint16 token)
 {
     guint8          *buffer = NULL;
@@ -837,6 +886,46 @@ mm_sit_message_parse_data_call_list (const MMSitMessage *message,
         g_array_append_val (array, call);
     }
     samsung_sit_data_call_list_free (calls, count);
+
+    *out_calls = array;
+    return TRUE;
+}
+
+gboolean
+mm_sit_message_parse_call_list (const MMSitMessage *message,
+                                GArray            **out_calls,
+                                GError            **error)
+{
+    const guint8    *data;
+    gsize            len;
+    SamsungSitCall  *calls = NULL;
+    gsize            count = 0;
+    SamsungSitStatus status;
+    GArray          *array;
+    gsize            i;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_calls != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_call_list (data, len, &calls, &count);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+
+    array = g_array_sized_new (FALSE, FALSE, sizeof (MMSitCall), count);
+    for (i = 0; i < count; i++) {
+        MMSitCall call;
+
+        memset (&call, 0, sizeof (call));
+        call.state    = calls[i].state;
+        call.index    = calls[i].index;
+        call.incoming = (calls[i].incoming != 0);
+        g_strlcpy (call.number, calls[i].number, sizeof (call.number));
+        g_array_append_val (array, call);
+    }
+    samsung_sit_call_list_free (calls, count);
 
     *out_calls = array;
     return TRUE;

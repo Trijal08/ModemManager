@@ -964,6 +964,7 @@ if plugins_options['samsung-sit']
   sources = files(
     'samsung-sit/mm-bearer-samsung-sit.c',
     'samsung-sit/mm-broadband-modem-samsung-sit.c',
+    'samsung-sit/mm-call-samsung-sit.c',
     'samsung-sit/mm-port-serial-sit.c',
     'samsung-sit/mm-plugin-samsung-sit.c',
     'samsung-sit/mm-sit-carrier-config.c',
