@@ -143,7 +143,6 @@ answer_ready (MMSitClient  *client,
 
 static void
 call_accept (MMBaseCall          *_self,
-             GCancellable        *cancellable,
              GAsyncReadyCallback  callback,
              gpointer             user_data)
 {
@@ -152,7 +151,7 @@ call_accept (MMBaseCall          *_self,
     GTask            *task;
     GError           *error = NULL;
 
-    task = g_task_new (self, cancellable, callback, user_data);
+    task = g_task_new (self, NULL, callback, user_data);
 
     client = peek_client (self, &error);
     if (!client) {
@@ -164,7 +163,7 @@ call_accept (MMBaseCall          *_self,
     /* ANSWER is header-only: it accepts *the* incoming call, with no id, so
      * there is nothing to select here. */
     mm_obj_dbg (self, "accepting call");
-    mm_sit_client_answer (client, cancellable, (GAsyncReadyCallback) answer_ready, task);
+    mm_sit_client_answer (client, NULL, (GAsyncReadyCallback) answer_ready, task);
 }
 
 /*****************************************************************************/
@@ -194,7 +193,6 @@ hangup_ready (MMSitClient  *client,
 
 static void
 call_hangup (MMBaseCall          *_self,
-             GCancellable        *cancellable,
              GAsyncReadyCallback  callback,
              gpointer             user_data)
 {
@@ -203,8 +201,9 @@ call_hangup (MMBaseCall          *_self,
     GTask            *task;
     GError           *error = NULL;
     guint             index;
+    guint             call_id;
 
-    task = g_task_new (self, cancellable, callback, user_data);
+    task = g_task_new (self, NULL, callback, user_data);
 
     client = peek_client (self, &error);
     if (!client) {
@@ -213,13 +212,16 @@ call_hangup (MMBaseCall          *_self,
         return;
     }
 
-    /* HANGUP takes a call id.  A call that never reached the list (dialled
-     * but not yet reported) has index 0, which is also a valid id, so send
-     * it either way and let the CP reject an unknown one. */
+    /* HANGUP takes the CP's call id.  ModemManager indices are the CP's ids
+     * shifted by one (0 means "no index assigned" there, but is a valid id
+     * here), so shift back.  A call dialled but not yet seen in a call list
+     * still has index 0; fall back to id 0, the first call, and let the CP
+     * reject it if that is wrong. */
     index = mm_base_call_get_index (_self);
+    call_id = index ? index - 1 : 0;
 
-    mm_obj_dbg (self, "hanging up call %u", index);
-    mm_sit_client_hangup (client, index, cancellable,
+    mm_obj_dbg (self, "hanging up call %u (MM index %u)", call_id, index);
+    mm_sit_client_hangup (client, call_id, NULL,
                           (GAsyncReadyCallback) hangup_ready, task);
 }
 

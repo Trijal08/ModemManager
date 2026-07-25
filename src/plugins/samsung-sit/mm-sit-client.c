@@ -584,12 +584,20 @@ get_registration_operator_ready (MMSitClient *self,
     MMSitOperator           operator_info;
 
     response = mm_sit_client_command_finish (self, res, &error);
-    if (response &&
-        mm_sit_message_parse_operator (response, &operator_info, &error) &&
-        operator_info.plmn[0] != '\0' &&
-        registration->state == 0) {
-        registration->registered = TRUE;
-        registration->state = 1;
+    if (response && mm_sit_message_parse_operator (response, &operator_info, &error)) {
+        mm_obj_dbg (self->priv->port, "registration check: reg state %u (registered %s), rat %u, serving plmn '%s'",
+                    registration->state,
+                    registration->registered ? "yes" : "no",
+                    registration->radio_technology,
+                    operator_info.plmn);
+        if (operator_info.plmn[0] != '\0' && registration->state == 0) {
+            mm_obj_dbg (self->priv->port, "registration check: promoting camped PLMN to registered");
+            registration->registered = TRUE;
+            registration->state = 1;
+        }
+    } else {
+        mm_obj_dbg (self->priv->port, "registration check: no operator response (%s); reg state %u",
+                    error ? error->message : "parse failed", registration->state);
     }
 
     result = g_new (MMSitRegistration, 1);

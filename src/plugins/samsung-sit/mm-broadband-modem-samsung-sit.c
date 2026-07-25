@@ -1812,6 +1812,7 @@ get_call_list_ready (MMSitClient  *client,
                      GAsyncResult *res,
                      GTask        *task)
 {
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
     g_autoptr(GArray)  calls = NULL;
     GError            *error = NULL;
     GList             *call_info_list = NULL;
@@ -1827,12 +1828,26 @@ get_call_list_ready (MMSitClient  *client,
     for (i = 0; i < calls->len; i++) {
         const MMSitCall *call;
         MMCallInfo      *info;
+        MMCallState      state;
 
         call = &g_array_index (calls, MMSitCall, i);
 
-        info            = g_slice_new0 (MMCallInfo);
-        info->index     = call->index;
-        info->state     = sit_call_state_to_mm (call->state);
+        /* Both index and state are mandatory when reporting the full list --
+         * mm_iface_modem_voice_report_all_calls() g_assert()s on them, so a
+         * bad entry aborts the daemon rather than being ignored. */
+        state = sit_call_state_to_mm (call->state);
+        if (state == MM_CALL_STATE_UNKNOWN) {
+            mm_obj_dbg (self, "ignoring call %u with unmodelled SIT state %u",
+                        call->index, call->state);
+            continue;
+        }
+
+        info = g_slice_new0 (MMCallInfo);
+        /* The CP numbers calls from 0, but 0 means "no index assigned" in
+         * ModemManager. Shift by one; mm-call-samsung-sit.c shifts back when
+         * it sends HANGUP. */
+        info->index     = call->index + 1;
+        info->state     = state;
         info->direction = call->incoming ? MM_CALL_DIRECTION_INCOMING : MM_CALL_DIRECTION_OUTGOING;
         info->number    = call->number[0] ? g_strdup (call->number) : NULL;
 
