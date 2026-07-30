@@ -85,6 +85,7 @@ typedef enum {
     MM_SIT_MESSAGE_SET_INDICATION_FILTER       = 0x0928,
     MM_SIT_MESSAGE_SET_MODEM_CONFIG            = 0x093f,
     MM_SIT_MESSAGE_SET_AP_SYSTEM_TIME          = 0x0949,
+    MM_SIT_MESSAGE_GET_NITZ_TIME               = 0x0955,
     MM_SIT_MESSAGE_CARRIER_CONFIG_MANIFEST     = 0x4600,
     MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO     = 0x4602,
     MM_SIT_MESSAGE_OEM_CONFIG                  = 0x4605,
@@ -237,6 +238,25 @@ typedef struct {
     gchar    operator_short[33];
     gchar    operator_long[65];
 } MMSitOperator;
+
+/* The last NITZ the CP was handed. The CP keeps no clock of its own: the
+ * timestamp is UTC as of 'age_ms' milliseconds ago, so the network's current
+ * time is the two added together. 'timezone_quarter_hours' is the network's
+ * offset from UTC and 'daylight_saving_hours' how much of it is DST. */
+typedef struct {
+    gboolean valid;
+    guint16  year;
+    guint8   month;      /* 1-12 */
+    guint8   day;
+    guint8   hour;       /* UTC */
+    guint8   minute;
+    guint8   second;
+    gint8    timezone_quarter_hours;
+    guint8   daylight_saving_hours;
+    guint8   day_of_week; /* 1 = Monday */
+    gchar    plmn[7];
+    guint64  age_ms;
+} MMSitNitzTime;
 
 /* One PLMN of a NET_SCAN_RESULT (0x0736) batch. 'rat' is the scan's own radio
  * technology numbering, not the one the registration responses use; only
@@ -529,6 +549,16 @@ gboolean mm_sit_message_parse_operator                (const MMSitMessage    *me
                                                        GError               **error);
 gboolean mm_sit_message_parse_signal                  (const MMSitMessage    *message,
                                                        MMSitSignal           *out_signal,
+                                                       GError               **error);
+/* A CP that has not been handed a NITZ yet is not a failure: it parses fine
+ * with out_time->valid FALSE. */
+gboolean mm_sit_message_parse_nitz_time               (const MMSitMessage    *message,
+                                                       MMSitNitzTime         *out_time,
+                                                       GError               **error);
+/* The network's *current* local time as an ISO-8601 string: the cached
+ * timestamp rolled forward by its own age and into the network's timezone.
+ * Fails with MM_CORE_ERROR_RETRY if the CP holds no time. */
+gchar   *mm_sit_nitz_time_to_iso8601                  (const MMSitNitzTime   *time,
                                                        GError               **error);
 gboolean mm_sit_message_parse_cell_info_list          (const MMSitMessage    *message,
                                                        GArray               **out_cells,

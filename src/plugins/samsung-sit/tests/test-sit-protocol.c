@@ -265,6 +265,86 @@ test_build_boot_config_requests (void)
 }
 
 static void
+test_parse_nitz_time (void)
+{
+    /* A live GET_NITZ_TIME reply with the PLMN replaced by the 001/01 test
+     * network: 2026-07-30 16:55:50 UTC, +02:00 of which 1 h is DST, Thursday,
+     * received 91171 ms ago. */
+    static const guint8 response[] = {
+        1, 0, 0x55, 0x09, 37, 0, 1, 0,
+        0, 0, 0, 0,
+        1, 26, 7, 30, 16, 55, 50, 8, 1, 4, 1,
+        '0', '0', '1', '0', '1', '#',
+        0x23, 0x64, 0x01, 0, 0, 0, 0, 0,
+    };
+    static const guint8 no_time[] = {
+        1, 0, 0x55, 0x09, 37, 0, 1, 0,
+        0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+    };
+    g_autoptr(MMSitMessage) message = NULL;
+    g_autoptr(GError)       error = NULL;
+    g_autofree gchar       *iso8601 = NULL;
+    MMSitNitzTime           time;
+
+    message = mm_sit_message_parse (response, sizeof (response), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_nitz_time (message, &time, &error));
+    g_assert_no_error (error);
+    g_assert_true (time.valid);
+    g_assert_cmpuint (time.year, ==, 2026);
+    g_assert_cmpuint (time.month, ==, 7);
+    g_assert_cmpuint (time.day, ==, 30);
+    g_assert_cmpuint (time.hour, ==, 16);
+    g_assert_cmpuint (time.minute, ==, 55);
+    g_assert_cmpuint (time.second, ==, 50);
+    g_assert_cmpint (time.timezone_quarter_hours, ==, 8);
+    g_assert_cmpuint (time.daylight_saving_hours, ==, 1);
+    g_assert_cmpuint (time.day_of_week, ==, 4);
+    g_assert_cmpstr (time.plmn, ==, "00101");
+    g_assert_cmpuint (time.age_ms, ==, 91171);
+
+    /* 16:55:50 UTC + 91.171 s = 16:57:21 UTC, published as +02:00 local.
+     * GLib renders a whole-hour offset without its minutes, as every other
+     * ModemManager plugin's network time does. */
+    iso8601 = mm_sit_nitz_time_to_iso8601 (&time, &error);
+    g_assert_no_error (error);
+    g_assert_cmpstr (iso8601, ==, "2026-07-30T18:57:21+02");
+
+    /* An age that crosses midnight has to carry the date with it, and a
+     * negative offset has to move the clock back rather than forward. */
+    time.age_ms = 25 * 60 * 60 * 1000;
+    time.timezone_quarter_hours = -32; /* UTC-08:00 */
+    g_clear_pointer (&iso8601, g_free);
+    iso8601 = mm_sit_nitz_time_to_iso8601 (&time, &error);
+    g_assert_no_error (error);
+    g_assert_cmpstr (iso8601, ==, "2026-07-31T09:55:50-08");
+
+    /* A half-hour zone keeps its minutes. */
+    time.age_ms = 0;
+    time.timezone_quarter_hours = 22; /* UTC+05:30 */
+    g_clear_pointer (&iso8601, g_free);
+    iso8601 = mm_sit_nitz_time_to_iso8601 (&time, &error);
+    g_assert_no_error (error);
+    g_assert_cmpstr (iso8601, ==, "2026-07-30T22:25:50+05:30");
+
+    /* No NITZ yet: parses fine, but there is nothing to publish. */
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (no_time, sizeof (no_time), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_nitz_time (message, &time, &error));
+    g_assert_no_error (error);
+    g_assert_false (time.valid);
+
+    g_clear_pointer (&iso8601, g_free);
+    iso8601 = mm_sit_nitz_time_to_iso8601 (&time, &error);
+    g_assert_null (iso8601);
+    g_assert_error (error, MM_CORE_ERROR, MM_CORE_ERROR_RETRY);
+}
+
+static void
 test_parse_radio (void)
 {
     static const guint8 get_response[] = {
@@ -1558,6 +1638,7 @@ main (int argc,
     g_test_add_func ("/MM/sit/decode/sim-registration", test_parse_status_and_registration);
     g_test_add_func ("/MM/sit/decode/sim-slot-status", test_parse_sim_slot_status);
     g_test_add_func ("/MM/sit/decode/signal", test_parse_signal);
+    g_test_add_func ("/MM/sit/decode/nitz-time", test_parse_nitz_time);
     g_test_add_func ("/MM/sit/decode/cell-info-lte-v5", test_parse_cell_info_lte_v5);
     g_test_add_func ("/MM/sit/decode/data-call", test_parse_data_call);
     g_test_add_func ("/MM/sit/decode/data-call-list", test_parse_data_call_list);

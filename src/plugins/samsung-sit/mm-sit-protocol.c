@@ -12,6 +12,11 @@
 
 #include <string.h>
 
+#include <ModemManager.h>
+#define _LIBMM_INSIDE_MM
+#include <libmm-glib.h>
+
+#include "mm-common-helpers.h"
 #include "mm-sit-protocol.h"
 
 #include <samsung_sit_ffi.h>
@@ -889,6 +894,95 @@ mm_sit_message_parse_registration (const MMSitMessage *message,
     out_registration->radio_technology = reg.radio_technology;
     out_registration->registered       = reg.registered ? TRUE : FALSE;
     return TRUE;
+}
+
+gboolean
+mm_sit_message_parse_nitz_time (const MMSitMessage *message,
+                                MMSitNitzTime      *out_time,
+                                GError            **error)
+{
+    const guint8      *data;
+    gsize              len;
+    SamsungSitNitzTime t;
+    SamsungSitStatus   status;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_time != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_nitz_time (data, len, &t);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+
+    memset (out_time, 0, sizeof (*out_time));
+    out_time->valid = t.valid ? TRUE : FALSE;
+    if (!out_time->valid)
+        return TRUE;
+
+    out_time->year                   = t.year;
+    out_time->month                  = t.month;
+    out_time->day                    = t.day;
+    out_time->hour                   = t.hour;
+    out_time->minute                 = t.minute;
+    out_time->second                 = t.second;
+    out_time->timezone_quarter_hours = t.timezone_quarter_hours;
+    out_time->daylight_saving_hours  = t.daylight_saving_hours;
+    out_time->day_of_week            = t.day_of_week;
+    out_time->age_ms                 = t.age_ms;
+    memcpy (out_time->plmn, t.plmn, sizeof (out_time->plmn));
+    return TRUE;
+}
+
+gchar *
+mm_sit_nitz_time_to_iso8601 (const MMSitNitzTime *time,
+                             GError             **error)
+{
+    g_autoptr(GDateTime) utc = NULL;
+    g_autoptr(GDateTime) local = NULL;
+    gint                 offset_minutes;
+
+    g_return_val_if_fail (time != NULL, NULL);
+
+    if (!time->valid) {
+        g_set_error_literal (error, MM_CORE_ERROR, MM_CORE_ERROR_RETRY,
+                             "the modem has not received a network time yet");
+        return NULL;
+    }
+
+    utc = g_date_time_new_utc (time->year, time->month, time->day,
+                               time->hour, time->minute, time->second);
+    if (!utc) {
+        g_set_error (error, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                     "invalid network time: %04u-%02u-%02u %02u:%02u:%02u",
+                     time->year, time->month, time->day,
+                     time->hour, time->minute, time->second);
+        return NULL;
+    }
+
+    /* Roll the cached timestamp forward by its own age and on into the
+     * network's timezone, so what comes out is the current local time there --
+     * which is the form the Time interface publishes (same as +CCLK's). */
+    offset_minutes = time->timezone_quarter_hours * 15;
+    local = g_date_time_add_seconds (utc,
+                                     (gdouble) time->age_ms / 1000.0 + offset_minutes * 60);
+    if (!local) {
+        g_set_error (error, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                     "network time %" G_GUINT64_FORMAT " ms old is out of range",
+                     time->age_ms);
+        return NULL;
+    }
+
+    return mm_new_iso8601_time (g_date_time_get_year (local),
+                                g_date_time_get_month (local),
+                                g_date_time_get_day_of_month (local),
+                                g_date_time_get_hour (local),
+                                g_date_time_get_minute (local),
+                                g_date_time_get_second (local),
+                                TRUE,
+                                offset_minutes,
+                                error);
 }
 
 gboolean

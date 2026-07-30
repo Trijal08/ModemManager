@@ -11,6 +11,7 @@
 #include "mm-iface-modem.h"
 #include "mm-iface-modem-3gpp.h"
 #include "mm-iface-modem-signal.h"
+#include "mm-iface-modem-time.h"
 #include "mm-log-object.h"
 #include "mm-call-samsung-sit.h"
 #include "mm-iface-modem-voice.h"
@@ -26,6 +27,7 @@ static void iface_modem_init      (MMIfaceModemInterface     *iface);
 static void iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface);
 static void iface_modem_messaging_init (MMIfaceModemMessagingInterface *iface);
 static void iface_modem_signal_init (MMIfaceModemSignalInterface *iface);
+static void iface_modem_time_init (MMIfaceModemTimeInterface *iface);
 static void iface_modem_voice_init (MMIfaceModemVoiceInterface *iface);
 
 struct _MMBroadbandModemSamsungSitPrivate {
@@ -50,6 +52,7 @@ G_DEFINE_TYPE_EXTENDED (MMBroadbandModemSamsungSit,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP, iface_modem_3gpp_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_MESSAGING, iface_modem_messaging_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_SIGNAL, iface_modem_signal_init)
+                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_TIME, iface_modem_time_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_VOICE, iface_modem_voice_init))
 
 static gboolean
@@ -3075,6 +3078,151 @@ signal_load_values (MMIfaceModemSignal  *iface,
 }
 
 /*****************************************************************************/
+/* Time interface
+ *
+ * The CP runs no clock the AP can read.  GET_NITZ_TIME (0x0955) hands back the
+ * last NITZ the network sent -- a UTC timestamp, the network's offset from it
+ * and the DST part of that offset -- together with an age in milliseconds, so
+ * the current network time is the timestamp plus the age.  A fresh NITZ lands
+ * on every (re-)attach, which is what keeps the cached value honest.
+ *
+ * Both vfuncs read that one message on demand.  There is no unsolicited path to
+ * hook: the CP emits no NITZ indication -- checked with the 0x0928 indication
+ * filter set to 0xffffffff across a re-attach that did land a fresh NITZ, and
+ * 0x1007 NETWORK_TIME is the EMBMS query, which reports unavailable here.  So
+ * setup/enable_unsolicited_events stay unimplemented and the interface's own
+ * post-registration timezone poll does the refreshing.
+ */
+
+static gboolean
+modem_time_check_support_finish (MMIfaceModemTime *self,
+                                 GAsyncResult     *res,
+                                 GError          **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+modem_time_check_support (MMIfaceModemTime    *self,
+                          GAsyncReadyCallback  callback,
+                          gpointer             user_data)
+{
+    GTask *task;
+
+    /* Every CP that speaks SIT answers this message; whether it has a time to
+     * report is a per-call question, not a capability. Probing here would turn
+     * "not attached yet" into "no time support for this session". */
+    task = g_task_new (self, NULL, callback, user_data);
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static gchar *
+modem_time_load_network_time_finish (MMIfaceModemTime *self,
+                                     GAsyncResult     *res,
+                                     GError          **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+static void
+load_network_time_ready (MMSitClient  *client,
+                         GAsyncResult *res,
+                         GTask        *task)
+{
+    MMSitNitzTime  time;
+    gchar         *iso8601;
+    GError        *error = NULL;
+
+    if (!mm_sit_client_get_network_time_finish (client, res, &time, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    iso8601 = mm_sit_nitz_time_to_iso8601 (&time, &error);
+    if (!iso8601)
+        g_task_return_error (task, error);
+    else
+        g_task_return_pointer (task, iso8601, g_free);
+    g_object_unref (task);
+}
+
+static void
+modem_time_load_network_time (MMIfaceModemTime    *iface,
+                              GAsyncReadyCallback  callback,
+                              gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_network_time (client, NULL,
+                                    (GAsyncReadyCallback) load_network_time_ready,
+                                    task);
+}
+
+static MMNetworkTimezone *
+modem_time_load_network_timezone_finish (MMIfaceModemTime *self,
+                                         GAsyncResult     *res,
+                                         GError          **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+static void
+load_network_timezone_ready (MMSitClient  *client,
+                             GAsyncResult *res,
+                             GTask        *task)
+{
+    MMNetworkTimezone *tz;
+    MMSitNitzTime      time;
+    GError            *error = NULL;
+
+    if (!mm_sit_client_get_network_time_finish (client, res, &time, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    tz = mm_network_timezone_new ();
+    mm_network_timezone_set_offset (tz, time.timezone_quarter_hours * 15);
+    mm_network_timezone_set_dst_offset (tz, time.daylight_saving_hours * 60);
+    g_task_return_pointer (task, tz, g_object_unref);
+    g_object_unref (task);
+}
+
+static void
+modem_time_load_network_timezone (MMIfaceModemTime    *iface,
+                                  GAsyncReadyCallback  callback,
+                                  gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_network_time (client, NULL,
+                                    (GAsyncReadyCallback) load_network_timezone_ready,
+                                    task);
+}
+
+/*****************************************************************************/
 /* Voice interface (CS calls)
  *
  * The CS call group is native SIT (0x00xx), completely independent of the
@@ -3287,6 +3435,26 @@ iface_modem_signal_init (MMIfaceModemSignalInterface *iface)
     iface->check_support_finish = signal_check_support_finish;
     iface->load_values = signal_load_values;
     iface->load_values_finish = signal_load_values_finish;
+}
+
+static void
+iface_modem_time_init (MMIfaceModemTimeInterface *iface)
+{
+    iface->check_support               = modem_time_check_support;
+    iface->check_support_finish        = modem_time_check_support_finish;
+    iface->load_network_time           = modem_time_load_network_time;
+    iface->load_network_time_finish    = modem_time_load_network_time_finish;
+    iface->load_network_timezone       = modem_time_load_network_timezone;
+    iface->load_network_timezone_finish = modem_time_load_network_timezone_finish;
+    /* The CP pushes no NITZ indication, so there is nothing to subscribe to. */
+    iface->setup_unsolicited_events    = NULL;
+    iface->setup_unsolicited_events_finish = NULL;
+    iface->cleanup_unsolicited_events  = NULL;
+    iface->cleanup_unsolicited_events_finish = NULL;
+    iface->enable_unsolicited_events   = NULL;
+    iface->enable_unsolicited_events_finish = NULL;
+    iface->disable_unsolicited_events  = NULL;
+    iface->disable_unsolicited_events_finish = NULL;
 }
 
 MMBroadbandModemSamsungSit *

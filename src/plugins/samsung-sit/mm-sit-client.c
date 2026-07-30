@@ -1212,6 +1212,66 @@ mm_sit_client_get_operator_finish (MMSitClient   *self,
 }
 
 static void
+get_network_time_ready (MMSitClient  *self,
+                        GAsyncResult *res,
+                        GTask        *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    MMSitNitzTime          *time;
+    GError                 *error = NULL;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    time = g_new0 (MMSitNitzTime, 1);
+    if (!response || !mm_sit_message_parse_nitz_time (response, time, &error)) {
+        g_free (time);
+        g_task_return_error (task, error);
+    } else if (!time->valid) {
+        /* The CP answered, it just has no NITZ to report -- before the first
+         * attach, or on a network that sends none. MM_CORE_ERROR_RETRY is what
+         * the Time interface's timezone poll looks for to try again later. */
+        g_free (time);
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_RETRY,
+                                 "the modem has not received a network time yet");
+    } else
+        g_task_return_pointer (task, time, g_free);
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_get_network_time (MMSitClient        *self,
+                                GCancellable       *cancellable,
+                                GAsyncReadyCallback callback,
+                                gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_NITZ_TIME, next_token (self));
+    mm_sit_client_command (self, request, 5, cancellable,
+                           (GAsyncReadyCallback) get_network_time_ready, task);
+}
+
+gboolean
+mm_sit_client_get_network_time_finish (MMSitClient   *self,
+                                       GAsyncResult  *res,
+                                       MMSitNitzTime *out_time,
+                                       GError       **error)
+{
+    MMSitNitzTime *time;
+
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    g_return_val_if_fail (out_time != NULL, FALSE);
+
+    time = g_task_propagate_pointer (G_TASK (res), error);
+    if (!time)
+        return FALSE;
+    *out_time = *time;
+    g_free (time);
+    return TRUE;
+}
+
+static void
 get_signal_ready (MMSitClient *self,
                   GAsyncResult *res,
                   GTask *task)

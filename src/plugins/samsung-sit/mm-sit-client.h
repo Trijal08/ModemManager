@@ -232,6 +232,17 @@ gboolean mm_sit_client_get_operator_finish (MMSitClient        *self,
                                              MMSitOperator      *out_operator,
                                              GError            **error);
 
+/* Reads the CP's cached NITZ. Fails with MM_CORE_ERROR_RETRY when the CP
+ * answered but has no network time yet. */
+void     mm_sit_client_get_network_time        (MMSitClient        *self,
+                                                GCancellable       *cancellable,
+                                                GAsyncReadyCallback callback,
+                                                gpointer            user_data);
+gboolean mm_sit_client_get_network_time_finish (MMSitClient        *self,
+                                                GAsyncResult       *res,
+                                                MMSitNitzTime      *out_time,
+                                                GError            **error);
+
 void     mm_sit_client_get_signal        (MMSitClient        *self,
                                           GCancellable       *cancellable,
                                           GAsyncReadyCallback callback,
