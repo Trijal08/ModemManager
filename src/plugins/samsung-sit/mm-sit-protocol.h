@@ -19,6 +19,8 @@
 #define MM_SIT_MAX_AID_LENGTH       16
 #define MM_SIT_MAX_SIM_IO_DATA      512
 #define MM_SIT_MAX_SIM_IO_PATH      6
+#define MM_SIT_MAX_SMS_PDU          244
+#define MM_SIT_MAX_SMSC_LEN         12
 
 typedef enum {
     MM_SIT_MESSAGE_TYPE_REQUEST    = 0,
@@ -35,6 +37,16 @@ typedef enum {
     /* Empty poke: the CP never pushes call state, it just tells the AP to
      * re-read GET_CALL_LIST. */
     MM_SIT_MESSAGE_CALL_STATE_CHANGED         = 0x0009,
+    /* SMS. Which group carries a message depends on whether IMS is up: the
+     * AIMS one while registered, the classic one otherwise. */
+    MM_SIT_MESSAGE_SEND_SMS                   = 0x0100,
+    MM_SIT_MESSAGE_SEND_SMS_EXPECT_MORE       = 0x0101,
+    MM_SIT_MESSAGE_SMS_ACK                    = 0x0102,
+    MM_SIT_MESSAGE_GET_SMSC_ADDRESS           = 0x0108,
+    MM_SIT_MESSAGE_NEW_SMS                    = 0x010c,
+    MM_SIT_MESSAGE_IMS_SEND_SMS               = 0x0d1b,
+    MM_SIT_MESSAGE_IMS_SMS_ACK                = 0x0d1d,
+    MM_SIT_MESSAGE_IMS_NEW_SMS                = 0x0d1e,
     MM_SIT_MESSAGE_GET_SIM_STATUS             = 0x0200,
     MM_SIT_MESSAGE_SIM_IO                     = 0x0208,
     MM_SIT_MESSAGE_GET_FACILITY_LOCK          = 0x0209,
@@ -179,6 +191,15 @@ typedef struct {
     guint16  data_len;
     guint8   data[MM_SIT_MAX_SIM_IO_DATA];
 } MMSitSimIoResponse;
+
+/* A message the network delivered. 'over_ims' only decides which ack answers
+ * it; the PDU is the TS 23.040 one, service centre included. */
+typedef struct {
+    guint8   format;
+    gboolean over_ims;
+    guint16  pdu_len;
+    guint8   pdu[MM_SIT_MAX_SMS_PDU];
+} MMSitSmsDeliver;
 
 /* How an elementary file is organised. */
 typedef enum {
@@ -450,6 +471,31 @@ GByteArray *mm_sit_request_new_set_allowed_network_types
 
 gboolean mm_sit_message_parse_radio_state             (const MMSitMessage    *message,
                                                        MMSitRadioState       *out_state,
+                                                       GError               **error);
+/* 'smsc' is the TS 23.040 service-centre field as mm_sit_message_parse_smsc_address
+ * returns it, and may be NULL to let the CP use the card's own. Every part but
+ * the last of a concatenated message sets 'expect_more'. */
+GByteArray *mm_sit_request_new_send_sms               (guint16                token,
+                                                       const guint8          *smsc,
+                                                       gsize                  smsc_len,
+                                                       const guint8          *tpdu,
+                                                       gsize                  tpdu_len,
+                                                       gboolean               expect_more,
+                                                       gboolean               over_ims,
+                                                       GError               **error);
+GByteArray *mm_sit_request_new_sms_ack                (guint16                token,
+                                                       gboolean               over_ims);
+GByteArray *mm_sit_request_new_get_smsc_address       (guint16                token);
+gboolean mm_sit_message_parse_new_sms                 (const MMSitMessage    *message,
+                                                       MMSitSmsDeliver       *out_deliver,
+                                                       GError               **error);
+gboolean mm_sit_message_parse_send_sms_result         (const MMSitMessage    *message,
+                                                       guint32               *out_reference,
+                                                       GError               **error);
+/* Fills a caller buffer of MM_SIT_MAX_SMSC_LEN bytes. */
+gboolean mm_sit_message_parse_smsc_address            (const MMSitMessage    *message,
+                                                       guint8                *out_smsc,
+                                                       gsize                 *out_len,
                                                        GError               **error);
 gboolean mm_sit_message_parse_sim_status              (const MMSitMessage    *message,
                                                        MMSitSimStatus        *out_status,

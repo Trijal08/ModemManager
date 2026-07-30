@@ -478,6 +478,126 @@ mm_sit_client_get_sim_status_finish (MMSitClient     *self,
 }
 
 /*****************************************************************************/
+/* SMS */
+
+static void
+send_sms_ready (MMSitClient  *self,
+                GAsyncResult *res,
+                GTask        *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    GError                 *error = NULL;
+    guint32                 reference = 0;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (!response || !mm_sit_message_parse_send_sms_result (response, &reference, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    g_task_return_int (task, (gssize) reference);
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_send_sms (MMSitClient        *self,
+                        const guint8       *smsc,
+                        gsize               smsc_len,
+                        const guint8       *tpdu,
+                        gsize               tpdu_len,
+                        gboolean            expect_more,
+                        gboolean            over_ims,
+                        GCancellable       *cancellable,
+                        GAsyncReadyCallback callback,
+                        gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    g_autoptr(GError)     error = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_send_sms (next_token (self), smsc, smsc_len,
+                                           tpdu, tpdu_len, expect_more, over_ims,
+                                           &error);
+    if (!request) {
+        g_task_return_error (task, g_steal_pointer (&error));
+        g_object_unref (task);
+        return;
+    }
+    /* The network round trip is on the CP's side of this, so allow for it. */
+    mm_sit_client_command (self, request, 60, cancellable,
+                           (GAsyncReadyCallback) send_sms_ready, task);
+}
+
+gboolean
+mm_sit_client_send_sms_finish (MMSitClient  *self,
+                               GAsyncResult *res,
+                               guint32      *out_reference,
+                               GError      **error)
+{
+    GError *inner = NULL;
+    gssize  value;
+
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+
+    value = g_task_propagate_int (G_TASK (res), &inner);
+    if (inner) {
+        g_propagate_error (error, inner);
+        return FALSE;
+    }
+    if (out_reference)
+        *out_reference = (guint32) value;
+    return TRUE;
+}
+
+static void
+ack_sms_ready (MMSitClient  *self,
+               GAsyncResult *res,
+               GTask        *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    GError                 *error = NULL;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (!response)
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_ack_sms (MMSitClient        *self,
+                       gboolean            over_ims,
+                       GCancellable       *cancellable,
+                       GAsyncReadyCallback callback,
+                       gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_sms_ack (next_token (self), over_ims);
+    if (!request) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "couldn't build the SMS acknowledgement");
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_command (self, request, 10, cancellable,
+                           (GAsyncReadyCallback) ack_sms_ready, task);
+}
+
+gboolean
+mm_sit_client_ack_sms_finish (MMSitClient  *self,
+                              GAsyncResult *res,
+                              GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+/*****************************************************************************/
 /* Elementary-file reads
  *
  * One file read is two or more SIM_IO exchanges: GET_RESPONSE first, because

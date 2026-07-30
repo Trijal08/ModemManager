@@ -15,12 +15,16 @@
 #include "mm-call-samsung-sit.h"
 #include "mm-iface-modem-voice.h"
 #include "mm-modem-helpers.h"
+#include "mm-iface-modem-messaging.h"
 #include "mm-sim-samsung-sit.h"
+#include "mm-sms-part-3gpp.h"
+#include "mm-sms-samsung-sit.h"
 #include "mm-sit-carrier-config.h"
 #include "mm-utils.h"
 
 static void iface_modem_init      (MMIfaceModemInterface     *iface);
 static void iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface);
+static void iface_modem_messaging_init (MMIfaceModemMessagingInterface *iface);
 static void iface_modem_signal_init (MMIfaceModemSignalInterface *iface);
 static void iface_modem_voice_init (MMIfaceModemVoiceInterface *iface);
 
@@ -44,6 +48,7 @@ G_DEFINE_TYPE_EXTENDED (MMBroadbandModemSamsungSit,
                         0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP, iface_modem_3gpp_init)
+                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_MESSAGING, iface_modem_messaging_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_SIGNAL, iface_modem_signal_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_VOICE, iface_modem_voice_init))
 
@@ -421,6 +426,175 @@ handle_data_call_list_changed (MMBroadbandModemSamsungSit *self,
                             &ctx);
 }
 
+/*****************************************************************************/
+/* Messaging
+ *
+ * The generic path drives SMS over AT (+CPMS/+CNMI/+CMGF/+CSCS). The CP has
+ * its own messages for it, on two transports: while IMS carries messages they
+ * ride the AIMS group, otherwise the classic one. Delivery arrives as an
+ * indication on whichever transport carried it, and has to be acknowledged on
+ * that same one -- the CP holds the message until it is.
+ *
+ * There is no message store: the CP has none of its own, and messages on the
+ * SIM live in EF_SMS, which is a file access rather than an SMS operation. So
+ * a single ME storage is reported and parts are handed to the core as they
+ * arrive.
+ */
+
+static void
+ack_sms_ready (MMSitClient  *client,
+               GAsyncResult *res,
+               gpointer      user_data)
+{
+    g_autoptr(MMBroadbandModemSamsungSit) self = user_data;
+    g_autoptr(GError)                     error = NULL;
+
+    if (!mm_sit_client_ack_sms_finish (client, res, &error))
+        mm_obj_warn (self, "couldn't acknowledge the delivered SMS: %s", error->message);
+}
+
+static void
+handle_new_sms (MMBroadbandModemSamsungSit *self,
+                const MMSitMessage         *message)
+{
+    g_autoptr(GError)  error = NULL;
+    MMSitSmsDeliver    deliver;
+    MMSmsPart         *part;
+    MMSitClient       *client;
+
+    if (!mm_sit_message_parse_new_sms (message, &deliver, &error)) {
+        mm_obj_warn (self, "couldn't parse a delivered SMS: %s", error->message);
+        return;
+    }
+
+    mm_obj_dbg (self, "SMS delivered over %s, %u bytes",
+                deliver.over_ims ? "IMS" : "the CS group", deliver.pdu_len);
+
+    part = mm_sms_part_3gpp_new_from_binary_pdu (SMS_PART_INVALID_INDEX,
+                                                 deliver.pdu, deliver.pdu_len,
+                                                 self, FALSE, &error);
+    if (!part)
+        mm_obj_warn (self, "couldn't parse the delivered SMS PDU: %s", error->message);
+    else if (!mm_iface_modem_messaging_take_part (MM_IFACE_MODEM_MESSAGING (self),
+                                                  mm_broadband_modem_create_sms (MM_BROADBAND_MODEM (self)),
+                                                  part,
+                                                  MM_SMS_STATE_RECEIVED,
+                                                  MM_SMS_STORAGE_ME,
+                                                  &error))
+        mm_obj_warn (self, "couldn't store the delivered SMS: %s", error->message);
+
+    /* Acknowledge either way: a message the core could not take is still one
+     * the CP is holding, and leaving it unacknowledged stalls delivery. */
+    client = mm_broadband_modem_samsung_sit_peek_client (self, NULL);
+    if (client)
+        mm_sit_client_ack_sms (client, deliver.over_ims, NULL,
+                               (GAsyncReadyCallback) ack_sms_ready, g_object_ref (self));
+}
+
+static gboolean
+messaging_check_support_finish (MMIfaceModemMessaging *self,
+                                GAsyncResult          *res,
+                                GError               **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+messaging_check_support (MMIfaceModemMessaging *self,
+                         GAsyncReadyCallback    callback,
+                         gpointer               user_data)
+{
+    GTask *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static gboolean
+messaging_load_supported_storages_finish (MMIfaceModemMessaging *self,
+                                          GAsyncResult          *res,
+                                          GArray               **mem1,
+                                          GArray               **mem2,
+                                          GArray               **mem3,
+                                          GError               **error)
+{
+    MMSmsStorage storage = MM_SMS_STORAGE_ME;
+
+    /* The CP delivers messages to us rather than storing them, so the same
+     * single storage answers for reading, writing and receiving. */
+    *mem1 = g_array_sized_new (FALSE, FALSE, sizeof (MMSmsStorage), 1);
+    g_array_append_val (*mem1, storage);
+    *mem2 = g_array_ref (*mem1);
+    *mem3 = g_array_ref (*mem1);
+    return TRUE;
+}
+
+static void
+messaging_load_supported_storages (MMIfaceModemMessaging *self,
+                                   GAsyncReadyCallback    callback,
+                                   gpointer               user_data)
+{
+    GTask *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static gboolean
+messaging_setup_cleanup_unsolicited_events_finish (MMIfaceModemMessaging *self,
+                                                   GAsyncResult          *res,
+                                                   GError               **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+messaging_setup_cleanup_unsolicited_events (MMIfaceModemMessaging *self,
+                                            GAsyncReadyCallback    callback,
+                                            gpointer               user_data)
+{
+    GTask *task;
+
+    /* Deliveries arrive on the SIT port's indication signal, which the plugin
+     * already listens to for everything else; nothing to arm per interface. */
+    task = g_task_new (self, NULL, callback, user_data);
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static gboolean
+messaging_load_initial_sms_parts_finish (MMIfaceModemMessaging *self,
+                                         GAsyncResult          *res,
+                                         GError               **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+messaging_load_initial_sms_parts (MMIfaceModemMessaging *self,
+                                  MMSmsStorage           storage,
+                                  GAsyncReadyCallback    callback,
+                                  gpointer               user_data)
+{
+    GTask *task;
+
+    /* Nothing is stored to enumerate: what the CP had before we attached is
+     * gone, and SIM-held messages are in EF_SMS, which is not read here. */
+    task = g_task_new (self, NULL, callback, user_data);
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static MMBaseSms *
+create_sms (MMBroadbandModem *self)
+{
+    return mm_sms_samsung_sit_new (MM_BASE_MODEM (self));
+}
+
+/*****************************************************************************/
+
 static void
 sit_indication (MMSitClient              *client,
                 const MMSitMessage       *message,
@@ -437,6 +611,9 @@ sit_indication (MMSitClient              *client,
         mm_obj_dbg (self, "SIT call state changed; reloading call list");
         mm_iface_modem_voice_reload_all_calls (MM_IFACE_MODEM_VOICE (self), NULL, NULL);
     }
+
+    if (message->id == MM_SIT_MESSAGE_NEW_SMS || message->id == MM_SIT_MESSAGE_IMS_NEW_SMS)
+        handle_new_sms (self, message);
 
     if (message->id == MM_SIT_MESSAGE_SIM_STATUS_CHANGED)
         invalidate_carrier_config (self);
@@ -3074,6 +3251,31 @@ iface_modem_voice_init (MMIfaceModemVoiceInterface *iface)
 }
 
 static void
+iface_modem_messaging_init (MMIfaceModemMessagingInterface *iface)
+{
+    iface->check_support = messaging_check_support;
+    iface->check_support_finish = messaging_check_support_finish;
+    iface->load_supported_storages = messaging_load_supported_storages;
+    iface->load_supported_storages_finish = messaging_load_supported_storages_finish;
+    iface->setup_sms_format = NULL;
+    iface->setup_sms_format_finish = NULL;
+    iface->set_default_storage = NULL;
+    iface->set_default_storage_finish = NULL;
+    iface->init_current_storages = NULL;
+    iface->init_current_storages_finish = NULL;
+    iface->load_initial_sms_parts = messaging_load_initial_sms_parts;
+    iface->load_initial_sms_parts_finish = messaging_load_initial_sms_parts_finish;
+    iface->setup_unsolicited_events = messaging_setup_cleanup_unsolicited_events;
+    iface->setup_unsolicited_events_finish = messaging_setup_cleanup_unsolicited_events_finish;
+    iface->cleanup_unsolicited_events = messaging_setup_cleanup_unsolicited_events;
+    iface->cleanup_unsolicited_events_finish = messaging_setup_cleanup_unsolicited_events_finish;
+    iface->enable_unsolicited_events = messaging_setup_cleanup_unsolicited_events;
+    iface->enable_unsolicited_events_finish = messaging_setup_cleanup_unsolicited_events_finish;
+    iface->disable_unsolicited_events = messaging_setup_cleanup_unsolicited_events;
+    iface->disable_unsolicited_events_finish = messaging_setup_cleanup_unsolicited_events_finish;
+}
+
+static void
 iface_modem_signal_init (MMIfaceModemSignalInterface *iface)
 {
     iface->check_support = signal_check_support;
@@ -3150,6 +3352,7 @@ mm_broadband_modem_samsung_sit_class_init (MMBroadbandModemSamsungSitClass *klas
     /* The Shannon AT service rejects ATZ with +CME ERROR: 100. The generic
      * initialization sequence has already configured the AT port, so skip the
      * reset normally issued by the first-enable hook. */
+    broadband_modem_class->create_sms = create_sms;
     broadband_modem_class->enabling_modem_init = NULL;
     broadband_modem_class->enabling_modem_init_finish = NULL;
 }

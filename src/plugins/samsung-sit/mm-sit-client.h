@@ -74,6 +74,36 @@ gboolean mm_sit_client_get_sim_status_finish (MMSitClient        *self,
                                               MMSitSimStatus     *out_status,
                                               GError            **error);
 
+/* Send one SMS part. 'smsc' may be NULL, which lets the CP use the service
+ * centre the card configured. 'over_ims' picks the transport: the AIMS group
+ * while IMS carries messages, the classic one otherwise. 'expect_more' marks
+ * every part of a concatenated message but the last. */
+void     mm_sit_client_send_sms                   (MMSitClient        *self,
+                                                   const guint8       *smsc,
+                                                   gsize               smsc_len,
+                                                   const guint8       *tpdu,
+                                                   gsize               tpdu_len,
+                                                   gboolean            expect_more,
+                                                   gboolean            over_ims,
+                                                   GCancellable       *cancellable,
+                                                   GAsyncReadyCallback callback,
+                                                   gpointer            user_data);
+gboolean mm_sit_client_send_sms_finish            (MMSitClient        *self,
+                                                   GAsyncResult       *res,
+                                                   guint32            *out_reference,
+                                                   GError            **error);
+
+/* Acknowledge a delivered message on the transport that carried it. The CP
+ * holds the message until this is sent. */
+void     mm_sit_client_ack_sms                    (MMSitClient        *self,
+                                                   gboolean            over_ims,
+                                                   GCancellable       *cancellable,
+                                                   GAsyncReadyCallback callback,
+                                                   gpointer            user_data);
+gboolean mm_sit_client_ack_sms_finish             (MMSitClient        *self,
+                                                   GAsyncResult       *res,
+                                                   GError            **error);
+
 /* Read one elementary file: GET_RESPONSE for its shape, then as many
  * READ_BINARY/READ_RECORD passes as it takes. 'path' is the chain of file ids
  * from the MF down to the file's parent. The result is the whole file, records

@@ -623,6 +623,123 @@ mm_sit_request_new_sim_io (guint16                  token,
     return finish_build (status, buffer, len, error);
 }
 
+GByteArray *
+mm_sit_request_new_send_sms (guint16       token,
+                             const guint8 *smsc,
+                             gsize         smsc_len,
+                             const guint8 *tpdu,
+                             gsize         tpdu_len,
+                             gboolean      expect_more,
+                             gboolean      over_ims,
+                             GError      **error)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_send_sms (token,
+                                         smsc_len ? smsc : NULL, smsc_len,
+                                         tpdu, tpdu_len,
+                                         expect_more ? 1 : 0,
+                                         over_ims ? 1 : 0,
+                                         &buffer, &len);
+    return finish_build (status, buffer, len, error);
+}
+
+GByteArray *
+mm_sit_request_new_sms_ack (guint16  token,
+                            gboolean over_ims)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_sms_ack (token, over_ims ? 1 : 0, &buffer, &len);
+    return finish_build (status, buffer, len, NULL);
+}
+
+GByteArray *
+mm_sit_request_new_get_smsc_address (guint16 token)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_get_smsc_address (token, &buffer, &len);
+    return finish_build (status, buffer, len, NULL);
+}
+
+gboolean
+mm_sit_message_parse_new_sms (const MMSitMessage *message,
+                              MMSitSmsDeliver    *out_deliver,
+                              GError            **error)
+{
+    const guint8         *data;
+    gsize                 len;
+    SamsungSitSmsDeliver  d;
+    SamsungSitStatus      status;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_deliver != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_new_sms (data, len, &d);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+
+    memset (out_deliver, 0, sizeof (*out_deliver));
+    out_deliver->format   = d.format;
+    out_deliver->over_ims = d.over_ims ? TRUE : FALSE;
+    out_deliver->pdu_len  = MIN (d.pdu_len, MM_SIT_MAX_SMS_PDU);
+    memcpy (out_deliver->pdu, d.pdu, out_deliver->pdu_len);
+    return TRUE;
+}
+
+gboolean
+mm_sit_message_parse_send_sms_result (const MMSitMessage *message,
+                                      guint32            *out_reference,
+                                      GError            **error)
+{
+    const guint8    *data;
+    gsize            len;
+    SamsungSitStatus status;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_reference != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_send_sms_result (data, len, out_reference);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+gboolean
+mm_sit_message_parse_smsc_address (const MMSitMessage *message,
+                                   guint8             *out_smsc,
+                                   gsize              *out_len,
+                                   GError            **error)
+{
+    const guint8    *data;
+    gsize            len;
+    SamsungSitStatus status;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_smsc != NULL && out_len != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_smsc_address (data, len, out_smsc, out_len);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+    return TRUE;
+}
+
 gboolean
 mm_sit_file_control_parameters_parse (const guint8 *data,
                                       gsize         data_len,
