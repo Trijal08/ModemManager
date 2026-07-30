@@ -15,6 +15,7 @@
 #include "mm-call-samsung-sit.h"
 #include "mm-iface-modem-voice.h"
 #include "mm-modem-helpers.h"
+#include "mm-sim-samsung-sit.h"
 #include "mm-sit-carrier-config.h"
 #include "mm-utils.h"
 
@@ -859,6 +860,30 @@ load_access_technologies (MMIfaceModem       *iface,
     }
     mm_sit_client_get_signal (client, NULL,
                               (GAsyncReadyCallback) load_access_technologies_ready, task);
+}
+
+/*****************************************************************************/
+/* SIM object
+ *
+ * The plugin's own, so every SIM read goes over SIT instead of AT. Only the
+ * active SIM gets one: the other slots are built already-initialized from the
+ * slot-status inventory and never call a load vfunc.
+ */
+
+static MMBaseSim *
+create_sim_finish (MMIfaceModem *self,
+                   GAsyncResult *res,
+                   GError      **error)
+{
+    return mm_sim_samsung_sit_new_finish (res, error);
+}
+
+static void
+create_sim (MMIfaceModem       *self,
+            GAsyncReadyCallback callback,
+            gpointer            user_data)
+{
+    mm_sim_samsung_sit_new (MM_BASE_MODEM (self), NULL, callback, user_data);
 }
 
 /*****************************************************************************/
@@ -2567,6 +2592,8 @@ iface_modem_init (MMIfaceModemInterface *iface)
     iface->modem_power_up_finish = modem_set_power_finish;
     iface->modem_power_down = modem_power_down;
     iface->modem_power_down_finish = modem_set_power_finish;
+    iface->create_sim = create_sim;
+    iface->create_sim_finish = create_sim_finish;
     iface->load_unlock_required = load_unlock_required;
     iface->load_unlock_required_finish = load_unlock_required_finish;
     iface->load_unlock_retries = load_unlock_retries;

@@ -970,6 +970,7 @@ if plugins_options['samsung-sit']
     'samsung-sit/mm-sit-carrier-config.c',
     'samsung-sit/mm-sit-client.c',
     'samsung-sit/mm-sit-protocol.c',
+    'samsung-sit/mm-sim-samsung-sit.c',
   )
 
   plugins += {'plugin-samsung-sit': {
