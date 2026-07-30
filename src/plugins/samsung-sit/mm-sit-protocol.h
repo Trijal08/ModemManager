@@ -135,6 +135,13 @@ typedef struct {
     gboolean nr;
 } MMSitNetworkGenerations;
 
+/* Bits of the signal report's RAT mask. This is the CP's only statement of which
+ * radio it is using; under EN-DC the LTE and NR bits are set together. */
+#define MM_SIT_SIGNAL_RAT_GSM   (1 << 0)
+#define MM_SIT_SIGNAL_RAT_WCDMA (1 << 1)
+#define MM_SIT_SIGNAL_RAT_LTE   (1 << 2)
+#define MM_SIT_SIGNAL_RAT_NR5G  (1 << 6)
+
 typedef struct {
     guint8   version;
     guint16  rat_mask;
@@ -168,6 +175,24 @@ typedef struct {
     gint32   nr5g_csi_sinr;
     gint32   nr5g_timing_advance;
 } MMSitSignal;
+
+/* One NR cell record. Under EN-DC these arrive alongside the LTE records, so an
+ * empty NR list means the CP reports no NR cell in reach. */
+typedef struct {
+    gboolean registered;
+    guint8   connection_status;
+    gchar    operator_id[7];
+    guint64  nci;
+    guint32  physical_ci;
+    guint32  tac;
+    guint32  nrarfcn;
+    gint32   ss_rsrp;
+    gint32   ss_rsrq;
+    gint32   ss_sinr;
+    gint32   csi_rsrp;
+    gint32   csi_rsrq;
+    gint32   csi_sinr;
+} MMSitCellInfoNr;
 
 typedef struct {
     gboolean registered;
@@ -338,6 +363,11 @@ gboolean mm_sit_message_parse_signal                  (const MMSitMessage    *me
                                                        MMSitSignal           *out_signal,
                                                        GError               **error);
 gboolean mm_sit_message_parse_cell_info_list          (const MMSitMessage    *message,
+                                                       GArray               **out_cells,
+                                                       GError               **error);
+/* The NR companion: fills *out_cells with a GArray of MMSitCellInfoNr (may be
+ * empty, never NULL on success). */
+gboolean mm_sit_message_parse_nr_cell_info_list       (const MMSitMessage    *message,
                                                        GArray               **out_cells,
                                                        GError               **error);
 /* Returns only the first (default) call. TODO: remove once every caller uses

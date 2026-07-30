@@ -94,6 +94,55 @@ sit_signal_build_lte (const MMSitSignal *signal)
     return g_steal_pointer (&result);
 }
 
+/* The NR leg of an EN-DC connection. It appears alongside the LTE block rather
+ * than instead of it, and only while the network has actually added the NR
+ * secondary cell -- so this is NULL on an idle or LTE-only connection. The
+ * synchronisation-signal metrics are the ones that map onto MM's fields; the CSI
+ * ones have no home there. */
+static MMSignal *
+sit_signal_build_nr5g (const MMSitSignal *signal)
+{
+    g_autoptr(MMSignal) result = NULL;
+
+    if (!signal->has_nr5g)
+        return NULL;
+
+    result = mm_signal_new ();
+    /* Same positive-magnitude encoding as the LTE fields. */
+    if (signal->nr5g_ss_rsrp >= 44 && signal->nr5g_ss_rsrp <= 140)
+        mm_signal_set_rsrp (result, -(gdouble) signal->nr5g_ss_rsrp);
+    if (signal->nr5g_ss_rsrq >= 3 && signal->nr5g_ss_rsrq <= 43)
+        mm_signal_set_rsrq (result, -(gdouble) signal->nr5g_ss_rsrq);
+    /* SS-SINR is signed, in tenths of a dB, like the LTE RSSNR. */
+    if (signal->nr5g_ss_sinr >= -230 && signal->nr5g_ss_sinr <= 400)
+        mm_signal_set_snr (result, signal->nr5g_ss_sinr / 10.0);
+
+    return g_steal_pointer (&result);
+}
+
+/*
+ * The signal report's RAT mask is the only thing that says which radio the CP is
+ * actually using: the registration responses report the LTE anchor even under
+ * EN-DC, so 5G is invisible there. The mask is a set rather than a value, which
+ * is what MM wants -- an NSA modem carries the LTE and NR bits at once and shows
+ * up as "lte, 5gnr".
+ */
+static MMModemAccessTechnology
+sit_rat_mask_to_access_technology (guint16 rat_mask)
+{
+    MMModemAccessTechnology act = MM_MODEM_ACCESS_TECHNOLOGY_UNKNOWN;
+
+    if (rat_mask & MM_SIT_SIGNAL_RAT_GSM)
+        act |= MM_MODEM_ACCESS_TECHNOLOGY_GSM;
+    if (rat_mask & MM_SIT_SIGNAL_RAT_WCDMA)
+        act |= MM_MODEM_ACCESS_TECHNOLOGY_UMTS;
+    if (rat_mask & MM_SIT_SIGNAL_RAT_LTE)
+        act |= MM_MODEM_ACCESS_TECHNOLOGY_LTE;
+    if (rat_mask & MM_SIT_SIGNAL_RAT_NR5G)
+        act |= MM_MODEM_ACCESS_TECHNOLOGY_5GNR;
+    return act;
+}
+
 static gboolean
 sit_signal_get_quality (const MMSitSignal *signal,
                         guint             *out_quality)
@@ -321,6 +370,7 @@ sit_indication (MMSitClient              *client,
     if (message->id == MM_SIT_MESSAGE_SIGNAL_STRENGTH_CHANGED) {
         MMSitSignal        signal;
         g_autoptr(MMSignal) lte = NULL;
+        g_autoptr(MMSignal) nr5g = NULL;
         guint              quality;
 
         if (!mm_sit_message_parse_signal (message, &signal, NULL))
@@ -329,11 +379,15 @@ sit_indication (MMSitClient              *client,
         mm_obj_dbg (self, "SIT signal changed (schema: V%u, RAT mask: 0x%04x)",
                     signal.version, signal.rat_mask);
         lte = sit_signal_build_lte (&signal);
-        if (lte)
+        nr5g = sit_signal_build_nr5g (&signal);
+        if (lte || nr5g)
             mm_iface_modem_signal_update (MM_IFACE_MODEM_SIGNAL (self),
-                                          NULL, NULL, NULL, NULL, lte, NULL);
+                                          NULL, NULL, NULL, NULL, lte, nr5g);
         if (sit_signal_get_quality (&signal, &quality))
             mm_iface_modem_update_signal_quality (MM_IFACE_MODEM (self), quality);
+        mm_iface_modem_update_access_technologies (
+            MM_IFACE_MODEM (self), sit_rat_mask_to_access_technology (signal.rat_mask),
+            MM_MODEM_ACCESS_TECHNOLOGY_ANY);
     }
 }
 
@@ -656,6 +710,65 @@ load_signal_quality (MMIfaceModem        *iface,
                               task);
 }
 
+static gboolean
+load_access_technologies_finish (MMIfaceModem            *self,
+                                 GAsyncResult            *res,
+                                 MMModemAccessTechnology *access_technologies,
+                                 guint                   *mask,
+                                 GError                 **error)
+{
+    GTask *task = G_TASK (res);
+
+    if (!g_task_propagate_boolean (task, error))
+        return FALSE;
+    *access_technologies = (MMModemAccessTechnology) GPOINTER_TO_UINT (g_task_get_task_data (task));
+    *mask = MM_MODEM_ACCESS_TECHNOLOGY_ANY;
+    return TRUE;
+}
+
+static void
+load_access_technologies_ready (MMSitClient  *client,
+                                GAsyncResult *res,
+                                GTask        *task)
+{
+    MMSitSignal signal;
+    GError     *error = NULL;
+
+    if (!mm_sit_client_get_signal_finish (client, res, &signal, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    g_task_set_task_data (task,
+                          GUINT_TO_POINTER ((guint) sit_rat_mask_to_access_technology (signal.rat_mask)),
+                          NULL);
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+/* The indication keeps this current; the poll covers the gap before the first one
+ * arrives and any period where the CP goes quiet. Same source either way. */
+static void
+load_access_technologies (MMIfaceModem       *iface,
+                          GAsyncReadyCallback callback,
+                          gpointer            user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_signal (client, NULL,
+                              (GAsyncReadyCallback) load_access_technologies_ready, task);
+}
+
 static GList *
 get_cell_info_finish (MMIfaceModem  *self,
                       GAsyncResult  *res,
@@ -676,11 +789,12 @@ get_cell_info_ready (MMSitClient *client,
                      GTask        *task)
 {
     g_autoptr(GArray) cells = NULL;
+    g_autoptr(GArray) nr_cells = NULL;
     GList            *result = NULL;
     GError           *error = NULL;
     guint             i;
 
-    cells = mm_sit_client_get_cell_info_finish (client, res, &error);
+    cells = mm_sit_client_get_cell_info_finish (client, res, &nr_cells, &error);
     if (!cells) {
         g_task_return_error (task, error);
         g_object_unref (task);
@@ -724,6 +838,48 @@ get_cell_info_ready (MMSitClient *client,
         if (cell->registered) {
             mm_cell_info_set_serving (MM_CELL_INFO (info), TRUE);
             mm_cell_info_lte_set_serving_cell_type (info, MM_SERVING_CELL_TYPE_PCELL);
+        }
+        result = g_list_append (result, info);
+    }
+
+    /* NR records only show up once the CP has an NR cell in reach; under EN-DC
+     * they accompany the LTE ones rather than replacing them. */
+    for (i = 0; nr_cells && i < nr_cells->len; i++) {
+        const MMSitCellInfoNr *cell;
+        MMCellInfoNr5g        *info;
+        g_autofree gchar      *tac = NULL;
+        g_autofree gchar      *nci = NULL;
+        g_autofree gchar      *pci = NULL;
+
+        cell = &g_array_index (nr_cells, MMSitCellInfoNr, i);
+        info = MM_CELL_INFO_NR5G (mm_cell_info_nr5g_new_from_dictionary (NULL));
+        if (cell->operator_id[0])
+            mm_cell_info_nr5g_set_operator_id (info, cell->operator_id);
+        if (cell->tac != G_MAXUINT32) {
+            tac = g_strdup_printf ("%X", cell->tac);
+            mm_cell_info_nr5g_set_tac (info, tac);
+        }
+        if (cell->nci) {
+            nci = g_strdup_printf ("%" G_GINT64_MODIFIER "X", cell->nci);
+            mm_cell_info_nr5g_set_ci (info, nci);
+        }
+        if (cell->physical_ci != G_MAXUINT32) {
+            pci = g_strdup_printf ("%X", cell->physical_ci);
+            mm_cell_info_nr5g_set_physical_ci (info, pci);
+        }
+        if (cell->nrarfcn != G_MAXUINT32)
+            mm_cell_info_nr5g_set_nrarfcn (info, cell->nrarfcn);
+        /* Same encoding as the LTE records: a positive magnitude in dB(m). */
+        if (cell->ss_rsrp >= 44 && cell->ss_rsrp <= 140)
+            mm_cell_info_nr5g_set_rsrp (info, -(gdouble) cell->ss_rsrp);
+        if (cell->ss_rsrq >= 3 && cell->ss_rsrq <= 43)
+            mm_cell_info_nr5g_set_rsrq (info, -(gdouble) cell->ss_rsrq);
+        if (cell->ss_sinr != G_MAXINT32)
+            mm_cell_info_nr5g_set_sinr (info, (gdouble) cell->ss_sinr);
+        if (cell->registered) {
+            mm_cell_info_set_serving (MM_CELL_INFO (info), TRUE);
+            /* Under EN-DC the NR leg is the secondary cell; LTE keeps the PCell. */
+            mm_cell_info_nr5g_set_serving_cell_type (info, MM_SERVING_CELL_TYPE_SCELL);
         }
         result = g_list_append (result, info);
     }
@@ -2087,6 +2243,8 @@ iface_modem_init (MMIfaceModemInterface *iface)
     iface->load_power_state_finish = load_power_state_finish;
     iface->load_signal_quality = load_signal_quality;
     iface->load_signal_quality_finish = load_signal_quality_finish;
+    iface->load_access_technologies = load_access_technologies;
+    iface->load_access_technologies_finish = load_access_technologies_finish;
     iface->get_cell_info = get_cell_info;
     iface->get_cell_info_finish = get_cell_info_finish;
     iface->modem_power_up = modem_power_up;
@@ -2192,7 +2350,7 @@ signal_load_values_finish (MMIfaceModemSignal  *self,
     if (lte)
         *lte = sit_signal_build_lte (signal);
     if (nr5g)
-        *nr5g = NULL;
+        *nr5g = sit_signal_build_nr5g (signal);
     g_free (signal);
     return TRUE;
 }

@@ -186,8 +186,11 @@ void    mm_sit_client_get_cell_info        (MMSitClient        *self,
                                             GCancellable       *cancellable,
                                             GAsyncReadyCallback callback,
                                             gpointer            user_data);
+/* Returns the LTE records; *out_nr_cells (optional, transfer full) receives the
+ * NR ones from the same response, empty unless the CP is reporting NR in reach. */
 GArray *mm_sit_client_get_cell_info_finish (MMSitClient        *self,
                                             GAsyncResult       *res,
+                                            GArray            **out_nr_cells,
                                             GError            **error);
 
 /* CS voice call control. Progress is reported out-of-band as

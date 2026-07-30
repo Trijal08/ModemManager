@@ -1099,3 +1099,52 @@ mm_sit_message_parse_allowed_network_types (const MMSitMessage      *message,
     out_generations->nr   = (wire.nr != 0);
     return TRUE;
 }
+
+gboolean
+mm_sit_message_parse_nr_cell_info_list (const MMSitMessage *message,
+                                        GArray            **out_cells,
+                                        GError            **error)
+{
+    const guint8             *data;
+    gsize                     len;
+    SamsungSitCellInfoNr     *cells = NULL;
+    gsize                     count = 0;
+    SamsungSitStatus          status;
+    GArray                   *array;
+    gsize                     i;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_cells != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_nr_cell_info_list (data, len, &cells, &count);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+
+    array = g_array_sized_new (FALSE, FALSE, sizeof (MMSitCellInfoNr), count);
+    for (i = 0; i < count; i++) {
+        MMSitCellInfoNr cell;
+
+        memset (&cell, 0, sizeof (cell));
+        cell.registered        = (cells[i].registered != 0);
+        cell.connection_status = cells[i].connection_status;
+        g_strlcpy (cell.operator_id, cells[i].operator_id, sizeof (cell.operator_id));
+        cell.nci         = cells[i].nci;
+        cell.physical_ci = cells[i].physical_ci;
+        cell.tac         = cells[i].tac;
+        cell.nrarfcn     = cells[i].nrarfcn;
+        cell.ss_rsrp     = cells[i].ss_rsrp;
+        cell.ss_rsrq     = cells[i].ss_rsrq;
+        cell.ss_sinr     = cells[i].ss_sinr;
+        cell.csi_rsrp    = cells[i].csi_rsrp;
+        cell.csi_rsrq    = cells[i].csi_rsrq;
+        cell.csi_sinr    = cells[i].csi_sinr;
+        g_array_append_val (array, cell);
+    }
+    samsung_sit_nr_cell_info_list_free (cells, count);
+
+    *out_cells = array;
+    return TRUE;
+}

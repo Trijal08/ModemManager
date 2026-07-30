@@ -822,13 +822,25 @@ get_cell_info_ready (MMSitClient *self,
 {
     g_autoptr(MMSitMessage) response = NULL;
     GArray                 *cells = NULL;
+    GArray                 *nr_cells = NULL;
     GError                 *error = NULL;
 
     response = mm_sit_client_command_finish (self, res, &error);
-    if (response && mm_sit_message_parse_cell_info_list (response, &cells, &error))
-        g_task_return_pointer (task, cells, (GDestroyNotify) g_array_unref);
-    else
+    if (!response || !mm_sit_message_parse_cell_info_list (response, &cells, &error)) {
         g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    /* One response carries both views. NR records only appear under EN-DC, so an
+     * absent NR list is the normal LTE-only case, not a failure. */
+    if (!mm_sit_message_parse_nr_cell_info_list (response, &nr_cells, &error)) {
+        mm_obj_dbg (self->priv->port, "cell info: NR records unparsable: %s", error->message);
+        g_clear_error (&error);
+        nr_cells = g_array_new (FALSE, FALSE, sizeof (MMSitCellInfoNr));
+    }
+    g_task_set_task_data (task, nr_cells, (GDestroyNotify) g_array_unref);
+    g_task_return_pointer (task, cells, (GDestroyNotify) g_array_unref);
     g_object_unref (task);
 }
 
@@ -850,10 +862,20 @@ mm_sit_client_get_cell_info (MMSitClient        *self,
 GArray *
 mm_sit_client_get_cell_info_finish (MMSitClient  *self,
                                     GAsyncResult *res,
+                                    GArray      **out_nr_cells,
                                     GError      **error)
 {
+    GArray *lte;
+
     g_return_val_if_fail (MM_IS_SIT_CLIENT (self), NULL);
-    return g_task_propagate_pointer (G_TASK (res), error);
+
+    lte = g_task_propagate_pointer (G_TASK (res), error);
+    if (lte && out_nr_cells) {
+        GArray *nr = g_task_get_task_data (G_TASK (res));
+
+        *out_nr_cells = nr ? g_array_ref (nr) : NULL;
+    }
+    return lte;
 }
 
 static void
