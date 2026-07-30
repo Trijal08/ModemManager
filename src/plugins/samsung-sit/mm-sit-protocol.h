@@ -33,6 +33,7 @@ typedef enum {
     MM_SIT_MESSAGE_CALL_STATE_CHANGED         = 0x0009,
     MM_SIT_MESSAGE_GET_SIM_STATUS             = 0x0200,
     MM_SIT_MESSAGE_SIM_IO                     = 0x0208,
+    MM_SIT_MESSAGE_GET_FACILITY_LOCK          = 0x0209,
     MM_SIT_MESSAGE_SIM_STATUS_CHANGED         = 0x0210,
     MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS        = 0x024d,
     MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED    = 0x024e,
@@ -88,6 +89,21 @@ typedef struct {
     guint16          status;
     GBytes          *raw;
 } MMSitMessage;
+
+/* Values of the SIM status' PIN-state byte (the RIL PinState enum). */
+typedef enum {
+    MM_SIT_PIN_STATE_UNKNOWN              = 0,
+    MM_SIT_PIN_STATE_ENABLED_NOT_VERIFIED = 1,
+    MM_SIT_PIN_STATE_ENABLED_VERIFIED     = 2,
+    MM_SIT_PIN_STATE_DISABLED             = 3,
+    MM_SIT_PIN_STATE_ENABLED_BLOCKED      = 4,
+    MM_SIT_PIN_STATE_ENABLED_PERM_BLOCKED = 5,
+} MMSitPinState;
+
+/* Facility codes the CP takes in a facility-lock query. Only these two appear in
+ * the corpus; 0x03 is the SIM PIN ("SC"), and 0x10 was queried alongside it but
+ * always answered unlocked, so which facility it is has not been pinned down. */
+#define MM_SIT_FACILITY_SIM_PIN 0x03
 
 typedef struct {
     guint8   card_state;
@@ -340,6 +356,8 @@ GByteArray *mm_sit_request_new_set_network_selection_manual
                                                        GError               **error);
 GByteArray *mm_sit_request_new_start_network_scan      (guint16                token);
 GByteArray *mm_sit_request_new_stop_network_scan       (guint16                token);
+GByteArray *mm_sit_request_new_get_facility_lock       (guint16                token,
+                                                       guint8                 facility);
 GByteArray *mm_sit_request_new_get_allowed_network_types
                                                       (guint16                token);
 GByteArray *mm_sit_request_new_set_allowed_network_types
@@ -392,6 +410,9 @@ gboolean mm_sit_message_parse_network_selection_manual_result
  * network found so far, so callers should replace rather than accumulate. */
 gboolean mm_sit_message_parse_net_scan_result         (const MMSitMessage    *message,
                                                        GArray               **out_networks,
+                                                       GError               **error);
+gboolean mm_sit_message_parse_facility_lock            (const MMSitMessage    *message,
+                                                       gboolean              *out_locked,
                                                        GError               **error);
 gboolean mm_sit_message_parse_allowed_network_types    (const MMSitMessage    *message,
                                                        MMSitNetworkGenerations *out_generations,

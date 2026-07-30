@@ -133,6 +133,18 @@ gboolean mm_sit_client_set_network_selection_manual_finish (MMSitClient        *
                                                             GAsyncResult       *res,
                                                             GError            **error);
 
+/* Whether one facility (MM_SIT_FACILITY_*) is locked. Carries no retry counter:
+ * the CP only reports remaining attempts in a PIN operation's response. */
+void     mm_sit_client_get_facility_lock        (MMSitClient        *self,
+                                                 guint8              facility,
+                                                 GCancellable       *cancellable,
+                                                 GAsyncReadyCallback callback,
+                                                 gpointer            user_data);
+gboolean mm_sit_client_get_facility_lock_finish (MMSitClient        *self,
+                                                 GAsyncResult       *res,
+                                                 gboolean           *out_locked,
+                                                 GError            **error);
+
 /* The radio generations the CP may use. Persisted by the CP across our
  * restarts, so the current value has to be read back. */
 void     mm_sit_client_get_allowed_network_types        (MMSitClient        *self,

@@ -1636,6 +1636,67 @@ mm_sit_client_set_network_selection_manual_finish (MMSitClient  *self,
 }
 
 static void
+get_facility_lock_ready (MMSitClient  *self,
+                         GAsyncResult *res,
+                         GTask        *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    GError                 *error = NULL;
+    gboolean                locked = FALSE;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (response && mm_sit_message_parse_facility_lock (response, &locked, &error))
+        g_task_return_boolean (task, locked);
+    else
+        g_task_return_error (task, error);
+    g_object_unref (task);
+}
+
+/*
+ * Whether one facility is locked. The reply carries no retry counter -- like
+ * classic RIL, the CP only reports remaining attempts in the response to an
+ * actual PIN operation -- so this reads the lock state without spending one.
+ */
+void
+mm_sit_client_get_facility_lock (MMSitClient        *self,
+                                 guint8              facility,
+                                 GCancellable       *cancellable,
+                                 GAsyncReadyCallback callback,
+                                 gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_get_facility_lock (next_token (self), facility);
+    mm_sit_client_command (self, request, 5, cancellable,
+                           (GAsyncReadyCallback) get_facility_lock_ready, task);
+}
+
+gboolean
+mm_sit_client_get_facility_lock_finish (MMSitClient  *self,
+                                        GAsyncResult *res,
+                                        gboolean     *out_locked,
+                                        GError      **error)
+{
+    GError *inner = NULL;
+    gboolean locked;
+
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    g_return_val_if_fail (out_locked != NULL, FALSE);
+
+    /* The task's boolean *is* the lock state, so a FALSE result is only an error
+     * when one was set. */
+    locked = g_task_propagate_boolean (G_TASK (res), &inner);
+    if (inner) {
+        g_propagate_error (error, inner);
+        return FALSE;
+    }
+    *out_locked = locked;
+    return TRUE;
+}
+
+static void
 get_allowed_network_types_ready (MMSitClient  *self,
                                  GAsyncResult *res,
                                  GTask        *task)

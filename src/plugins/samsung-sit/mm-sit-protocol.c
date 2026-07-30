@@ -1148,3 +1148,38 @@ mm_sit_message_parse_nr_cell_info_list (const MMSitMessage *message,
     *out_cells = array;
     return TRUE;
 }
+
+GByteArray *
+mm_sit_request_new_get_facility_lock (guint16 token,
+                                      guint8  facility)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_get_facility_lock (token, facility, &buffer, &len);
+    return finish_build (status, buffer, len, NULL);
+}
+
+gboolean
+mm_sit_message_parse_facility_lock (const MMSitMessage *message,
+                                    gboolean           *out_locked,
+                                    GError            **error)
+{
+    const guint8    *data;
+    gsize            len;
+    SamsungSitStatus status;
+    guint8           locked = 0;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_locked != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_facility_lock (data, len, &locked);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+    *out_locked = (locked != 0);
+    return TRUE;
+}

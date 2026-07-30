@@ -861,6 +861,163 @@ load_access_technologies (MMIfaceModem       *iface,
                               (GAsyncReadyCallback) load_access_technologies_ready, task);
 }
 
+/*****************************************************************************/
+/* SIM lock state
+ *
+ * The generic AT path asked AT+CPIN? for this. The CP reports it natively in the
+ * SIM-status response, in the byte holding the RIL PinState enum -- confirmed
+ * against the capture where enabling a PIN, hot-swapping the card and verifying
+ * it walked that byte through disabled -> not-verified -> verified, and pulling
+ * the card reported unknown.
+ *
+ * Retry counters deliberately stay where they are for now: they are not in this
+ * message, and the CP only reports remaining attempts in the response to an
+ * actual PIN operation, so reading them without one needs the APDU path.
+ */
+static MMModemLock
+load_unlock_required_finish (MMIfaceModem *self,
+                             GAsyncResult *res,
+                             GError      **error)
+{
+    GError *inner = NULL;
+    gssize  value;
+
+    value = g_task_propagate_int (G_TASK (res), &inner);
+    if (inner) {
+        g_propagate_error (error, inner);
+        return MM_MODEM_LOCK_UNKNOWN;
+    }
+    return (MMModemLock) value;
+}
+
+static void
+load_unlock_required_ready (MMSitClient  *client,
+                            GAsyncResult *res,
+                            GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    MMSitSimStatus              status;
+    MMModemLock                 lock;
+    GError                     *error = NULL;
+
+    if (!mm_sit_client_get_sim_status_finish (client, res, &status, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    switch (status.universal_pin_state) {
+    case MM_SIT_PIN_STATE_ENABLED_NOT_VERIFIED:
+        lock = MM_MODEM_LOCK_SIM_PIN;
+        break;
+    case MM_SIT_PIN_STATE_ENABLED_BLOCKED:
+        lock = MM_MODEM_LOCK_SIM_PUK;
+        break;
+    case MM_SIT_PIN_STATE_ENABLED_PERM_BLOCKED:
+        lock = MM_MODEM_LOCK_PH_SIM_PIN;
+        break;
+    case MM_SIT_PIN_STATE_ENABLED_VERIFIED:
+    case MM_SIT_PIN_STATE_DISABLED:
+        lock = MM_MODEM_LOCK_NONE;
+        break;
+    case MM_SIT_PIN_STATE_UNKNOWN:
+    default:
+        /* No card, or a card the CP has not finished reading. Reporting a lock
+         * here would strand the core waiting for a PIN that is not wanted, so
+         * say unknown and let it ask again. */
+        lock = MM_MODEM_LOCK_UNKNOWN;
+        break;
+    }
+
+    mm_obj_dbg (self, "SIM lock state: pin state %u -> %s",
+                status.universal_pin_state, mm_modem_lock_get_string (lock));
+    g_task_return_int (task, lock);
+    g_object_unref (task);
+}
+
+static void
+load_unlock_required (MMIfaceModem       *iface,
+                      gboolean            last_attempt,
+                      GCancellable       *cancellable,
+                      GAsyncReadyCallback callback,
+                      gpointer            user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, cancellable, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_sim_status (client, cancellable,
+                                 (GAsyncReadyCallback) load_unlock_required_ready, task);
+}
+
+/* Only the SIM PIN facility has a known code, so only that one is reported. The
+ * generic AT path probed six facilities with AT+CLCK; the others need their codes
+ * identified before they can move. */
+static MMModem3gppFacility
+load_enabled_facility_locks_finish (MMIfaceModem3gpp *self,
+                                    GAsyncResult     *res,
+                                    GError          **error)
+{
+    GError *inner = NULL;
+    gssize  value;
+
+    value = g_task_propagate_int (G_TASK (res), &inner);
+    if (inner) {
+        g_propagate_error (error, inner);
+        return MM_MODEM_3GPP_FACILITY_NONE;
+    }
+    return (MMModem3gppFacility) value;
+}
+
+static void
+load_enabled_facility_locks_ready (MMSitClient  *client,
+                                   GAsyncResult *res,
+                                   GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    g_autoptr(GError)           error = NULL;
+    gboolean                    locked = FALSE;
+
+    if (!mm_sit_client_get_facility_lock_finish (client, res, &locked, &error)) {
+        mm_obj_dbg (self, "could not read the SIM PIN facility lock: %s", error->message);
+        g_task_return_int (task, MM_MODEM_3GPP_FACILITY_NONE);
+    } else {
+        mm_obj_dbg (self, "SIM PIN facility lock is %s", locked ? "enabled" : "disabled");
+        g_task_return_int (task, locked ? MM_MODEM_3GPP_FACILITY_SIM : MM_MODEM_3GPP_FACILITY_NONE);
+    }
+    g_object_unref (task);
+}
+
+static void
+load_enabled_facility_locks (MMIfaceModem3gpp   *iface,
+                             GAsyncReadyCallback callback,
+                             gpointer            user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_facility_lock (client, MM_SIT_FACILITY_SIM_PIN, NULL,
+                                     (GAsyncReadyCallback) load_enabled_facility_locks_ready,
+                                     task);
+}
+
 static GList *
 get_cell_info_finish (MMIfaceModem  *self,
                       GAsyncResult  *res,
@@ -2343,6 +2500,8 @@ iface_modem_init (MMIfaceModemInterface *iface)
     iface->modem_power_up_finish = modem_set_power_finish;
     iface->modem_power_down = modem_power_down;
     iface->modem_power_down_finish = modem_set_power_finish;
+    iface->load_unlock_required = load_unlock_required;
+    iface->load_unlock_required_finish = load_unlock_required_finish;
     iface->load_supported_modes = load_supported_modes;
     iface->load_supported_modes_finish = load_supported_modes_finish;
     iface->load_current_modes = load_current_modes;
@@ -2366,6 +2525,8 @@ iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface)
     iface->run_registration_checks_finish = registration_checks_finish;
     iface->register_in_network = register_in_network;
     iface->register_in_network_finish = register_in_network_finish;
+    iface->load_enabled_facility_locks = load_enabled_facility_locks;
+    iface->load_enabled_facility_locks_finish = load_enabled_facility_locks_finish;
     iface->scan_networks = scan_networks;
     iface->scan_networks_finish = scan_networks_finish;
     /* SIT owns registration state; never subscribe to the AT +CxREG URCs. */
