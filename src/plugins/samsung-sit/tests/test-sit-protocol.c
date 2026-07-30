@@ -161,7 +161,7 @@ test_build_data_requests (void)
     g_autoptr(GByteArray) fast_dormancy = NULL;
     g_autoptr(GError)     error = NULL;
 
-    profile = mm_sit_request_new_set_data_profile (1, "internet", &error);
+    profile = mm_sit_request_new_set_data_profile (1, "internet", MM_SIT_PDP_TYPE_IPV4, &error);
     g_assert_no_error (error);
     g_assert_cmpuint (profile->len, ==, 246);
     g_assert_cmpmem (&profile->data[16], 8, "internet", 8);
@@ -169,20 +169,35 @@ test_build_data_requests (void)
     g_assert_cmpuint (profile->data[0x75], ==, 1);
     g_assert_cmpuint (profile->data[0xe9], ==, 1);
 
-    attach = mm_sit_request_new_set_initial_attach_apn (2, "internet", &error);
+    attach = mm_sit_request_new_set_initial_attach_apn (2, "internet", MM_SIT_PDP_TYPE_IPV4, &error);
     g_assert_no_error (error);
     g_assert_cmpuint (attach->len, ==, 251);
     g_assert_cmpmem (&attach->data[16], 8, "internet", 8);
     g_assert_cmpuint (attach->data[0xda], ==, 1);
     g_assert_cmpuint (attach->data[0xf8], ==, 1);
 
-    setup = mm_sit_request_new_setup_data_call (3, "internet", &error);
+    setup = mm_sit_request_new_setup_data_call (3, "internet", MM_SIT_PDP_TYPE_IPV4, &error);
     g_assert_no_error (error);
     g_assert_cmpuint (setup->len, ==, 983);
     g_assert_cmpmem (&setup->data[16], 8, "internet", 8);
     g_assert_cmpuint (setup->data[0xf1], ==, 7);
     g_assert_cmphex (setup->data[0xfc], ==, 0xff);
     g_assert_cmphex (setup->data[0x101], ==, 0xff);
+
+    /* The requested families reach every one of the three, at the offset each
+     * uses: a dual-stack request is 3 everywhere. */
+    g_clear_pointer (&profile, g_byte_array_unref);
+    g_clear_pointer (&attach, g_byte_array_unref);
+    g_clear_pointer (&setup, g_byte_array_unref);
+    profile = mm_sit_request_new_set_data_profile (1, "internet", MM_SIT_PDP_TYPE_IPV4V6, &error);
+    attach = mm_sit_request_new_set_initial_attach_apn (2, "internet", MM_SIT_PDP_TYPE_IPV4V6, &error);
+    setup = mm_sit_request_new_setup_data_call (3, "internet", MM_SIT_PDP_TYPE_IPV6, &error);
+    g_assert_no_error (error);
+    g_assert_cmpuint (profile->data[0x75], ==, 3);
+    g_assert_cmpuint (profile->data[0x76], ==, 3);
+    g_assert_cmpuint (attach->data[0xda], ==, 3);
+    g_assert_cmpuint (attach->data[0xf8], ==, 3);
+    g_assert_cmpuint (setup->data[0xda], ==, 2);
 
     deactivate = mm_sit_request_new_deactivate_data_call (4, 1, 0);
     g_assert_cmpuint (deactivate->len, ==, 14);
@@ -1321,6 +1336,10 @@ client_test_peer (ClientTestContext *ctx)
             g_autofree guint8 *body = g_malloc (request_len - MM_SIT_HEADER_SIZE);
 
             g_assert_true (read_all (ctx->peer_fd, body, request_len - MM_SIT_HEADER_SIZE));
+            /* The requested PDP type has to reach the wire: @0xda of the frame,
+             * so 0xda - 8 of the body. */
+            if (expected_ids[i] == MM_SIT_MESSAGE_SETUP_DATA_CALL)
+                g_assert_cmpuint (body[0xda - MM_SIT_HEADER_SIZE], ==, MM_SIT_PDP_TYPE_IPV4V6);
         }
 
         if (expected_ids[i] == MM_SIT_MESSAGE_GET_DATA_REGISTRATION) {
@@ -1331,15 +1350,27 @@ client_test_peer (ClientTestContext *ctx)
             response_len = sizeof (response);
             response[14] = 1;
             response[15] = 1;
-            response[16] = 1;
+            /* A dual-stack grant: addr_type 3, with both families filled in
+             * from the same record. IPv6 uses the documentation prefix. */
+            response[16] = 3;
             response[17] = 10;
             response[18] = 20;
             response[19] = 30;
             response[20] = 40;
+            response[21] = 0x20;
+            response[22] = 0x01;
+            response[23] = 0x0d;
+            response[24] = 0xb8;
+            response[36] = 1;
             response[38] = 1;
             response[39] = 1;
             response[40] = 1;
             response[41] = 1;
+            response[42] = 0x20;
+            response[43] = 0x01;
+            response[44] = 0x0d;
+            response[45] = 0xb8;
+            response[57] = 0x53;
             response[58] = 8;
             response[59] = 8;
             response[60] = 8;
@@ -1402,7 +1433,7 @@ test_client_connect_sequence (void)
     g_assert_no_error (error);
 
     peer = g_thread_new ("sit-client-test-peer", (GThreadFunc) client_test_peer, &ctx);
-    mm_sit_client_connect_data (client, "internet", NULL,
+    mm_sit_client_connect_data (client, "internet", MM_SIT_PDP_TYPE_IPV4V6, NULL,
                                 (GAsyncReadyCallback) client_test_connect_ready, &ctx);
     timeout_id = g_timeout_add_seconds (10, (GSourceFunc) client_test_timeout, &ctx);
     g_main_loop_run (ctx.loop);
@@ -1418,8 +1449,12 @@ test_client_connect_sequence (void)
     g_assert_no_error (ctx.error);
     g_assert_true (ctx.completed);
     g_assert_cmpuint (ctx.call.cid, ==, 1);
+    g_assert_true (ctx.call.has_ipv4);
     g_assert_cmpstr (ctx.call.ipv4, ==, "10.20.30.40");
     g_assert_cmpstr (ctx.call.dns1, ==, "1.1.1.1");
+    g_assert_true (ctx.call.has_ipv6);
+    g_assert_cmpstr (ctx.call.ipv6, ==, "2001:db8::1");
+    g_assert_cmpstr (ctx.call.dns1_v6, ==, "2001:db8::53");
     g_assert_cmpuint (ctx.call.mtu, ==, 1500);
 }
 
@@ -1447,6 +1482,10 @@ client_radio_test_peer (ClientTestContext *ctx)
             g_autofree guint8 *body = g_malloc (request_len - MM_SIT_HEADER_SIZE);
 
             g_assert_true (read_all (ctx->peer_fd, body, request_len - MM_SIT_HEADER_SIZE));
+            /* The requested PDP type has to reach the wire: @0xda of the frame,
+             * so 0xda - 8 of the body. */
+            if (expected_ids[i] == MM_SIT_MESSAGE_SETUP_DATA_CALL)
+                g_assert_cmpuint (body[0xda - MM_SIT_HEADER_SIZE], ==, MM_SIT_PDP_TYPE_IPV4V6);
         }
 
         response_len = (expected_ids[i] == MM_SIT_MESSAGE_GET_RADIO_POWER) ? 16 : 12;
@@ -1543,6 +1582,10 @@ client_boot_config_test_peer (ClientTestContext *ctx)
             g_autofree guint8 *body = g_malloc (request_len - MM_SIT_HEADER_SIZE);
 
             g_assert_true (read_all (ctx->peer_fd, body, request_len - MM_SIT_HEADER_SIZE));
+            /* The requested PDP type has to reach the wire: @0xda of the frame,
+             * so 0xda - 8 of the body. */
+            if (expected_ids[i] == MM_SIT_MESSAGE_SETUP_DATA_CALL)
+                g_assert_cmpuint (body[0xda - MM_SIT_HEADER_SIZE], ==, MM_SIT_PDP_TYPE_IPV4V6);
         }
 
         response[0] = MM_SIT_MESSAGE_TYPE_RESPONSE;

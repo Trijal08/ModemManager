@@ -432,7 +432,7 @@ connect_sync (MMSitClient   *client,
     WaitContext ctx = { 0 };
 
     ctx.loop = g_main_loop_new (NULL, FALSE);
-    mm_sit_client_connect_data (client, apn, NULL,
+    mm_sit_client_connect_data (client, apn, MM_SIT_PDP_TYPE_IPV4V6, NULL,
                                 (GAsyncReadyCallback) connect_ready, &ctx);
     g_main_loop_run (ctx.loop);
     g_main_loop_unref (ctx.loop);

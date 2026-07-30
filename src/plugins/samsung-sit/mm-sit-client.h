@@ -335,8 +335,11 @@ gboolean mm_sit_client_send_boot_config_finish (MMSitClient        *self,
                                                 GAsyncResult       *res,
                                                 GError            **error);
 
+/* 'pdp' is the address family to request; the CP may grant less, and the
+ * resulting MMSitDataCall says which families actually came back. */
 void     mm_sit_client_connect_data        (MMSitClient        *self,
                                             const gchar        *apn,
+                                            MMSitPdpType        pdp,
                                             GCancellable       *cancellable,
                                             GAsyncReadyCallback callback,
                                             gpointer            user_data);

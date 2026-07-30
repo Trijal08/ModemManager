@@ -10,6 +10,7 @@
  * pure GLib glue with no codec equivalent.
  */
 
+#include <arpa/inet.h>
 #include <string.h>
 
 #include <ModemManager.h>
@@ -222,11 +223,50 @@ finish_build (SamsungSitStatus  status,
 }
 
 static void
-format_ipv4 (gchar        destination[16],
+format_ipv4 (gchar        destination[MM_SIT_IPV4_STRLEN],
              const guint8 address[4])
 {
-    g_snprintf (destination, 16, "%u.%u.%u.%u",
+    g_snprintf (destination, MM_SIT_IPV4_STRLEN, "%u.%u.%u.%u",
                 address[0], address[1], address[2], address[3]);
+}
+
+static void
+format_ipv6 (gchar        destination[MM_SIT_IPV6_STRLEN],
+             const guint8 address[16])
+{
+    if (!inet_ntop (AF_INET6, address, destination, MM_SIT_IPV6_STRLEN))
+        destination[0] = '\0';
+}
+
+/* Reshape one codec data call into the plugin's. Both families come from the
+ * same record: the CP fills the v4 slots, the v6 slots, or both. */
+static void
+fill_data_call (MMSitDataCall            *out,
+                const SamsungSitDataCall *dc)
+{
+    memset (out, 0, sizeof (*out));
+    out->cause  = dc->cause;
+    out->cid    = dc->cid;
+    out->active = dc->active;
+    out->mtu    = (guint16) dc->mtu;
+
+    if (dc->address.has_v4) {
+        out->has_ipv4 = TRUE;
+        format_ipv4 (out->ipv4, dc->address.v4);
+    }
+    if (dc->dns[0].has_v4)
+        format_ipv4 (out->dns1, dc->dns[0].v4);
+    if (dc->dns[1].has_v4)
+        format_ipv4 (out->dns2, dc->dns[1].v4);
+
+    if (dc->address.has_v6) {
+        out->has_ipv6 = TRUE;
+        format_ipv6 (out->ipv6, dc->address.v6);
+    }
+    if (dc->dns[0].has_v6)
+        format_ipv6 (out->dns1_v6, dc->dns[0].v6);
+    if (dc->dns[1].has_v6)
+        format_ipv6 (out->dns2_v6, dc->dns[1].v6);
 }
 
 /*****************************************************************************/
@@ -304,39 +344,42 @@ mm_sit_request_new_set_logical_slot_mapping (guint16                        toke
 GByteArray *
 mm_sit_request_new_set_data_profile (guint16      token,
                                      const gchar *apn,
+                                     MMSitPdpType pdp,
                                      GError     **error)
 {
     guint8          *buffer = NULL;
     gsize            len = 0;
     SamsungSitStatus status;
 
-    status = samsung_sit_build_set_data_profile (token, apn, &buffer, &len);
+    status = samsung_sit_build_set_data_profile (token, apn, (SamsungSitPdpType) pdp, &buffer, &len);
     return finish_build (status, buffer, len, error);
 }
 
 GByteArray *
 mm_sit_request_new_set_initial_attach_apn (guint16      token,
                                            const gchar *apn,
+                                           MMSitPdpType pdp,
                                            GError     **error)
 {
     guint8          *buffer = NULL;
     gsize            len = 0;
     SamsungSitStatus status;
 
-    status = samsung_sit_build_set_initial_attach_apn (token, apn, &buffer, &len);
+    status = samsung_sit_build_set_initial_attach_apn (token, apn, (SamsungSitPdpType) pdp, &buffer, &len);
     return finish_build (status, buffer, len, error);
 }
 
 GByteArray *
 mm_sit_request_new_setup_data_call (guint16      token,
                                     const gchar *apn,
+                                    MMSitPdpType pdp,
                                     GError     **error)
 {
     guint8          *buffer = NULL;
     gsize            len = 0;
     SamsungSitStatus status;
 
-    status = samsung_sit_build_setup_data_call (token, apn, &buffer, &len);
+    status = samsung_sit_build_setup_data_call (token, apn, (SamsungSitPdpType) pdp, &buffer, &len);
     return finish_build (status, buffer, len, error);
 }
 
@@ -1134,25 +1177,9 @@ mm_sit_message_parse_data_call (const MMSitMessage *message,
         return FALSE;
     }
 
-    memset (out_call, 0, sizeof (*out_call));
-    out_call->cause = dc.cause;
-    out_call->cid   = dc.cid;
-    out_call->active = dc.active;
-
-    /*
-     * The codec exposes both families; MMSitDataCall currently only carries the
-     * IPv4 strings, so format those. (dc.address.v6 / dc.gateway are available
-     * for when the struct grows an IPv6 path.)
-     */
-    if (dc.address.has_v4) {
-        out_call->has_ipv4 = TRUE;
-        format_ipv4 (out_call->ipv4, dc.address.v4);
-    }
-    if (dc.dns[0].has_v4)
-        format_ipv4 (out_call->dns1, dc.dns[0].v4);
-    if (dc.dns[1].has_v4)
-        format_ipv4 (out_call->dns2, dc.dns[1].v4);
-    out_call->mtu = (guint16) dc.mtu;
+    /* dc.gateway is decoded but unused: the CP leaves it zero on this network
+     * and a raw-IP bearer needs no next hop. */
+    fill_data_call (out_call, &dc);
     return TRUE;
 }
 
@@ -1183,19 +1210,7 @@ mm_sit_message_parse_data_call_list (const MMSitMessage *message,
     for (i = 0; i < count; i++) {
         MMSitDataCall call;
 
-        memset (&call, 0, sizeof (call));
-        call.cause  = calls[i].cause;
-        call.cid    = calls[i].cid;
-        call.active = calls[i].active;
-        if (calls[i].address.has_v4) {
-            call.has_ipv4 = TRUE;
-            format_ipv4 (call.ipv4, calls[i].address.v4);
-        }
-        if (calls[i].dns[0].has_v4)
-            format_ipv4 (call.dns1, calls[i].dns[0].v4);
-        if (calls[i].dns[1].has_v4)
-            format_ipv4 (call.dns2, calls[i].dns[1].v4);
-        call.mtu = (guint16) calls[i].mtu;
+        fill_data_call (&call, &calls[i]);
         g_array_append_val (array, call);
     }
     samsung_sit_data_call_list_free (calls, count);

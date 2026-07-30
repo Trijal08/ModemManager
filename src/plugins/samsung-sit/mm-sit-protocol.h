@@ -21,6 +21,11 @@
 #define MM_SIT_MAX_SIM_IO_PATH      6
 #define MM_SIT_MAX_SMS_PDU          244
 #define MM_SIT_MAX_SMSC_LEN         12
+/* INET_ADDRSTRLEN / INET6_ADDRSTRLEN, spelled out so this header does not have
+ * to pull <arpa/inet.h> into every user (it declares connect(), which collides
+ * with the bearer's own static one). */
+#define MM_SIT_IPV4_STRLEN          16
+#define MM_SIT_IPV6_STRLEN          46
 
 typedef enum {
     MM_SIT_MESSAGE_TYPE_REQUEST    = 0,
@@ -96,6 +101,14 @@ typedef enum {
     MM_SIT_RADIO_STATE_OFF     = 1,
     MM_SIT_RADIO_STATE_ON      = 2,
 } MMSitRadioState;
+
+/* Address families to ask the network for in a data context. The CP's own
+ * numbering, so a data call's granted addr_type uses the same values. */
+typedef enum {
+    MM_SIT_PDP_TYPE_IPV4   = 1,
+    MM_SIT_PDP_TYPE_IPV6   = 2,
+    MM_SIT_PDP_TYPE_IPV4V6 = 3,
+} MMSitPdpType;
 
 typedef struct {
     MMSitMessageType type;
@@ -352,14 +365,22 @@ typedef struct {
     gint32   timing_advance;
 } MMSitCellInfoLte;
 
+/* A data call as the CP reports it. Every address slot on the wire has room for
+ * both families and the CP fills whichever the network granted, so a dual-stack
+ * call arrives as one call carrying both -- not as two. An address string is
+ * empty when that family is absent. */
 typedef struct {
     guint16  cause;
     guint8   cid;
     guint8   active;
     gboolean has_ipv4;
-    gchar    ipv4[16];
-    gchar    dns1[16];
-    gchar    dns2[16];
+    gchar    ipv4[MM_SIT_IPV4_STRLEN];
+    gchar    dns1[MM_SIT_IPV4_STRLEN];
+    gchar    dns2[MM_SIT_IPV4_STRLEN];
+    gboolean has_ipv6;
+    gchar    ipv6[MM_SIT_IPV6_STRLEN];
+    gchar    dns1_v6[MM_SIT_IPV6_STRLEN];
+    gchar    dns2_v6[MM_SIT_IPV6_STRLEN];
     guint16  mtu;
 } MMSitDataCall;
 
@@ -433,12 +454,15 @@ GByteArray *mm_sit_request_new_set_preferred_modem    (guint16                to
                                                        guint8                 modem_index);
 GByteArray *mm_sit_request_new_set_data_profile       (guint16                token,
                                                        const gchar           *apn,
+                                                       MMSitPdpType           pdp,
                                                        GError               **error);
 GByteArray *mm_sit_request_new_set_initial_attach_apn (guint16                token,
                                                        const gchar           *apn,
+                                                       MMSitPdpType           pdp,
                                                        GError               **error);
 GByteArray *mm_sit_request_new_setup_data_call        (guint16                token,
                                                        const gchar           *apn,
+                                                       MMSitPdpType           pdp,
                                                        GError               **error);
 GByteArray *mm_sit_request_new_deactivate_data_call   (guint16                token,
                                                        guint8                 cid,

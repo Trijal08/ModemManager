@@ -1714,6 +1714,7 @@ typedef enum {
 typedef struct {
     ConnectStep    step;
     gchar         *apn;
+    MMSitPdpType   pdp;
     guint          registration_attempts;
     guint          setup_attempts;
     guint          retry_id;
@@ -1903,9 +1904,9 @@ connect_build_request (MMSitClient   *self,
     case CONNECT_STEP_PREFERRED_MODEM:
         return mm_sit_request_new_set_preferred_modem (next_token (self), 0);
     case CONNECT_STEP_DATA_PROFILE:
-        return mm_sit_request_new_set_data_profile (next_token (self), ctx->apn, error);
+        return mm_sit_request_new_set_data_profile (next_token (self), ctx->apn, ctx->pdp, error);
     case CONNECT_STEP_ATTACH_APN:
-        return mm_sit_request_new_set_initial_attach_apn (next_token (self), ctx->apn, error);
+        return mm_sit_request_new_set_initial_attach_apn (next_token (self), ctx->apn, ctx->pdp, error);
     case CONNECT_STEP_CONFIG_0900:
         return mm_sit_request_new (0x0900, next_token (self), reserved, sizeof (reserved), error);
     case CONNECT_STEP_CONFIG_0106:
@@ -1919,7 +1920,7 @@ connect_build_request (MMSitClient   *self,
     case CONNECT_STEP_CONFIG_0107:
         return mm_sit_request_new (0x0107, next_token (self), body_0107, sizeof (body_0107), error);
     case CONNECT_STEP_SETUP:
-        return mm_sit_request_new_setup_data_call (next_token (self), ctx->apn, error);
+        return mm_sit_request_new_setup_data_call (next_token (self), ctx->apn, ctx->pdp, error);
     case CONNECT_STEP_FAST_DORMANCY:
         return mm_sit_request_new_set_fast_dormancy_info (next_token (self));
     case CONNECT_STEP_REGISTRATION:
@@ -1978,6 +1979,7 @@ connect_step (GTask *task)
 void
 mm_sit_client_connect_data (MMSitClient        *self,
                             const gchar        *apn,
+                            MMSitPdpType        pdp,
                             GCancellable       *cancellable,
                             GAsyncReadyCallback callback,
                             gpointer            user_data)
@@ -1998,6 +2000,7 @@ mm_sit_client_connect_data (MMSitClient        *self,
 
     ctx = g_new0 (ConnectContext, 1);
     ctx->apn = g_strdup (apn);
+    ctx->pdp = pdp;
     ctx->client = g_object_ref (self);
     g_task_set_task_data (task, ctx, (GDestroyNotify) connect_context_free);
     ctx->indication_handler_id = g_signal_connect (self, "indication",

@@ -25,6 +25,48 @@ connect_finish (MMBaseBearer  *bearer,
     return g_task_propagate_pointer (G_TASK (res), error);
 }
 
+/* Which families to ask the network for. A connection that states no
+ * preference gets a dual-stack request -- the CP narrows it to whatever the
+ * network grants, so asking for both costs nothing on a v4-only APN. */
+static MMSitPdpType
+ip_family_to_pdp_type (MMBearerIpFamily family)
+{
+    if (family == MM_BEARER_IP_FAMILY_IPV4)
+        return MM_SIT_PDP_TYPE_IPV4;
+    if (family == MM_BEARER_IP_FAMILY_IPV6)
+        return MM_SIT_PDP_TYPE_IPV6;
+    return MM_SIT_PDP_TYPE_IPV4V6;
+}
+
+/* One family's static configuration out of the granted data call. The CP hands
+ * back a full address rather than a prefix, so the v4 side takes the /32 a
+ * raw-IP bearer wants and the v6 side the /64 a 3GPP PDP context is assigned. */
+static MMBearerIpConfig *
+build_ip_config (const gchar *address,
+                 guint        prefix,
+                 const gchar *dns1,
+                 const gchar *dns2,
+                 guint16      mtu)
+{
+    MMBearerIpConfig *config;
+    const gchar      *dns[3] = { NULL, NULL, NULL };
+    guint             n_dns = 0;
+
+    config = mm_bearer_ip_config_new ();
+    mm_bearer_ip_config_set_method (config, MM_BEARER_IP_METHOD_STATIC);
+    mm_bearer_ip_config_set_address (config, address);
+    mm_bearer_ip_config_set_prefix (config, prefix);
+    if (dns1[0])
+        dns[n_dns++] = dns1;
+    if (dns2[0])
+        dns[n_dns++] = dns2;
+    if (n_dns)
+        mm_bearer_ip_config_set_dns (config, dns);
+    if (mtu)
+        mm_bearer_ip_config_set_mtu (config, mtu);
+    return config;
+}
+
 static void
 connect_ready (MMSitClient *client,
                GAsyncResult *res,
@@ -32,11 +74,10 @@ connect_ready (MMSitClient *client,
 {
     MMBearerSamsungSit       *self = g_task_get_source_object (task);
     g_autoptr(MMBearerIpConfig) ipv4 = NULL;
+    g_autoptr(MMBearerIpConfig) ipv6 = NULL;
     g_autoptr(MMPort)         data = NULL;
     MMSitDataCall             call;
     GError                   *error = NULL;
-    const gchar              *dns[3] = { NULL, NULL, NULL };
-    guint                     n_dns = 0;
 
     if (!mm_sit_client_connect_data_finish (client, res, &call, &error)) {
         g_task_return_error (task, error);
@@ -53,24 +94,27 @@ connect_ready (MMSitClient *client,
         return;
     }
 
-    ipv4 = mm_bearer_ip_config_new ();
-    mm_bearer_ip_config_set_method (ipv4, MM_BEARER_IP_METHOD_STATIC);
-    mm_bearer_ip_config_set_address (ipv4, call.ipv4);
-    mm_bearer_ip_config_set_prefix (ipv4, 32);
-    if (call.dns1[0])
-        dns[n_dns++] = call.dns1;
-    if (call.dns2[0])
-        dns[n_dns++] = call.dns2;
-    if (n_dns)
-        mm_bearer_ip_config_set_dns (ipv4, dns);
-    if (call.mtu)
-        mm_bearer_ip_config_set_mtu (ipv4, call.mtu);
+    /* A dual-stack context is one call carrying both families, so both configs
+     * come out of the same record. The CP grants what the network allows, which
+     * can be narrower than what was asked for. */
+    if (call.has_ipv4)
+        ipv4 = build_ip_config (call.ipv4, 32, call.dns1, call.dns2, call.mtu);
+    if (call.has_ipv6)
+        ipv6 = build_ip_config (call.ipv6, 64, call.dns1_v6, call.dns2_v6, call.mtu);
+
+    if (!ipv4 && !ipv6) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "SIT data call %u carries no address", call.cid);
+        g_object_unref (task);
+        return;
+    }
 
     self->priv->cid = call.cid;
     self->priv->connected = TRUE;
-    mm_obj_info (self, "SIT data call %u connected with IPv4 configuration", call.cid);
+    mm_obj_info (self, "SIT data call %u connected with %s configuration", call.cid,
+                 (ipv4 && ipv6) ? "IPv4 and IPv6" : (ipv4 ? "IPv4" : "IPv6"));
     g_task_return_pointer (task,
-                           mm_bearer_connect_result_new (data, ipv4, NULL),
+                           mm_bearer_connect_result_new (data, ipv4, ipv6),
                            (GDestroyNotify) mm_bearer_connect_result_unref);
     g_object_unref (task);
 }
@@ -103,7 +147,9 @@ carrier_config_ready (MMBroadbandModemSamsungSit *modem,
     bearer = g_task_get_source_object (task);
     properties = mm_base_bearer_peek_config (bearer);
     apn = mm_bearer_properties_get_apn (properties);
-    mm_sit_client_connect_data (client, apn, g_task_get_cancellable (task),
+    mm_sit_client_connect_data (client, apn,
+                                ip_family_to_pdp_type (mm_bearer_properties_get_ip_type (properties)),
+                                g_task_get_cancellable (task),
                                 (GAsyncReadyCallback) connect_ready, task);
 }
 

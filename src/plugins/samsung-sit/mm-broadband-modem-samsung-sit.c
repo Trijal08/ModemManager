@@ -2788,6 +2788,41 @@ load_supported_modes (MMIfaceModem       *self,
     g_object_unref (task);
 }
 
+static MMBearerIpFamily
+load_supported_ip_families_finish (MMIfaceModem *self,
+                                   GAsyncResult *res,
+                                   GError      **error)
+{
+    GError *inner = NULL;
+    gssize  value;
+
+    value = g_task_propagate_int (G_TASK (res), &inner);
+    if (inner) {
+        g_propagate_error (error, inner);
+        return MM_BEARER_IP_FAMILY_NONE;
+    }
+    return (MMBearerIpFamily) value;
+}
+
+/* The CP takes a PDP type per context and answers with the families the network
+ * granted, so all three are supported here. Without this the generic
+ * implementation probes `+CGDCONT=?` on the AT port, which this CP answers in a
+ * way that leaves ModemManager reporting IPv4 only -- and a v4-only modem never
+ * gets asked for anything else. */
+static void
+load_supported_ip_families (MMIfaceModem       *self,
+                            GAsyncReadyCallback callback,
+                            gpointer            user_data)
+{
+    GTask *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    g_task_return_int (task, (MM_BEARER_IP_FAMILY_IPV4 |
+                              MM_BEARER_IP_FAMILY_IPV6 |
+                              MM_BEARER_IP_FAMILY_IPV4V6));
+    g_object_unref (task);
+}
+
 static gboolean
 load_current_modes_finish (MMIfaceModem *self,
                            GAsyncResult *res,
@@ -2933,6 +2968,8 @@ iface_modem_init (MMIfaceModemInterface *iface)
     iface->load_unlock_retries_finish = load_unlock_retries_finish;
     iface->load_supported_modes = load_supported_modes;
     iface->load_supported_modes_finish = load_supported_modes_finish;
+    iface->load_supported_ip_families = load_supported_ip_families;
+    iface->load_supported_ip_families_finish = load_supported_ip_families_finish;
     iface->load_current_modes = load_current_modes;
     iface->load_current_modes_finish = load_current_modes_finish;
     iface->set_current_modes = set_current_modes;
