@@ -27,6 +27,7 @@
 
 #include "mm-bind.h"
 #include "mm-broadband-modem-samsung-sit.h"
+#include "mm-iface-modem.h"
 #include "mm-log-object.h"
 #include "mm-sms-part-3gpp.h"
 #include "mm-sms-samsung-sit.h"
@@ -179,9 +180,21 @@ sms_send (MMBaseSms          *self,
 
     ctx = g_slice_new0 (SendContext);
     ctx->client = client;
-    /* IMS carries messages on LTE and 5G; everything older uses the CS group. */
-    ctx->over_ims = !!(mm_gdbus_modem_get_access_technologies (MM_GDBUS_MODEM (priv->modem)) &
-                       (MM_MODEM_ACCESS_TECHNOLOGY_LTE | MM_MODEM_ACCESS_TECHNOLOGY_5GNR));
+    /* IMS carries messages on LTE and 5G; everything older uses the CS group.
+     * The access technology lives on the modem's D-Bus skeleton -- the modem
+     * object itself is not an MmGdbusModem, and casting it to one silently
+     * yielded no technologies at all, so every send guessed the CS group. */
+    {
+        MmGdbusModem *skeleton = NULL;
+
+        g_object_get (priv->modem, MM_IFACE_MODEM_DBUS_SKELETON, &skeleton, NULL);
+        if (skeleton) {
+            ctx->over_ims = !!(mm_gdbus_modem_get_access_technologies (skeleton) &
+                               (MM_MODEM_ACCESS_TECHNOLOGY_LTE | MM_MODEM_ACCESS_TECHNOLOGY_5GNR));
+            g_object_unref (skeleton);
+        }
+        mm_obj_dbg (self, "sending over %s", ctx->over_ims ? "IMS" : "the CS group");
+    }
     ctx->parts = mm_base_sms_get_parts (self);
     ctx->current = ctx->parts;
     g_task_set_task_data (task, ctx, (GDestroyNotify) send_context_free);

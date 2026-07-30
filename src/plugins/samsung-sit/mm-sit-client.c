@@ -25,6 +25,11 @@ struct _MMSitClientPrivate {
      * file reads can address it the way the downstream RIL does. */
     guint8               sim_aid[MM_SIT_MAX_AID_LENGTH];
     gsize                sim_aid_len;
+    /* Service centre the CP reports, cached on first use: the downstream RIL
+     * puts it in every send and this CP answers a send that lacks one with an
+     * empty response. */
+    guint8               smsc[MM_SIT_MAX_SMSC_LEN];
+    gsize                smsc_len;
 };
 
 G_DEFINE_TYPE (MMSitClient, mm_sit_client, G_TYPE_OBJECT)
@@ -480,6 +485,49 @@ mm_sit_client_get_sim_status_finish (MMSitClient     *self,
 /*****************************************************************************/
 /* SMS */
 
+typedef struct {
+    guint8   smsc[MM_SIT_MAX_SMSC_LEN];
+    gsize    smsc_len;
+    GBytes  *tpdu;
+    gboolean expect_more;
+    gboolean over_ims;
+} SendSmsContext;
+
+static void
+send_sms_context_free (SendSmsContext *ctx)
+{
+    g_clear_pointer (&ctx->tpdu, g_bytes_unref);
+    g_slice_free (SendSmsContext, ctx);
+}
+
+static void send_sms_step (GTask *task);
+
+static void
+send_sms_smsc_ready (MMSitClient  *self,
+                     GAsyncResult *res,
+                     GTask        *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    g_autoptr(GError)       error = NULL;
+    SendSmsContext         *ctx = g_task_get_task_data (task);
+    guint8                  smsc[MM_SIT_MAX_SMSC_LEN];
+    gsize                   len = 0;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (response && mm_sit_message_parse_smsc_address (response, smsc, &len, &error) && len) {
+        memcpy (self->priv->smsc, smsc, len);
+        self->priv->smsc_len = len;
+        memcpy (ctx->smsc, smsc, len);
+        ctx->smsc_len = len;
+    } else {
+        /* Not fatal: send without one and let the CP decide. */
+        mm_obj_dbg (self->priv->port, "couldn't read the service centre address: %s",
+                    error ? error->message : "empty");
+        self->priv->smsc_len = 0;
+    }
+    send_sms_step (task);
+}
+
 static void
 send_sms_ready (MMSitClient  *self,
                 GAsyncResult *res,
@@ -499,6 +547,48 @@ send_sms_ready (MMSitClient  *self,
     g_object_unref (task);
 }
 
+/* Send the part, first reading the service centre address if it is not known
+ * and the caller supplied none. */
+static void
+send_sms_step (GTask *task)
+{
+    MMSitClient          *self = g_task_get_source_object (task);
+    SendSmsContext       *ctx = g_task_get_task_data (task);
+    g_autoptr(GByteArray) request = NULL;
+    g_autoptr(GError)     error = NULL;
+    gconstpointer         tpdu;
+    gsize                 tpdu_len = 0;
+
+    if (!ctx->smsc_len && !self->priv->smsc_len) {
+        request = mm_sit_request_new_get_smsc_address (next_token (self));
+        if (request) {
+            mm_sit_client_command (self, request, 10, g_task_get_cancellable (task),
+                                   (GAsyncReadyCallback) send_sms_smsc_ready, task);
+            return;
+        }
+        /* Fall through and send without one. */
+    }
+    if (!ctx->smsc_len && self->priv->smsc_len) {
+        memcpy (ctx->smsc, self->priv->smsc, self->priv->smsc_len);
+        ctx->smsc_len = self->priv->smsc_len;
+    }
+
+    tpdu = g_bytes_get_data (ctx->tpdu, &tpdu_len);
+    request = mm_sit_request_new_send_sms (next_token (self),
+                                           ctx->smsc, ctx->smsc_len,
+                                           tpdu, tpdu_len,
+                                           ctx->expect_more, ctx->over_ims,
+                                           &error);
+    if (!request) {
+        g_task_return_error (task, g_steal_pointer (&error));
+        g_object_unref (task);
+        return;
+    }
+    /* The network round trip is on the CP's side of this, so allow for it. */
+    mm_sit_client_command (self, request, 60, g_task_get_cancellable (task),
+                           (GAsyncReadyCallback) send_sms_ready, task);
+}
+
 void
 mm_sit_client_send_sms (MMSitClient        *self,
                         const guint8       *smsc,
@@ -511,22 +601,21 @@ mm_sit_client_send_sms (MMSitClient        *self,
                         GAsyncReadyCallback callback,
                         gpointer            user_data)
 {
-    g_autoptr(GByteArray) request = NULL;
-    g_autoptr(GError)     error = NULL;
-    GTask                *task;
+    SendSmsContext *ctx;
+    GTask          *task;
 
     task = g_task_new (self, cancellable, callback, user_data);
-    request = mm_sit_request_new_send_sms (next_token (self), smsc, smsc_len,
-                                           tpdu, tpdu_len, expect_more, over_ims,
-                                           &error);
-    if (!request) {
-        g_task_return_error (task, g_steal_pointer (&error));
-        g_object_unref (task);
-        return;
-    }
-    /* The network round trip is on the CP's side of this, so allow for it. */
-    mm_sit_client_command (self, request, 60, cancellable,
-                           (GAsyncReadyCallback) send_sms_ready, task);
+
+    ctx = g_slice_new0 (SendSmsContext);
+    ctx->smsc_len = MIN (smsc_len, MM_SIT_MAX_SMSC_LEN);
+    if (ctx->smsc_len)
+        memcpy (ctx->smsc, smsc, ctx->smsc_len);
+    ctx->tpdu = g_bytes_new (tpdu, tpdu_len);
+    ctx->expect_more = expect_more;
+    ctx->over_ims = over_ims;
+    g_task_set_task_data (task, ctx, (GDestroyNotify) send_sms_context_free);
+
+    send_sms_step (task);
 }
 
 gboolean

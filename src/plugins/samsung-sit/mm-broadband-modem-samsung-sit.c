@@ -467,7 +467,8 @@ handle_new_sms (MMBroadbandModemSamsungSit *self,
         return;
     }
 
-    mm_obj_dbg (self, "SMS delivered over %s, %u bytes",
+    mm_obj_dbg (self, "%s delivered over %s, %u bytes",
+                deliver.status_report ? "SMS delivery report" : "SMS",
                 deliver.over_ims ? "IMS" : "the CS group", deliver.pdu_len);
 
     part = mm_sms_part_3gpp_new_from_binary_pdu (SMS_PART_INVALID_INDEX,
@@ -475,6 +476,8 @@ handle_new_sms (MMBroadbandModemSamsungSit *self,
                                                  self, FALSE, &error);
     if (!part)
         mm_obj_warn (self, "couldn't parse the delivered SMS PDU: %s", error->message);
+    /* A delivery report goes through the same door: the core matches it to the
+     * message it belongs to by its reference and marks that one delivered. */
     else if (!mm_iface_modem_messaging_take_part (MM_IFACE_MODEM_MESSAGING (self),
                                                   mm_broadband_modem_create_sms (MM_BROADBAND_MODEM (self)),
                                                   part,
@@ -612,7 +615,9 @@ sit_indication (MMSitClient              *client,
         mm_iface_modem_voice_reload_all_calls (MM_IFACE_MODEM_VOICE (self), NULL, NULL);
     }
 
-    if (message->id == MM_SIT_MESSAGE_NEW_SMS || message->id == MM_SIT_MESSAGE_IMS_NEW_SMS)
+    if (message->id == MM_SIT_MESSAGE_NEW_SMS ||
+        message->id == MM_SIT_MESSAGE_NEW_SMS_STATUS_REPORT ||
+        message->id == MM_SIT_MESSAGE_IMS_NEW_SMS)
         handle_new_sms (self, message);
 
     if (message->id == MM_SIT_MESSAGE_SIM_STATUS_CHANGED)

@@ -44,6 +44,7 @@ typedef enum {
     MM_SIT_MESSAGE_SMS_ACK                    = 0x0102,
     MM_SIT_MESSAGE_GET_SMSC_ADDRESS           = 0x0108,
     MM_SIT_MESSAGE_NEW_SMS                    = 0x010c,
+    MM_SIT_MESSAGE_NEW_SMS_STATUS_REPORT      = 0x010d,
     MM_SIT_MESSAGE_IMS_SEND_SMS               = 0x0d1b,
     MM_SIT_MESSAGE_IMS_SMS_ACK                = 0x0d1d,
     MM_SIT_MESSAGE_IMS_NEW_SMS                = 0x0d1e,
@@ -197,6 +198,8 @@ typedef struct {
 typedef struct {
     guint8   format;
     gboolean over_ims;
+    /* A delivery report rather than a message; same shape, same size. */
+    gboolean status_report;
     guint16  pdu_len;
     guint8   pdu[MM_SIT_MAX_SMS_PDU];
 } MMSitSmsDeliver;

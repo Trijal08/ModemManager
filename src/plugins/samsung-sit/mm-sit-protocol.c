@@ -690,8 +690,9 @@ mm_sit_message_parse_new_sms (const MMSitMessage *message,
     }
 
     memset (out_deliver, 0, sizeof (*out_deliver));
-    out_deliver->format   = d.format;
-    out_deliver->over_ims = d.over_ims ? TRUE : FALSE;
+    out_deliver->format        = d.format;
+    out_deliver->over_ims      = d.over_ims ? TRUE : FALSE;
+    out_deliver->status_report = d.status_report ? TRUE : FALSE;
     out_deliver->pdu_len  = MIN (d.pdu_len, MM_SIT_MAX_SMS_PDU);
     memcpy (out_deliver->pdu, d.pdu, out_deliver->pdu_len);
     return TRUE;
