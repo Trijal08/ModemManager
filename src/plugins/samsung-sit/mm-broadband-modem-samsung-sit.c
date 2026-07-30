@@ -863,6 +863,142 @@ load_access_technologies (MMIfaceModem       *iface,
 }
 
 /*****************************************************************************/
+/* Own numbers
+ *
+ * The generic path asks AT+CNUM. EF_MSISDN holds the same thing: linear-fixed
+ * records ending in the 14-byte dialling-number structure of TS 31.102 -- the
+ * length of the BCD contents, the type of number, and the digits in swapped
+ * BCD padded with 0xf. What precedes it is the alpha identifier, whose size is
+ * whatever the record has left over.
+ */
+
+#define MSISDN_DIALLING_LEN 14
+#define MSISDN_NUMBER_LEN   10
+/* Type-of-number field, TS 24.008 10.5.4.7: 001 in bits 6..4 is international. */
+#define TON_MASK            0x70
+#define TON_INTERNATIONAL   0x10
+
+static GStrv
+load_own_numbers_finish (MMIfaceModem *self,
+                         GAsyncResult *res,
+                         GError      **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+/* Decode one record's dialling number, or NULL when the record is unused. */
+static gchar *
+parse_msisdn_record (const guint8 *record,
+                     gsize         record_len)
+{
+    g_autofree gchar *digits = NULL;
+    const guint8     *dialling;
+    guint8            bcd_len;
+    guint8            ton_npi;
+    gchar            *end;
+
+    if (record_len < MSISDN_DIALLING_LEN)
+        return NULL;
+
+    dialling = record + record_len - MSISDN_DIALLING_LEN;
+    bcd_len  = dialling[0];
+    ton_npi  = dialling[1];
+    /* An unused record leaves the length at 0 or 0xff; the byte counts the
+     * type-of-number octet as well as the digits. */
+    if (!bcd_len || bcd_len == 0xff || bcd_len > MSISDN_NUMBER_LEN + 1)
+        return NULL;
+
+    digits = mm_bcd_to_string (dialling + 2, bcd_len - 1, TRUE);
+    if (!digits || !digits[0])
+        return NULL;
+    /* An odd digit count leaves a padding nibble at the end. */
+    end = strchr (digits, 'f');
+    if (end)
+        *end = '\0';
+    if (!digits[0])
+        return NULL;
+
+    /* +CNUM dropped the type of number; with the byte in hand the
+     * international form can be reported as such. */
+    if ((ton_npi & TON_MASK) == TON_INTERNATIONAL)
+        return g_strdup_printf ("+%s", digits);
+    return g_steal_pointer (&digits);
+}
+
+static void
+load_own_numbers_ready (MMSitClient  *client,
+                        GAsyncResult *res,
+                        GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    g_autoptr(GBytes)           file = NULL;
+    g_autoptr(GPtrArray)        numbers = NULL;
+    MMSitEfInfo                 info;
+    const guint8               *data;
+    gsize                       len = 0;
+    gsize                       offset;
+    GError                     *error = NULL;
+
+    file = mm_sit_client_read_ef_finish (client, res, &info, &error);
+    if (!file) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    if (!info.record_len) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "EF_MSISDN is not a record file");
+        g_object_unref (task);
+        return;
+    }
+
+    data = g_bytes_get_data (file, &len);
+    numbers = g_ptr_array_new ();
+    for (offset = 0; offset + info.record_len <= len; offset += info.record_len) {
+        gchar *number;
+
+        number = parse_msisdn_record (data + offset, info.record_len);
+        if (number)
+            g_ptr_array_add (numbers, number);
+    }
+
+    if (!numbers->len) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_NOT_FOUND,
+                                 "EF_MSISDN holds no number");
+        g_object_unref (task);
+        return;
+    }
+
+    mm_obj_dbg (self, "read %u subscriber number(s) from EF_MSISDN", numbers->len);
+    g_ptr_array_add (numbers, NULL);
+    g_task_return_pointer (task, g_ptr_array_free (g_steal_pointer (&numbers), FALSE),
+                           (GDestroyNotify) g_strfreev);
+    g_object_unref (task);
+}
+
+static void
+load_own_numbers (MMIfaceModem       *iface,
+                  GAsyncReadyCallback callback,
+                  gpointer            user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    static const guint16        adf_path[] = { 0x3f00, 0x7fff };
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_read_ef (client, 0x6f40, adf_path, G_N_ELEMENTS (adf_path), NULL,
+                           (GAsyncReadyCallback) load_own_numbers_ready, task);
+}
+
+/*****************************************************************************/
 /* SIM object
  *
  * The plugin's own, so every SIM read goes over SIT instead of AT. Only the
@@ -2594,6 +2730,8 @@ iface_modem_init (MMIfaceModemInterface *iface)
     iface->modem_power_down_finish = modem_set_power_finish;
     iface->create_sim = create_sim;
     iface->create_sim_finish = create_sim_finish;
+    iface->load_own_numbers = load_own_numbers;
+    iface->load_own_numbers_finish = load_own_numbers_finish;
     iface->load_unlock_required = load_unlock_required;
     iface->load_unlock_required_finish = load_unlock_required_finish;
     iface->load_unlock_retries = load_unlock_retries;
