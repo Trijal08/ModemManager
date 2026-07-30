@@ -99,8 +99,26 @@ connect_ready (MMSitClient *client,
      * can be narrower than what was asked for. */
     if (call.has_ipv4)
         ipv4 = build_ip_config (call.ipv4, 32, call.dns1, call.dns2, call.mtu);
-    if (call.has_ipv6)
+    if (call.has_ipv6) {
         ipv6 = build_ip_config (call.ipv6, 64, call.dns1_v6, call.dns2_v6, call.mtu);
+        /*
+         * The CP never reports a next hop -- its gateway slots are zero in every
+         * captured response, for both families, and no link-local address
+         * appears anywhere in the frame. It terminates neighbour discovery
+         * itself: router solicitations sent from the AP on the data interface
+         * go out and are never answered, which is also how the CP knows the
+         * prefix it handed us. A point-to-point PDP link needs no next hop
+         * anyway, and Android does the same thing -- an empty gateway list
+         * there becomes an interface-scoped route.
+         *
+         * NetworkManager treats a missing gateway as "not a hard failure" for
+         * IPv4 and installs a default route with a zero next hop, but its IPv6
+         * path rejects a static configuration without one outright. Reporting
+         * "::" gets us that same interface-scoped default route. Revisit if
+         * NetworkManager ever grows the IPv4 fallback for IPv6.
+         */
+        mm_bearer_ip_config_set_gateway (ipv6, "::");
+    }
 
     if (!ipv4 && !ipv6) {
         g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
