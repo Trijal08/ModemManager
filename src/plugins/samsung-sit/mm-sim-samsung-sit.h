@@ -25,6 +25,16 @@ struct _MMSimSamsungSitClass {
 
 GType mm_sim_samsung_sit_get_type (void);
 
+/* For the slot inventory: a SIM whose identifiers are already known, which is
+ * how the active slot has to be built -- a modem implementing load_sim_slots
+ * never sees its create_sim vfunc called. */
+MMBaseSim *mm_sim_samsung_sit_new_initialized (MMBaseModem *modem,
+                                               GObject     *bind_to,
+                                               guint        slot_number,
+                                               gboolean     active,
+                                               const gchar *sim_identifier,
+                                               const gchar *eid);
+
 void       mm_sim_samsung_sit_new        (MMBaseModem         *modem,
                                           GCancellable        *cancellable,
                                           GAsyncReadyCallback  callback,

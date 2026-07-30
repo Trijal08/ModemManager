@@ -1712,7 +1712,17 @@ load_sim_slots_ready (MMSitClient *client,
         if (slot->eid_len)
             eid = mm_decode_eid ((const gchar *) slot->eid, slot->eid_len);
 
+        /* The active slot gets the plugin's own SIM so its remaining
+         * properties are read over SIT; an inactive slot is never read from,
+         * everything it shows comes from this inventory. */
         g_ptr_array_add (ctx->sim_slots,
+                         active ?
+                         mm_sim_samsung_sit_new_initialized (MM_BASE_MODEM (self),
+                                                             G_OBJECT (self),
+                                                             i + 1,
+                                                             active,
+                                                             iccid,
+                                                             eid) :
                          mm_base_sim_new_initialized (MM_BASE_MODEM (self),
                                                       G_OBJECT (self),
                                                       i + 1,

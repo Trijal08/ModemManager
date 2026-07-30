@@ -702,6 +702,32 @@ load_preferred_networks (MMBaseSim          *self,
 
 /*****************************************************************************/
 
+/* The slot-inventory constructor. A modem that implements load_sim_slots hands
+ * ModemManager the SIM objects itself and its create_sim vfunc is then never
+ * called, so the active slot has to be built as this subclass here or every
+ * read falls back to AT. */
+MMBaseSim *
+mm_sim_samsung_sit_new_initialized (MMBaseModem *modem,
+                                    GObject     *bind_to,
+                                    guint        slot_number,
+                                    gboolean     active,
+                                    const gchar *sim_identifier,
+                                    const gchar *eid)
+{
+    MMBaseSim *sim;
+
+    sim = MM_BASE_SIM (g_object_new (MM_TYPE_SIM_SAMSUNG_SIT,
+                                     MM_BASE_SIM_MODEM,       modem,
+                                     MM_BIND_TO,              bind_to,
+                                     MM_BASE_SIM_SLOT_NUMBER, slot_number,
+                                     "active",                active,
+                                     "sim-identifier",        sim_identifier,
+                                     "eid",                   eid,
+                                     NULL));
+    mm_base_sim_export (sim);
+    return sim;
+}
+
 MMBaseSim *
 mm_sim_samsung_sit_new_finish (GAsyncResult  *res,
                                GError       **error)
