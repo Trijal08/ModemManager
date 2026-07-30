@@ -1039,3 +1039,63 @@ mm_sit_message_parse_net_scan_result (const MMSitMessage *message,
     *out_networks = array;
     return TRUE;
 }
+
+GByteArray *
+mm_sit_request_new_get_allowed_network_types (guint16 token)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_get_allowed_network_type_bitmap (token, &buffer, &len);
+    return finish_build (status, buffer, len, NULL);
+}
+
+GByteArray *
+mm_sit_request_new_set_allowed_network_types (guint16                        token,
+                                              const MMSitNetworkGenerations *generations,
+                                              GError                       **error)
+{
+    guint8                        *buffer = NULL;
+    gsize                          len = 0;
+    SamsungSitStatus               status;
+    SamsungSitNetworkGenerations   wire;
+
+    g_return_val_if_fail (generations != NULL, NULL);
+
+    /* MMSitNetworkGenerations uses gboolean fields, the wire struct u8 ones. */
+    wire.gsm  = generations->gsm ? 1 : 0;
+    wire.umts = generations->umts ? 1 : 0;
+    wire.lte  = generations->lte ? 1 : 0;
+    wire.nr   = generations->nr ? 1 : 0;
+
+    status = samsung_sit_build_set_allowed_network_type_bitmap (token, wire, &buffer, &len);
+    return finish_build (status, buffer, len, error);
+}
+
+gboolean
+mm_sit_message_parse_allowed_network_types (const MMSitMessage      *message,
+                                            MMSitNetworkGenerations *out_generations,
+                                            GError                 **error)
+{
+    const guint8                 *data;
+    gsize                         len;
+    SamsungSitStatus              status;
+    SamsungSitNetworkGenerations  wire;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_generations != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_allowed_network_type_bitmap (data, len, &wire);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+
+    out_generations->gsm  = (wire.gsm != 0);
+    out_generations->umts = (wire.umts != 0);
+    out_generations->lte  = (wire.lte != 0);
+    out_generations->nr   = (wire.nr != 0);
+    return TRUE;
+}

@@ -133,6 +133,26 @@ gboolean mm_sit_client_set_network_selection_manual_finish (MMSitClient        *
                                                             GAsyncResult       *res,
                                                             GError            **error);
 
+/* The radio generations the CP may use. Persisted by the CP across our
+ * restarts, so the current value has to be read back. */
+void     mm_sit_client_get_allowed_network_types        (MMSitClient        *self,
+                                                         GCancellable       *cancellable,
+                                                         GAsyncReadyCallback callback,
+                                                         gpointer            user_data);
+gboolean mm_sit_client_get_allowed_network_types_finish (MMSitClient        *self,
+                                                         GAsyncResult       *res,
+                                                         MMSitNetworkGenerations *out_generations,
+                                                         GError            **error);
+
+void     mm_sit_client_set_allowed_network_types        (MMSitClient        *self,
+                                                         const MMSitNetworkGenerations *generations,
+                                                         GCancellable       *cancellable,
+                                                         GAsyncReadyCallback callback,
+                                                         gpointer            user_data);
+gboolean mm_sit_client_set_allowed_network_types_finish (MMSitClient        *self,
+                                                         GAsyncResult       *res,
+                                                         GError            **error);
+
 /* Runs a PLMN search to completion and returns a GArray of MMSitScannedNetwork;
  * the CP has no "search done" message, so this settles once its result batches
  * stop arriving. */

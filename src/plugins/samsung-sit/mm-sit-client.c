@@ -1613,6 +1613,96 @@ mm_sit_client_set_network_selection_manual_finish (MMSitClient  *self,
     return g_task_propagate_boolean (G_TASK (res), error);
 }
 
+static void
+get_allowed_network_types_ready (MMSitClient  *self,
+                                 GAsyncResult *res,
+                                 GTask        *task)
+{
+    g_autoptr(MMSitMessage)  response = NULL;
+    MMSitNetworkGenerations *generations;
+    GError                  *error = NULL;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    generations = g_new0 (MMSitNetworkGenerations, 1);
+    if (response && mm_sit_message_parse_allowed_network_types (response, generations, &error))
+        g_task_return_pointer (task, generations, g_free);
+    else {
+        g_free (generations);
+        g_task_return_error (task, error);
+    }
+    g_object_unref (task);
+}
+
+/*
+ * Which radio generations the CP is allowed to use. Downstream sets the
+ * all-generations bitmap on every boot and narrows it only when the user picks a
+ * specific mode; the CP keeps the value across our restarts, so it has to be
+ * read back rather than assumed.
+ */
+void
+mm_sit_client_get_allowed_network_types (MMSitClient        *self,
+                                         GCancellable       *cancellable,
+                                         GAsyncReadyCallback callback,
+                                         gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_get_allowed_network_types (next_token (self));
+    mm_sit_client_command (self, request, 5, cancellable,
+                           (GAsyncReadyCallback) get_allowed_network_types_ready, task);
+}
+
+gboolean
+mm_sit_client_get_allowed_network_types_finish (MMSitClient             *self,
+                                               GAsyncResult            *res,
+                                               MMSitNetworkGenerations *out_generations,
+                                               GError                 **error)
+{
+    MMSitNetworkGenerations *generations;
+
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    g_return_val_if_fail (out_generations != NULL, FALSE);
+
+    generations = g_task_propagate_pointer (G_TASK (res), error);
+    if (!generations)
+        return FALSE;
+    *out_generations = *generations;
+    g_free (generations);
+    return TRUE;
+}
+
+void
+mm_sit_client_set_allowed_network_types (MMSitClient                   *self,
+                                         const MMSitNetworkGenerations *generations,
+                                         GCancellable                  *cancellable,
+                                         GAsyncReadyCallback            callback,
+                                         gpointer                       user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    g_autoptr(GError)     error = NULL;
+
+    request = mm_sit_request_new_set_allowed_network_types (next_token (self), generations, &error);
+    if (!request) {
+        GTask *task = g_task_new (self, cancellable, callback, user_data);
+
+        g_task_return_error (task, g_steal_pointer (&error));
+        g_object_unref (task);
+        return;
+    }
+    run_checked_command (self, request, 10, cancellable, callback, user_data);
+}
+
+gboolean
+mm_sit_client_set_allowed_network_types_finish (MMSitClient  *self,
+                                                GAsyncResult *res,
+                                                GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
 /*
  * Network scan. The CP has no "search complete" message: it pushes a
  * NET_SCAN_RESULT batch every few seconds, each one repeating every network

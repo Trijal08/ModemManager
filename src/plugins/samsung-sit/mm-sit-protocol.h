@@ -54,6 +54,8 @@ typedef enum {
     MM_SIT_MESSAGE_SERVING_NETWORK             = 0x070e,
     MM_SIT_MESSAGE_NETWORK_SCAN                = 0x0734,
     MM_SIT_MESSAGE_NET_SCAN_RESULT             = 0x0736,
+    MM_SIT_MESSAGE_SET_ALLOWED_NETWORK_TYPE_BITMAP = 0x074f,
+    MM_SIT_MESSAGE_GET_ALLOWED_NETWORK_TYPE_BITMAP = 0x0750,
     MM_SIT_MESSAGE_SET_PREFERRED_DATA_MODEM    = 0x0740,
     MM_SIT_MESSAGE_SET_RADIO_POWER             = 0x0800,
     MM_SIT_MESSAGE_GET_RADIO_POWER             = 0x0801,
@@ -123,6 +125,15 @@ typedef struct {
     gboolean serving;
     guint8   rat;
 } MMSitScannedNetwork;
+
+/* The radio generations the CP may use, as the allowed-network-type bitmap
+ * selects them. */
+typedef struct {
+    gboolean gsm;
+    gboolean umts;
+    gboolean lte;
+    gboolean nr;
+} MMSitNetworkGenerations;
 
 typedef struct {
     guint8   version;
@@ -304,6 +315,12 @@ GByteArray *mm_sit_request_new_set_network_selection_manual
                                                        GError               **error);
 GByteArray *mm_sit_request_new_start_network_scan      (guint16                token);
 GByteArray *mm_sit_request_new_stop_network_scan       (guint16                token);
+GByteArray *mm_sit_request_new_get_allowed_network_types
+                                                      (guint16                token);
+GByteArray *mm_sit_request_new_set_allowed_network_types
+                                                      (guint16                token,
+                                                       const MMSitNetworkGenerations *generations,
+                                                       GError               **error);
 
 gboolean mm_sit_message_parse_radio_state             (const MMSitMessage    *message,
                                                        MMSitRadioState       *out_state,
@@ -345,6 +362,9 @@ gboolean mm_sit_message_parse_network_selection_manual_result
  * network found so far, so callers should replace rather than accumulate. */
 gboolean mm_sit_message_parse_net_scan_result         (const MMSitMessage    *message,
                                                        GArray               **out_networks,
+                                                       GError               **error);
+gboolean mm_sit_message_parse_allowed_network_types    (const MMSitMessage    *message,
+                                                       MMSitNetworkGenerations *out_generations,
                                                        GError               **error);
 
 /* Fills *out_calls with a GArray of MMSitCall (may be empty, never NULL on

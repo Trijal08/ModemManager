@@ -215,12 +215,79 @@ invalidate_carrier_config (MMBroadbandModemSamsungSit *self)
     g_clear_pointer (&self->priv->carrier_config_imsi, g_free);
 }
 
+typedef struct {
+    MMBroadbandModemSamsungSit *self;
+    GArray                     *calls;
+} ReportDataCallsContext;
+
+/* A cid the CP still lists as active keeps its bearer; anything else has been
+ * torn down behind our back. */
+static void
+bearer_report_lost_data_call (MMBaseBearer *bearer,
+                              gpointer      user_data)
+{
+    ReportDataCallsContext *ctx = user_data;
+    guint8                  cid;
+    guint                   i;
+
+    if (!MM_IS_BEARER_SAMSUNG_SIT (bearer))
+        return;
+    if (!mm_bearer_samsung_sit_get_cid (MM_BEARER_SAMSUNG_SIT (bearer), &cid))
+        return;
+
+    for (i = 0; i < ctx->calls->len; i++) {
+        const MMSitDataCall *call = &g_array_index (ctx->calls, MMSitDataCall, i);
+
+        if (call->cid == cid && call->active)
+            return;
+    }
+
+    mm_obj_msg (ctx->self, "CP dropped data call %u; reporting bearer '%s' disconnected",
+                cid, mm_base_bearer_get_path (bearer));
+    mm_base_bearer_report_connection_status (bearer, MM_BEARER_CONNECTION_STATUS_DISCONNECTED);
+}
+
+/*
+ * The CP announces its own PDN teardowns with a DATA_CALL_LIST_CHANGED that no
+ * longer contains the context -- an empty 9-byte list when nothing is left.
+ * Ignoring it left the bearer up with a dead context: the address stayed on
+ * rmnet0 and both MM and NetworkManager still called it connected while no
+ * packets flowed. Reproduced by narrowing the allowed network types, which makes
+ * the CP re-attach on another RAT and drop the PDN on the way.
+ */
+static void
+handle_data_call_list_changed (MMBroadbandModemSamsungSit *self,
+                              const MMSitMessage         *message)
+{
+    g_autoptr(MMBearerList)  bearer_list = NULL;
+    g_autoptr(GArray)        calls = NULL;
+    g_autoptr(GError)        error = NULL;
+    ReportDataCallsContext   ctx;
+
+    if (!mm_sit_message_parse_data_call_list (message, &calls, &error)) {
+        mm_obj_dbg (self, "unparsable data-call list indication: %s", error->message);
+        return;
+    }
+
+    g_object_get (self, MM_IFACE_MODEM_BEARER_LIST, &bearer_list, NULL);
+    if (!bearer_list)
+        return;
+
+    ctx.self = self;
+    ctx.calls = calls;
+    mm_bearer_list_foreach (bearer_list, (MMBearerListForeachFunc) bearer_report_lost_data_call,
+                            &ctx);
+}
+
 static void
 sit_indication (MMSitClient              *client,
                 const MMSitMessage       *message,
                 MMBroadbandModemSamsungSit *self)
 {
     MMSitOperator operator_info;
+
+    if (message->id == MM_SIT_MESSAGE_DATA_CALL_LIST_CHANGED)
+        handle_data_call_list_changed (self, message);
 
     if (message->id == MM_SIT_MESSAGE_CALL_STATE_CHANGED) {
         /* Empty poke -- the state is not in the indication, so re-read the
@@ -1820,6 +1887,199 @@ clear_unsolicited_events_finish (MMIfaceModem3gpp  *self,
     return g_task_propagate_boolean (G_TASK (res), error);
 }
 
+/*****************************************************************************/
+/* Allowed radio generations (modes)
+ *
+ * The generic AT path used to handle this, badly: this CP answers AT+WS46=? with
+ * a malformed list ("+WS46: 12, 22, 25, 28, 29, 30, 31)" -- a closing paren, no
+ * opening one), MM's parser rejected it, and the fallback left the modem
+ * advertising 4G as its only supported mode. The CP has a native bitmap for
+ * exactly this.
+ */
+
+static MMModemMode
+generations_to_modes (const MMSitNetworkGenerations *generations)
+{
+    MMModemMode modes = MM_MODEM_MODE_NONE;
+
+    if (generations->gsm)
+        modes |= MM_MODEM_MODE_2G;
+    if (generations->umts)
+        modes |= MM_MODEM_MODE_3G;
+    if (generations->lte)
+        modes |= MM_MODEM_MODE_4G;
+    if (generations->nr)
+        modes |= MM_MODEM_MODE_5G;
+    return modes;
+}
+
+static void
+modes_to_generations (MMModemMode              modes,
+                      MMSitNetworkGenerations *generations)
+{
+    generations->gsm  = !!(modes & MM_MODEM_MODE_2G);
+    generations->umts = !!(modes & MM_MODEM_MODE_3G);
+    generations->lte  = !!(modes & MM_MODEM_MODE_4G);
+    generations->nr   = !!(modes & MM_MODEM_MODE_5G);
+}
+
+static GArray *
+load_supported_modes_finish (MMIfaceModem *self,
+                             GAsyncResult *res,
+                             GError      **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+/* Every combination the bitmap can express, since its four generation groups are
+ * independent. No preferred mode: the bitmap says what the CP may use, not what
+ * it should favour, and nothing in the corpus expresses a preference. */
+static void
+load_supported_modes (MMIfaceModem       *self,
+                      GAsyncReadyCallback callback,
+                      gpointer            user_data)
+{
+    GArray                  *combinations;
+    MMModemModeCombination   combination;
+    MMModemMode              all;
+    GTask                   *task;
+    guint                    mask;
+
+    all = MM_MODEM_MODE_2G | MM_MODEM_MODE_3G | MM_MODEM_MODE_4G | MM_MODEM_MODE_5G;
+    combinations = g_array_sized_new (FALSE, FALSE, sizeof (MMModemModeCombination), 15);
+    for (mask = 1; mask <= (guint) all; mask++) {
+        if (mask & ~((guint) all))
+            continue;
+        combination.allowed = (MMModemMode) mask;
+        combination.preferred = MM_MODEM_MODE_NONE;
+        g_array_append_val (combinations, combination);
+    }
+
+    task = g_task_new (self, NULL, callback, user_data);
+    g_task_return_pointer (task, combinations, (GDestroyNotify) g_array_unref);
+    g_object_unref (task);
+}
+
+static gboolean
+load_current_modes_finish (MMIfaceModem *self,
+                           GAsyncResult *res,
+                           MMModemMode  *allowed,
+                           MMModemMode  *preferred,
+                           GError      **error)
+{
+    GTask *task = G_TASK (res);
+
+    if (!g_task_propagate_boolean (task, error))
+        return FALSE;
+    *allowed = (MMModemMode) GPOINTER_TO_UINT (g_task_get_task_data (task));
+    *preferred = MM_MODEM_MODE_NONE;
+    return TRUE;
+}
+
+static void
+load_current_modes_ready (MMSitClient  *client,
+                          GAsyncResult *res,
+                          GTask        *task)
+{
+    MMSitNetworkGenerations generations;
+    GError                 *error = NULL;
+
+    if (!mm_sit_client_get_allowed_network_types_finish (client, res, &generations, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    g_task_set_task_data (task,
+                          GUINT_TO_POINTER ((guint) generations_to_modes (&generations)),
+                          NULL);
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+load_current_modes (MMIfaceModem       *self,
+                    GAsyncReadyCallback callback,
+                    gpointer            user_data)
+{
+    MMSitClient *client;
+    GError      *error = NULL;
+    GTask       *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (MM_BROADBAND_MODEM_SAMSUNG_SIT (self),
+                                                        &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_allowed_network_types (client, NULL,
+                                            (GAsyncReadyCallback) load_current_modes_ready, task);
+}
+
+static gboolean
+set_current_modes_finish (MMIfaceModem *self,
+                          GAsyncResult *res,
+                          GError      **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+set_current_modes_ready (MMSitClient  *client,
+                         GAsyncResult *res,
+                         GTask        *task)
+{
+    GError *error = NULL;
+
+    if (!mm_sit_client_set_allowed_network_types_finish (client, res, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+set_current_modes (MMIfaceModem       *self,
+                   MMModemMode         modes,
+                   MMModemMode         preferred,
+                   GAsyncReadyCallback callback,
+                   gpointer            user_data)
+{
+    MMSitClient             *client;
+    GError                  *error = NULL;
+    GTask                   *task;
+    MMSitNetworkGenerations  generations;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    if (preferred != MM_MODEM_MODE_NONE) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_UNSUPPORTED,
+                                 "The CP's allowed-network-type bitmap cannot express a "
+                                 "preferred mode");
+        g_object_unref (task);
+        return;
+    }
+
+    modes_to_generations (modes, &generations);
+    if (!generations.gsm && !generations.umts && !generations.lte && !generations.nr) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_INVALID_ARGS,
+                                 "At least one radio generation must be allowed");
+        g_object_unref (task);
+        return;
+    }
+
+    client = mm_broadband_modem_samsung_sit_peek_client (MM_BROADBAND_MODEM_SAMSUNG_SIT (self),
+                                                        &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_set_allowed_network_types (client, &generations, NULL,
+                                            (GAsyncReadyCallback) set_current_modes_ready, task);
+}
+
 static void
 iface_modem_init (MMIfaceModemInterface *iface)
 {
@@ -1833,6 +2093,12 @@ iface_modem_init (MMIfaceModemInterface *iface)
     iface->modem_power_up_finish = modem_set_power_finish;
     iface->modem_power_down = modem_power_down;
     iface->modem_power_down_finish = modem_set_power_finish;
+    iface->load_supported_modes = load_supported_modes;
+    iface->load_supported_modes_finish = load_supported_modes_finish;
+    iface->load_current_modes = load_current_modes;
+    iface->load_current_modes_finish = load_current_modes_finish;
+    iface->set_current_modes = set_current_modes;
+    iface->set_current_modes_finish = set_current_modes_finish;
     iface->load_sim_slots = load_sim_slots;
     iface->load_sim_slots_finish = load_sim_slots_finish;
     iface->set_primary_sim_slot = set_primary_sim_slot;
