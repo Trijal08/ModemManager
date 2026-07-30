@@ -143,16 +143,108 @@ sit_rat_mask_to_access_technology (guint16 rat_mask)
     return act;
 }
 
+/*
+ * Signal quality percentage.
+ *
+ * MM_RSRP_TO_QUALITY() is a linear ramp over [-110,-60] dBm, which puts 100% at
+ * a level you only see standing under the antenna: a genuinely good -94 dBm came
+ * out as 32%, and a phone alongside showed three bars out of four for the same
+ * cell. Real RSRP spans roughly -75 at best to -120 at the cell edge, so that
+ * ramp compresses every usable signal into the bottom half of the scale.
+ *
+ * Interpolate between anchor points instead, positioned so that each level a
+ * handset would bucket a measurement into lands inside the band a UI reads as
+ * the matching number of bars. For LTE the anchors are AOSP's default
+ * lte_rsrp_thresholds_int_array {-128,-118,-108,-98} and for NR its
+ * ss_rsrp_thresholds {-110,-90,-80,-65}; the quality values 6/31/56/81 are the
+ * lower edges of Phosh's weak/ok/good/excellent bands (>5, >30, >55, >80), which
+ * quantises the scale the same way. So -98 dBm reads "excellent" and -118 reads
+ * "ok", as they do on a phone.
+ *
+ * The GSM and WCDMA anchors are the conventional bands for those measurements
+ * rather than values pinned against a reference device, and matter much less --
+ * they are only reachable now that the allowed-generation bitmap can select 2G
+ * or 3G at all.
+ */
+typedef struct {
+    gdouble dbm;
+    guint   quality;
+} SitQualityAnchor;
+
+static const SitQualityAnchor lte_rsrp_anchors[] = {
+    { -128.0, 6 }, { -118.0, 31 }, { -108.0, 56 }, { -98.0, 81 }, { -75.0, 100 },
+};
+static const SitQualityAnchor nr_ss_rsrp_anchors[] = {
+    { -110.0, 6 }, { -90.0, 31 }, { -80.0, 56 }, { -65.0, 81 }, { -55.0, 100 },
+};
+static const SitQualityAnchor gsm_rssi_anchors[] = {
+    { -107.0, 6 }, { -103.0, 31 }, { -97.0, 56 }, { -89.0, 81 }, { -75.0, 100 },
+};
+static const SitQualityAnchor wcdma_rscp_anchors[] = {
+    { -115.0, 6 }, { -105.0, 31 }, { -95.0, 56 }, { -85.0, 81 }, { -75.0, 100 },
+};
+
+static guint
+sit_interpolate_quality (gdouble                 dbm,
+                         const SitQualityAnchor *anchors,
+                         gsize                   n)
+{
+    gsize i;
+
+    if (dbm < anchors[0].dbm)
+        return 0;
+    if (dbm >= anchors[n - 1].dbm)
+        return anchors[n - 1].quality;
+
+    for (i = 1; i < n; i++) {
+        const SitQualityAnchor *lo = &anchors[i - 1];
+        const SitQualityAnchor *hi = &anchors[i];
+
+        if (dbm < hi->dbm)
+            return lo->quality +
+                   (guint) ((dbm - lo->dbm) * (hi->quality - lo->quality) / (hi->dbm - lo->dbm));
+    }
+    return anchors[n - 1].quality;
+}
+
 static gboolean
 sit_signal_get_quality (const MMSitSignal *signal,
                         guint             *out_quality)
 {
     gdouble value;
 
+    /* LTE first, and under EN-DC deliberately so: the anchor carries the
+     * connection, and its RSRP is what a handset bases its bars on. */
     if (sit_signal_get_lte_rsrp (signal, &value)) {
-        *out_quality = MM_RSRP_TO_QUALITY (value);
+        *out_quality = sit_interpolate_quality (value, lte_rsrp_anchors,
+                                                G_N_ELEMENTS (lte_rsrp_anchors));
         return TRUE;
     }
+    /* Standalone NR, or an EN-DC report that somehow lost its LTE block. */
+    if (signal->has_nr5g && signal->nr5g_ss_rsrp >= 44 && signal->nr5g_ss_rsrp <= 140) {
+        *out_quality = sit_interpolate_quality (-(gdouble) signal->nr5g_ss_rsrp,
+                                                nr_ss_rsrp_anchors,
+                                                G_N_ELEMENTS (nr_ss_rsrp_anchors));
+        return TRUE;
+    }
+    /* 2G: the CP reports a genuine narrowband RSSI as a 0-31 index. */
+    if (signal->has_gsm && signal->gsm_signal_strength >= 0 &&
+        signal->gsm_signal_strength <= 31) {
+        *out_quality = sit_interpolate_quality (-113.0 + (2.0 * signal->gsm_signal_strength),
+                                                gsm_rssi_anchors,
+                                                G_N_ELEMENTS (gsm_rssi_anchors));
+        return TRUE;
+    }
+    /* 3G: RSCP, carried as a positive dBm magnitude like the LTE fields. */
+    if (signal->has_wcdma && signal->wcdma_rscp >= 25 && signal->wcdma_rscp <= 120) {
+        *out_quality = sit_interpolate_quality (-(gdouble) signal->wcdma_rscp,
+                                                wcdma_rscp_anchors,
+                                                G_N_ELEMENTS (wcdma_rscp_anchors));
+        return TRUE;
+    }
+    /* Last resort: the LTE 0-31 index. Wideband, so MM's narrowband RSSI range
+     * flatters it -- only used when the CP gave no RSRP at all, which has not
+     * been seen on hardware. */
     if (sit_signal_get_lte_rssi (signal, &value)) {
         *out_quality = MM_RSSI_TO_QUALITY (value);
         return TRUE;
