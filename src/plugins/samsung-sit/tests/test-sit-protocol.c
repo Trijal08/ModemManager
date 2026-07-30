@@ -249,7 +249,8 @@ test_build_boot_config_requests (void)
     g_autoptr(GByteArray) request = NULL;
     g_autoptr(GError)     error = NULL;
 
-    when = g_date_time_new_local (2026, 6, 8, 15, 38, 12.0);
+    /* July: the CP numbers months from zero, so the frame carries 0x06. */
+    when = g_date_time_new_local (2026, 7, 8, 15, 38, 12.0);
     request = mm_sit_request_new_set_ap_system_time (0x42, when, &error);
     g_assert_no_error (error);
     assert_bytes (request, expected_time, sizeof (expected_time));
