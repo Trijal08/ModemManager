@@ -202,6 +202,19 @@ disconnect (MMBaseBearer        *bearer,
                                    (GAsyncReadyCallback) disconnect_ready, task);
 }
 
+gboolean
+mm_bearer_samsung_sit_get_cid (MMBearerSamsungSit *self,
+                               guint8             *out_cid)
+{
+    g_return_val_if_fail (MM_IS_BEARER_SAMSUNG_SIT (self), FALSE);
+    g_return_val_if_fail (out_cid != NULL, FALSE);
+
+    if (!self->priv->connected)
+        return FALSE;
+    *out_cid = self->priv->cid;
+    return TRUE;
+}
+
 MMBaseBearer *
 mm_bearer_samsung_sit_new (MMBroadbandModemSamsungSit *modem,
                            MMBearerProperties         *properties)
@@ -225,6 +238,25 @@ mm_bearer_samsung_sit_init (MMBearerSamsungSit *self)
                                               MMBearerSamsungSitPrivate);
 }
 
+/* The CP can drop a PDN on its own -- a network-initiated deactivation, or a RAT
+ * change forced by narrowing the allowed network types. Forget the context so a
+ * later connect is not refused as "already connected". */
+static void
+report_connection_status (MMBaseBearer             *bearer,
+                          MMBearerConnectionStatus  status,
+                          const GError             *connection_error)
+{
+    MMBearerSamsungSit *self = MM_BEARER_SAMSUNG_SIT (bearer);
+
+    if (status == MM_BEARER_CONNECTION_STATUS_DISCONNECTED) {
+        self->priv->cid = 0;
+        self->priv->connected = FALSE;
+    }
+
+    MM_BASE_BEARER_CLASS (mm_bearer_samsung_sit_parent_class)->report_connection_status (
+        bearer, status, connection_error);
+}
+
 static void
 mm_bearer_samsung_sit_class_init (MMBearerSamsungSitClass *klass)
 {
@@ -236,4 +268,5 @@ mm_bearer_samsung_sit_class_init (MMBearerSamsungSitClass *klass)
     bearer_class->connect_finish = connect_finish;
     bearer_class->disconnect = disconnect;
     bearer_class->disconnect_finish = disconnect_finish;
+    bearer_class->report_connection_status = report_connection_status;
 }

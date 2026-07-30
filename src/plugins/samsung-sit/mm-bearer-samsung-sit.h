@@ -29,4 +29,9 @@ GType         mm_bearer_samsung_sit_get_type (void);
 MMBaseBearer *mm_bearer_samsung_sit_new      (MMBroadbandModemSamsungSit *modem,
                                                MMBearerProperties         *properties);
 
+/* The CP's context id for the PDN this bearer carries, or 0 when not connected;
+ * used to match it against a data-call list the CP reports. */
+gboolean      mm_bearer_samsung_sit_get_cid  (MMBearerSamsungSit         *self,
+                                               guint8                     *out_cid);
+
 #endif /* MM_BEARER_SAMSUNG_SIT_H */
