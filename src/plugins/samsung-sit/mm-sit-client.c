@@ -21,6 +21,10 @@ struct _MMSitClientPrivate {
     MMSitCarrierSimInfo  carrier_sim_info;
     gboolean             boot_config_done;
     gboolean             radio_state_trusted;
+    /* AID of the subscription application, cached from the last SIM status so
+     * file reads can address it the way the downstream RIL does. */
+    guint8               sim_aid[MM_SIT_MAX_AID_LENGTH];
+    gsize                sim_aid_len;
 };
 
 G_DEFINE_TYPE (MMSitClient, mm_sit_client, G_TYPE_OBJECT)
@@ -424,9 +428,14 @@ get_sim_ready (MMSitClient *self,
 
     response = mm_sit_client_command_finish (self, res, &error);
     status = g_new0 (MMSitSimStatus, 1);
-    if (response && mm_sit_message_parse_sim_status (response, status, &error))
+    if (response && mm_sit_message_parse_sim_status (response, status, &error)) {
+        if (status->app_count) {
+            self->priv->sim_aid_len = MIN (status->apps[0].aid_len, MM_SIT_MAX_AID_LENGTH);
+            memcpy (self->priv->sim_aid, status->apps[0].aid, self->priv->sim_aid_len);
+        } else
+            self->priv->sim_aid_len = 0;
         g_task_return_pointer (task, status, g_free);
-    else {
+    } else {
         g_free (status);
         g_task_return_error (task, error);
     }
@@ -466,6 +475,239 @@ mm_sit_client_get_sim_status_finish (MMSitClient     *self,
     *out_status = *status;
     g_free (status);
     return TRUE;
+}
+
+/*****************************************************************************/
+/* Elementary-file reads
+ *
+ * One file read is two or more SIM_IO exchanges: GET_RESPONSE first, because
+ * only the card knows whether the file is transparent or made of records and
+ * how big it is, then READ_BINARY or READ_RECORD with those numbers. Callers
+ * get the whole file (records concatenated) plus its geometry, and decode the
+ * contents themselves -- that part is plain 3GPP, not SIT.
+ */
+
+/* P3 is one byte, so a transparent file longer than this is read in several
+ * passes with the offset in P1/P2. */
+#define SIM_IO_MAX_READ 255
+/* Backstop on a file that claims an implausible number of records; a truncated
+ * read is reported rather than passed off as the whole file. */
+#define SIM_IO_MAX_PASSES 32
+/* Absolute record addressing, the mode rild uses. */
+#define SIM_IO_RECORD_MODE_ABSOLUTE 4
+
+typedef struct {
+    MMSitEfInfo  info;
+    guint16      file_id;
+    guint16      path[MM_SIT_MAX_SIM_IO_PATH];
+    guint        path_len;
+    GByteArray  *data;
+    guint        passes;
+    /* Transparent: bytes still to read. Records: the next record number. */
+    guint        remaining;
+    guint        next_record;
+} ReadEfContext;
+
+static void
+read_ef_context_free (ReadEfContext *ctx)
+{
+    g_clear_pointer (&ctx->data, g_byte_array_unref);
+    g_slice_free (ReadEfContext, ctx);
+}
+
+static void read_ef_step (GTask *task);
+
+/* Turn a card refusal into an error naming the status word, which is the only
+ * place a SIM_IO failure shows up: the transport status stays zero. */
+static gboolean
+sim_io_check (MMSitClient              *self,
+              GAsyncResult             *res,
+              guint16                   file_id,
+              MMSitSimIoResponse       *out_response,
+              GError                  **error)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+
+    response = mm_sit_client_command_finish (self, res, error);
+    if (!response)
+        return FALSE;
+    if (!mm_sit_message_parse_sim_io (response, out_response, error))
+        return FALSE;
+    if (!out_response->success) {
+        g_set_error (error, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                     "the SIM refused a read of EF %04X (sw1 %02X sw2 %02X)",
+                     file_id, out_response->sw1, out_response->sw2);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void
+read_ef_data_ready (MMSitClient  *self,
+                    GAsyncResult *res,
+                    GTask        *task)
+{
+    ReadEfContext      *ctx = g_task_get_task_data (task);
+    MMSitSimIoResponse  response;
+    GError             *error = NULL;
+
+    if (!sim_io_check (self, res, ctx->file_id, &response, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    g_byte_array_append (ctx->data, response.data, response.data_len);
+    if (ctx->info.structure == MM_SIT_EF_TRANSPARENT)
+        ctx->remaining -= MIN (ctx->remaining, response.data_len);
+    else {
+        ctx->next_record++;
+        ctx->remaining--;
+    }
+    read_ef_step (task);
+}
+
+static void
+read_ef_info_ready (MMSitClient  *self,
+                    GAsyncResult *res,
+                    GTask        *task)
+{
+    ReadEfContext      *ctx = g_task_get_task_data (task);
+    MMSitSimIoResponse  response;
+    GError             *error = NULL;
+
+    if (!sim_io_check (self, res, ctx->file_id, &response, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    if (!mm_sit_file_control_parameters_parse (response.data, response.data_len,
+                                               &ctx->info, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    if (ctx->info.structure == MM_SIT_EF_TRANSPARENT)
+        ctx->remaining = ctx->info.size;
+    else {
+        ctx->remaining = ctx->info.record_count;
+        ctx->next_record = 1;
+        if (!ctx->info.record_len) {
+            g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                     "EF %04X reports records of no length",
+                                     ctx->file_id);
+            g_object_unref (task);
+            return;
+        }
+    }
+    read_ef_step (task);
+}
+
+static void
+read_ef_step (GTask *task)
+{
+    MMSitClient          *self = g_task_get_source_object (task);
+    ReadEfContext        *ctx = g_task_get_task_data (task);
+    g_autoptr(GByteArray) request = NULL;
+    g_autoptr(GError)     error = NULL;
+    MMSitSimIoRequest     sim_io = { 0 };
+    GAsyncReadyCallback   ready;
+
+    sim_io.file_id  = ctx->file_id;
+    sim_io.path_len = ctx->path_len;
+    memcpy (sim_io.path, ctx->path, sizeof (sim_io.path));
+
+    if (!ctx->passes) {
+        sim_io.command = MM_SIT_SIM_IO_GET_RESPONSE;
+        sim_io.p3      = 15;
+        ready = (GAsyncReadyCallback) read_ef_info_ready;
+    } else if (!ctx->remaining) {
+        g_task_return_pointer (task,
+                               g_byte_array_free_to_bytes (g_steal_pointer (&ctx->data)),
+                               (GDestroyNotify) g_bytes_unref);
+        g_object_unref (task);
+        return;
+    } else if (ctx->passes >= SIM_IO_MAX_PASSES) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "EF %04X needs more than %u reads; giving up with "
+                                 "%u of %u bytes",
+                                 ctx->file_id, SIM_IO_MAX_PASSES,
+                                 ctx->data->len, ctx->info.size);
+        g_object_unref (task);
+        return;
+    } else if (ctx->info.structure == MM_SIT_EF_TRANSPARENT) {
+        guint offset = ctx->data->len;
+
+        sim_io.command = MM_SIT_SIM_IO_READ_BINARY;
+        sim_io.p1      = (offset >> 8) & 0xff;
+        sim_io.p2      = offset & 0xff;
+        sim_io.p3      = MIN (ctx->remaining, SIM_IO_MAX_READ);
+        ready = (GAsyncReadyCallback) read_ef_data_ready;
+    } else {
+        sim_io.command = MM_SIT_SIM_IO_READ_RECORD;
+        sim_io.p1      = ctx->next_record;
+        sim_io.p2      = SIM_IO_RECORD_MODE_ABSOLUTE;
+        sim_io.p3      = ctx->info.record_len;
+        ready = (GAsyncReadyCallback) read_ef_data_ready;
+    }
+
+    ctx->passes++;
+    request = mm_sit_request_new_sim_io (next_token (self), &sim_io,
+                                         self->priv->sim_aid, self->priv->sim_aid_len,
+                                         &error);
+    if (!request) {
+        g_task_return_error (task, g_steal_pointer (&error));
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_command (self, request, 10, g_task_get_cancellable (task), ready, task);
+}
+
+void
+mm_sit_client_read_ef (MMSitClient        *self,
+                       guint16             file_id,
+                       const guint16      *path,
+                       guint               path_len,
+                       GCancellable       *cancellable,
+                       GAsyncReadyCallback callback,
+                       gpointer            user_data)
+{
+    ReadEfContext *ctx;
+    GTask         *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    if (path_len > MM_SIT_MAX_SIM_IO_PATH) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_INVALID_ARGS,
+                                 "SIM file path is too deep");
+        g_object_unref (task);
+        return;
+    }
+
+    ctx = g_slice_new0 (ReadEfContext);
+    ctx->file_id  = file_id;
+    ctx->path_len = path_len;
+    memcpy (ctx->path, path, path_len * sizeof (guint16));
+    ctx->data = g_byte_array_new ();
+    g_task_set_task_data (task, ctx, (GDestroyNotify) read_ef_context_free);
+
+    read_ef_step (task);
+}
+
+GBytes *
+mm_sit_client_read_ef_finish (MMSitClient  *self,
+                              GAsyncResult *res,
+                              MMSitEfInfo  *out_info,
+                              GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), NULL);
+
+    if (out_info) {
+        ReadEfContext *ctx = g_task_get_task_data (G_TASK (res));
+
+        *out_info = ctx->info;
+    }
+    return g_task_propagate_pointer (G_TASK (res), error);
 }
 
 static void

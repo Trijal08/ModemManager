@@ -180,6 +180,24 @@ typedef struct {
     guint8   data[MM_SIT_MAX_SIM_IO_DATA];
 } MMSitSimIoResponse;
 
+/* How an elementary file is organised. */
+typedef enum {
+    MM_SIT_EF_TRANSPARENT  = 0,
+    MM_SIT_EF_LINEAR_FIXED = 1,
+    MM_SIT_EF_CYCLIC       = 2,
+} MMSitEfStructure;
+
+/* What a GET_RESPONSE says about a file; 'record_len'/'record_count' are zero
+ * for a transparent one. */
+typedef struct {
+    MMSitEfStructure structure;
+    gboolean         has_file_id;
+    guint16          file_id;
+    guint16          size;
+    guint8           record_len;
+    guint8           record_count;
+} MMSitEfInfo;
+
 /* The registration responses' radio-technology numbering (distinct from the
  * scan's, see MM_SIT_SCAN_RAT_LTE). */
 #define MM_SIT_REGISTRATION_RAT_LTE 14
@@ -447,6 +465,12 @@ GByteArray *mm_sit_request_new_sim_io                 (guint16                to
  * the card's status word, because callers accept more than plain 0x9000. */
 gboolean mm_sit_message_parse_sim_io                  (const MMSitMessage    *message,
                                                        MMSitSimIoResponse    *out_response,
+                                                       GError               **error);
+/* Decode the File Control Parameters a GET_RESPONSE returned. Takes the SIM_IO
+ * response's data, not a SIT frame. */
+gboolean mm_sit_file_control_parameters_parse         (const guint8          *data,
+                                                       gsize                  data_len,
+                                                       MMSitEfInfo           *out_info,
                                                        GError               **error);
 gboolean mm_sit_message_parse_registration            (const MMSitMessage    *message,
                                                        MMSitRegistration     *out_registration,

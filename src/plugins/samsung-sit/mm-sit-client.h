@@ -74,6 +74,23 @@ gboolean mm_sit_client_get_sim_status_finish (MMSitClient        *self,
                                               MMSitSimStatus     *out_status,
                                               GError            **error);
 
+/* Read one elementary file: GET_RESPONSE for its shape, then as many
+ * READ_BINARY/READ_RECORD passes as it takes. 'path' is the chain of file ids
+ * from the MF down to the file's parent. The result is the whole file, records
+ * concatenated, with the geometry in *out_info so a caller can slice them; a
+ * card refusal comes back as an error naming the status word. */
+void     mm_sit_client_read_ef                    (MMSitClient        *self,
+                                                   guint16             file_id,
+                                                   const guint16      *path,
+                                                   guint               path_len,
+                                                   GCancellable       *cancellable,
+                                                   GAsyncReadyCallback callback,
+                                                   gpointer            user_data);
+GBytes  *mm_sit_client_read_ef_finish             (MMSitClient        *self,
+                                                   GAsyncResult       *res,
+                                                   MMSitEfInfo        *out_info,
+                                                   GError            **error);
+
 void     mm_sit_client_get_sim_slot_status        (MMSitClient        *self,
                                                    GCancellable       *cancellable,
                                                    GAsyncReadyCallback callback,

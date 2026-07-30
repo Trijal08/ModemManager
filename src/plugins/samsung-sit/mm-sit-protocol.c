@@ -624,6 +624,32 @@ mm_sit_request_new_sim_io (guint16                  token,
 }
 
 gboolean
+mm_sit_file_control_parameters_parse (const guint8 *data,
+                                      gsize         data_len,
+                                      MMSitEfInfo  *out_info,
+                                      GError      **error)
+{
+    SamsungSitFileControlParameters p;
+    SamsungSitStatus                status;
+
+    g_return_val_if_fail (out_info != NULL, FALSE);
+
+    status = samsung_sit_parse_file_control_parameters (data, data_len, &p);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+
+    out_info->structure    = (MMSitEfStructure) p.structure;
+    out_info->has_file_id  = p.has_file_id ? TRUE : FALSE;
+    out_info->file_id      = p.file_id;
+    out_info->size         = p.size;
+    out_info->record_len   = p.record_len;
+    out_info->record_count = p.record_count;
+    return TRUE;
+}
+
+gboolean
 mm_sit_message_parse_sim_io (const MMSitMessage *message,
                              MMSitSimIoResponse *out_response,
                              GError            **error)
