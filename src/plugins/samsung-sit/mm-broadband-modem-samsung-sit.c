@@ -1599,10 +1599,12 @@ scan_networks_ready (MMSitClient  *client,
                      GAsyncResult *res,
                      GTask        *task)
 {
-    g_autoptr(GArray) networks = NULL;
-    GError           *error = NULL;
-    GList            *results = NULL;
-    guint             i;
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    g_autoptr(GArray)           networks = NULL;
+    g_autoptr(GHashTable)       seen = NULL;
+    GError                     *error = NULL;
+    GList                      *results = NULL;
+    guint                       i;
 
     networks = mm_sit_client_scan_networks_finish (client, res, &error);
     if (!networks) {
@@ -1611,23 +1613,48 @@ scan_networks_ready (MMSitClient  *client,
         return;
     }
 
+    /* The CP lists one record per cell, so an operator repeats once per cell of
+     * it that was found; the D-Bus scan result wants one entry per operator. */
+    seen = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
     for (i = 0; i < networks->len; i++) {
         const MMSitScannedNetwork *network = &g_array_index (networks, MMSitScannedNetwork, i);
         MM3gppNetworkInfo         *info;
+        MMModemAccessTechnology    access_tech;
+        g_autofree gchar          *key = NULL;
 
         if (!network->plmn[0])
             continue;
+
+        access_tech = network->rat == MM_SIT_SCAN_RAT_LTE ?
+            MM_MODEM_ACCESS_TECHNOLOGY_LTE : MM_MODEM_ACCESS_TECHNOLOGY_UNKNOWN;
+        key = g_strdup_printf ("%s/%u", network->plmn, (guint) access_tech);
+
+        info = g_hash_table_lookup (seen, key);
+        if (info) {
+            /* Any cell of the serving operator makes the whole entry current. */
+            if (network->serving)
+                info->status = MM_MODEM_3GPP_NETWORK_AVAILABILITY_CURRENT;
+            continue;
+        }
 
         info = g_new0 (MM3gppNetworkInfo, 1);
         info->operator_code = g_strdup (network->plmn);
         info->status = network->serving ?
             MM_MODEM_3GPP_NETWORK_AVAILABILITY_CURRENT :
             MM_MODEM_3GPP_NETWORK_AVAILABILITY_AVAILABLE;
-        info->access_tech = network->rat == MM_SIT_SCAN_RAT_LTE ?
-            MM_MODEM_ACCESS_TECHNOLOGY_LTE : MM_MODEM_ACCESS_TECHNOLOGY_UNKNOWN;
+        info->access_tech = access_tech;
+        /* Scan records carry no operator names. The serving one is known from
+         * GET_OPERATOR, so at least that entry can be labelled. */
+        if (network->serving && self->priv->operator_name &&
+            g_strcmp0 (self->priv->operator_code, network->plmn) == 0)
+            info->operator_long = g_strdup (self->priv->operator_name);
+
+        g_hash_table_insert (seen, g_steal_pointer (&key), info);
         results = g_list_prepend (results, info);
     }
 
+    mm_obj_dbg (self, "network scan: %u cell record(s) -> %u operator(s)",
+                networks->len, g_hash_table_size (seen));
     g_task_return_pointer (task, g_list_reverse (results),
                            (GDestroyNotify) mm_3gpp_network_info_list_free);
     g_object_unref (task);
