@@ -148,9 +148,9 @@ send_next_part (GTask *task)
                             task);
 }
 
+/* No cancellable in this vfunc: the core's send has none. */
 static void
 sms_send (MMBaseSms          *self,
-          GCancellable       *cancellable,
           GAsyncReadyCallback callback,
           gpointer            user_data)
 {
@@ -161,7 +161,7 @@ sms_send (MMBaseSms          *self,
     GTask                  *task;
 
     priv = mm_sms_samsung_sit_get_instance_private (MM_SMS_SAMSUNG_SIT (self));
-    task = g_task_new (self, cancellable, callback, user_data);
+    task = g_task_new (self, NULL, callback, user_data);
 
     if (!priv->modem || !MM_IS_BROADBAND_MODEM_SAMSUNG_SIT (priv->modem)) {
         g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
