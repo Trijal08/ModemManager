@@ -314,7 +314,8 @@ test_parse_radio (void)
 static void
 test_parse_status_and_registration (void)
 {
-    guint8 sim_response[18] = { 1, 0, 0, 2, 18, 0, 1, 0 };
+    /* One application record plus the card block: 17 + 63 * 2. */
+    guint8 sim_response[143] = { 1, 0, 0, 2, 143, 0, 1, 0 };
     guint8 reg_response[86] = { 1, 0, 1, 7, 86, 0, 2, 0 };
     guint8 operator_response[119] = { 1, 0, 2, 7, 119, 0, 3, 0 };
     guint8 operator_indication[131] = { 2, 0, 0x0e, 7, 131, 0, 0, 0 };
@@ -324,18 +325,32 @@ test_parse_status_and_registration (void)
     MMSitRegistration       registration;
     MMSitOperator           operator_info;
 
-    sim_response[12] = 1;
-    sim_response[13] = 3;
-    sim_response[14] = 2;
-    sim_response[15] = 2;
-    sim_response[16] = 5;
-    sim_response[17] = 2;
+    sim_response[12] = 1;                            /* card present */
+    sim_response[13] = MM_SIT_PIN_STATE_DISABLED;
+    sim_response[14] = 1;                            /* one application */
+    sim_response[17] = 2;                            /* USIM */
+    sim_response[18] = 4;                            /* AID length */
+    sim_response[19] = 0xa0;
+    sim_response[72] = MM_SIT_PIN_STATE_DISABLED;    /* PIN1 state */
+    sim_response[74] = 3;                            /* PIN1 retries */
+    sim_response[75] = 10;                           /* PUK1 retries */
+    sim_response[76] = 3;                            /* PIN2 retries */
+    sim_response[77] = 10;                           /* PUK2 retries */
+    sim_response[79] = MM_SIT_APP_STATE_READY;
+    sim_response[114] = 3;                           /* ICCID length */
+    sim_response[115] = 0x98;
     message = mm_sit_message_parse (sim_response, sizeof (sim_response), &error);
     g_assert_no_error (error);
     g_assert_true (mm_sit_message_parse_sim_status (message, &sim, &error));
     g_assert_no_error (error);
     g_assert_true (sim.present);
-    g_assert_cmpuint (sim.app_count, ==, 2);
+    g_assert_cmpuint (sim.app_count, ==, 1);
+    g_assert_cmpuint (sim.apps[0].aid_len, ==, 4);
+    g_assert_cmpuint (sim.apps[0].aid[0], ==, 0xa0);
+    g_assert_cmpuint (sim.apps[0].pin1_retries, ==, 3);
+    g_assert_cmpuint (sim.apps[0].puk1_retries, ==, 10);
+    g_assert_cmpuint (sim.apps[0].app_state, ==, MM_SIT_APP_STATE_READY);
+    g_assert_cmpuint (sim.iccid_len, ==, 3);
 
     reg_response[12] = 1;
     reg_response[15] = 14;

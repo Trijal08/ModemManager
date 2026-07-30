@@ -556,6 +556,7 @@ mm_sit_message_parse_sim_status (const MMSitMessage *message,
     gsize               len;
     SamsungSitSimStatus s;
     SamsungSitStatus    status;
+    guint               i;
 
     g_return_val_if_fail (message != NULL, FALSE);
     g_return_val_if_fail (out_status != NULL, FALSE);
@@ -567,13 +568,87 @@ mm_sit_message_parse_sim_status (const MMSitMessage *message,
         return FALSE;
     }
 
+    memset (out_status, 0, sizeof (*out_status));
     out_status->card_state          = s.card_state;
     out_status->universal_pin_state = s.universal_pin_state;
-    out_status->gsm_umts_app_index  = s.gsm_umts_app_index;
-    out_status->cdma_app_index      = s.cdma_app_index;
-    out_status->ims_app_index       = s.ims_app_index;
-    out_status->app_count           = s.app_count;
     out_status->present             = s.present ? TRUE : FALSE;
+    out_status->app_count           = MIN (s.app_count, MM_SIT_MAX_SIM_APPS);
+    for (i = 0; i < out_status->app_count; i++) {
+        out_status->apps[i].app_type     = s.apps[i].app_type;
+        out_status->apps[i].aid_len      = MIN (s.apps[i].aid_len, MM_SIT_MAX_AID_LENGTH);
+        memcpy (out_status->apps[i].aid, s.apps[i].aid, out_status->apps[i].aid_len);
+        out_status->apps[i].pin1_state   = s.apps[i].pin1_state;
+        out_status->apps[i].pin2_state   = s.apps[i].pin2_state;
+        out_status->apps[i].pin1_retries = s.apps[i].pin1_retries;
+        out_status->apps[i].puk1_retries = s.apps[i].puk1_retries;
+        out_status->apps[i].pin2_retries = s.apps[i].pin2_retries;
+        out_status->apps[i].puk2_retries = s.apps[i].puk2_retries;
+        out_status->apps[i].app_state    = s.apps[i].app_state;
+    }
+    out_status->atr_len   = MIN (s.atr_len, MM_SIT_MAX_ATR_LENGTH);
+    memcpy (out_status->atr, s.atr, out_status->atr_len);
+    out_status->iccid_len = MIN (s.iccid_len, MM_SIT_MAX_ICCID_LENGTH);
+    memcpy (out_status->iccid, s.iccid, out_status->iccid_len);
+    out_status->eid_len   = MIN (s.eid_len, MM_SIT_MAX_EID_LENGTH);
+    memcpy (out_status->eid, s.eid, out_status->eid_len);
+    return TRUE;
+}
+
+GByteArray *
+mm_sit_request_new_sim_io (guint16                  token,
+                           const MMSitSimIoRequest *request,
+                           const guint8            *aid,
+                           gsize                    aid_len,
+                           GError                 **error)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    g_return_val_if_fail (request != NULL, NULL);
+
+    status = samsung_sit_build_sim_io (token,
+                                       request->command,
+                                       request->file_id,
+                                       request->path_len ? request->path : NULL,
+                                       request->path_len,
+                                       request->p1,
+                                       request->p2,
+                                       request->p3,
+                                       NULL, 0,
+                                       aid_len ? aid : NULL,
+                                       aid_len,
+                                       &buffer,
+                                       &len);
+    return finish_build (status, buffer, len, error);
+}
+
+gboolean
+mm_sit_message_parse_sim_io (const MMSitMessage *message,
+                             MMSitSimIoResponse *out_response,
+                             GError            **error)
+{
+    const guint8           *data;
+    gsize                   len;
+    SamsungSitSimIoResponse r;
+    SamsungSitStatus        status;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_response != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_sim_io (data, len, &r);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+
+    memset (out_response, 0, sizeof (*out_response));
+    out_response->sw1      = r.sw1;
+    out_response->sw2      = r.sw2;
+    out_response->success  = r.success ? TRUE : FALSE;
+    out_response->data_len = MIN (r.data_len, MM_SIT_MAX_SIM_IO_DATA);
+    memcpy (out_response->data, r.data, out_response->data_len);
     return TRUE;
 }
 

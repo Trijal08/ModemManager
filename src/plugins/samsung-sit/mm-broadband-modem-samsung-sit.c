@@ -862,17 +862,15 @@ load_access_technologies (MMIfaceModem       *iface,
 }
 
 /*****************************************************************************/
-/* SIM lock state
+/* SIM lock state and retry counters
  *
- * The generic AT path asked AT+CPIN? for this. The CP reports it natively in the
- * SIM-status response, in the byte holding the RIL PinState enum -- confirmed
- * against the capture where enabling a PIN, hot-swapping the card and verifying
- * it walked that byte through disabled -> not-verified -> verified, and pulling
- * the card reported unknown.
- *
- * Retry counters deliberately stay where they are for now: they are not in this
- * message, and the CP only reports remaining attempts in the response to an
- * actual PIN operation, so reading them without one needs the APDU path.
+ * The generic AT path asked AT+CPIN? for the lock state and then spent four
+ * AT+CSIM VERIFY/CHANGE APDUs with an empty body to read the retry counters.
+ * Both come out of the SIM-status response instead: the lock state from the
+ * byte holding the RIL PinState enum -- confirmed against the capture where
+ * enabling a PIN, hot-swapping the card and verifying it walked that byte
+ * through disabled -> not-verified -> verified, and pulling the card reported
+ * unknown -- and the counters from the first application's record.
  */
 static MMModemLock
 load_unlock_required_finish (MMIfaceModem *self,
@@ -956,6 +954,75 @@ load_unlock_required (MMIfaceModem       *iface,
     }
     mm_sit_client_get_sim_status (client, cancellable,
                                  (GAsyncReadyCallback) load_unlock_required_ready, task);
+}
+
+static MMUnlockRetries *
+load_unlock_retries_finish (MMIfaceModem *self,
+                            GAsyncResult *res,
+                            GError      **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+static void
+load_unlock_retries_ready (MMSitClient  *client,
+                           GAsyncResult *res,
+                           GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    g_autoptr(MMUnlockRetries)  retries = NULL;
+    MMSitSimStatus              status;
+    const MMSitSimApp          *app;
+    GError                     *error = NULL;
+
+    if (!mm_sit_client_get_sim_status_finish (client, res, &status, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    if (!status.app_count) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "the SIM reports no application to count retries for");
+        g_object_unref (task);
+        return;
+    }
+
+    /* The subscription application is the first record on every captured card
+     * (the second is PKCS-15, which has no subscriber PIN). */
+    app = &status.apps[0];
+    retries = mm_unlock_retries_new ();
+    mm_unlock_retries_set (retries, MM_MODEM_LOCK_SIM_PIN,  app->pin1_retries);
+    mm_unlock_retries_set (retries, MM_MODEM_LOCK_SIM_PUK,  app->puk1_retries);
+    mm_unlock_retries_set (retries, MM_MODEM_LOCK_SIM_PIN2, app->pin2_retries);
+    mm_unlock_retries_set (retries, MM_MODEM_LOCK_SIM_PUK2, app->puk2_retries);
+
+    mm_obj_dbg (self, "SIM unlock retries: pin %u, puk %u, pin2 %u, puk2 %u",
+                app->pin1_retries, app->puk1_retries,
+                app->pin2_retries, app->puk2_retries);
+    g_task_return_pointer (task, g_steal_pointer (&retries), g_object_unref);
+    g_object_unref (task);
+}
+
+static void
+load_unlock_retries (MMIfaceModem       *iface,
+                     GAsyncReadyCallback callback,
+                     gpointer            user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_sim_status (client, NULL,
+                                  (GAsyncReadyCallback) load_unlock_retries_ready, task);
 }
 
 /* Only the SIM PIN facility has a known code, so only that one is reported. The
@@ -2502,6 +2569,8 @@ iface_modem_init (MMIfaceModemInterface *iface)
     iface->modem_power_down_finish = modem_set_power_finish;
     iface->load_unlock_required = load_unlock_required;
     iface->load_unlock_required_finish = load_unlock_required_finish;
+    iface->load_unlock_retries = load_unlock_retries;
+    iface->load_unlock_retries_finish = load_unlock_retries_finish;
     iface->load_supported_modes = load_supported_modes;
     iface->load_supported_modes_finish = load_supported_modes_finish;
     iface->load_current_modes = load_current_modes;

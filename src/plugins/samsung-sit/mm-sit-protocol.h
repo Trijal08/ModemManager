@@ -15,6 +15,10 @@
 #define MM_SIT_MAX_ATR_LENGTH       33
 #define MM_SIT_MAX_ICCID_LENGTH     10
 #define MM_SIT_MAX_EID_LENGTH       16
+#define MM_SIT_MAX_SIM_APPS         8
+#define MM_SIT_MAX_AID_LENGTH       16
+#define MM_SIT_MAX_SIM_IO_DATA      512
+#define MM_SIT_MAX_SIM_IO_PATH      6
 
 typedef enum {
     MM_SIT_MESSAGE_TYPE_REQUEST    = 0,
@@ -105,15 +109,76 @@ typedef enum {
  * always answered unlocked, so which facility it is has not been pinned down. */
 #define MM_SIT_FACILITY_SIM_PIN 0x03
 
+/* Values of an application's state byte (the RIL AppState enum). */
+typedef enum {
+    MM_SIT_APP_STATE_UNKNOWN            = 0,
+    MM_SIT_APP_STATE_DETECTED           = 1,
+    MM_SIT_APP_STATE_PIN                = 2,
+    MM_SIT_APP_STATE_PUK                = 3,
+    MM_SIT_APP_STATE_SUBSCRIPTION_PERSO = 4,
+    MM_SIT_APP_STATE_READY              = 5,
+} MMSitAppState;
+
+/* One application on the card. The PIN/PUK retry counters are here, which is
+ * how they can be read without spending an attempt. */
 typedef struct {
-    guint8   card_state;
-    guint8   universal_pin_state;
-    guint8   gsm_umts_app_index;
-    guint8   cdma_app_index;
-    guint8   ims_app_index;
-    guint8   app_count;
-    gboolean present;
+    guint8 app_type;
+    guint8 aid_len;
+    guint8 aid[MM_SIT_MAX_AID_LENGTH];
+    guint8 pin1_state;
+    guint8 pin2_state;
+    guint8 pin1_retries;
+    guint8 puk1_retries;
+    guint8 pin2_retries;
+    guint8 puk2_retries;
+    guint8 app_state;
+} MMSitSimApp;
+
+typedef struct {
+    guint8      card_state;
+    guint8      universal_pin_state;
+    gboolean    present;
+    guint8      app_count;
+    MMSitSimApp apps[MM_SIT_MAX_SIM_APPS];
+    guint8      atr_len;
+    guint8      atr[MM_SIT_MAX_ATR_LENGTH];
+    guint8      iccid_len;
+    guint8      iccid[MM_SIT_MAX_ICCID_LENGTH];
+    guint8      eid_len;
+    guint8      eid[MM_SIT_MAX_EID_LENGTH];
 } MMSitSimStatus;
+
+/* APDU instruction bytes a SIM_IO request takes (TS 27.007 +CRSM). */
+typedef enum {
+    MM_SIT_SIM_IO_READ_BINARY   = 0xb0,
+    MM_SIT_SIM_IO_READ_RECORD   = 0xb2,
+    MM_SIT_SIM_IO_GET_RESPONSE  = 0xc0,
+    MM_SIT_SIM_IO_UPDATE_BINARY = 0xd6,
+    MM_SIT_SIM_IO_UPDATE_RECORD = 0xdc,
+    MM_SIT_SIM_IO_STATUS        = 0xf2,
+} MMSitSimIoCommand;
+
+/* One elementary-file access, the fields of +CRSM. 'path' is the chain of file
+ * ids from the MF down to the file's parent and may be empty. */
+typedef struct {
+    guint8   command;
+    guint16  file_id;
+    guint16  path[MM_SIT_MAX_SIM_IO_PATH];
+    guint    path_len;
+    guint8   p1;
+    guint8   p2;
+    guint8   p3;
+} MMSitSimIoRequest;
+
+/* The card's answer. 'success' only reflects the status word: a refusal comes
+ * back here, not as a GError, because the caller may accept it. */
+typedef struct {
+    guint8   sw1;
+    guint8   sw2;
+    gboolean success;
+    guint16  data_len;
+    guint8   data[MM_SIT_MAX_SIM_IO_DATA];
+} MMSitSimIoResponse;
 
 /* The registration responses' radio-technology numbering (distinct from the
  * scan's, see MM_SIT_SCAN_RAT_LTE). */
@@ -370,6 +435,18 @@ gboolean mm_sit_message_parse_radio_state             (const MMSitMessage    *me
                                                        GError               **error);
 gboolean mm_sit_message_parse_sim_status              (const MMSitMessage    *message,
                                                        MMSitSimStatus        *out_status,
+                                                       GError               **error);
+/* One elementary-file access. 'aid' selects the application and may be NULL:
+ * the CP resolves the file without it, but rild always sends it. */
+GByteArray *mm_sit_request_new_sim_io                 (guint16                token,
+                                                       const MMSitSimIoRequest *request,
+                                                       const guint8          *aid,
+                                                       gsize                  aid_len,
+                                                       GError               **error);
+/* A card refusal is not an error here: it comes back as success == FALSE with
+ * the card's status word, because callers accept more than plain 0x9000. */
+gboolean mm_sit_message_parse_sim_io                  (const MMSitMessage    *message,
+                                                       MMSitSimIoResponse    *out_response,
                                                        GError               **error);
 gboolean mm_sit_message_parse_registration            (const MMSitMessage    *message,
                                                        MMSitRegistration     *out_registration,
