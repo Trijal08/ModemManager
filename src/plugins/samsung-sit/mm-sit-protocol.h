@@ -47,8 +47,13 @@ typedef enum {
     MM_SIT_MESSAGE_GET_VOICE_REGISTRATION      = 0x0700,
     MM_SIT_MESSAGE_GET_DATA_REGISTRATION       = 0x0701,
     MM_SIT_MESSAGE_GET_OPERATOR                = 0x0702,
+    MM_SIT_MESSAGE_QUERY_NETWORK_SELECTION_MODE = 0x0703,
+    MM_SIT_MESSAGE_SET_NETWORK_SELECTION_AUTO   = 0x0704,
+    MM_SIT_MESSAGE_SET_NETWORK_SELECTION_MANUAL = 0x0705,
     MM_SIT_MESSAGE_GET_CELL_INFO_LIST          = 0x070c,
     MM_SIT_MESSAGE_SERVING_NETWORK             = 0x070e,
+    MM_SIT_MESSAGE_NETWORK_SCAN                = 0x0734,
+    MM_SIT_MESSAGE_NET_SCAN_RESULT             = 0x0736,
     MM_SIT_MESSAGE_SET_PREFERRED_DATA_MODEM    = 0x0740,
     MM_SIT_MESSAGE_SET_RADIO_POWER             = 0x0800,
     MM_SIT_MESSAGE_GET_RADIO_POWER             = 0x0801,
@@ -92,6 +97,10 @@ typedef struct {
     gboolean present;
 } MMSitSimStatus;
 
+/* The registration responses' radio-technology numbering (distinct from the
+ * scan's, see MM_SIT_SCAN_RAT_LTE). */
+#define MM_SIT_REGISTRATION_RAT_LTE 14
+
 typedef struct {
     guint8   state;
     guint8   radio_technology;
@@ -103,6 +112,17 @@ typedef struct {
     gchar    operator_short[33];
     gchar    operator_long[65];
 } MMSitOperator;
+
+/* One PLMN of a NET_SCAN_RESULT (0x0736) batch. 'rat' is the scan's own radio
+ * technology numbering, not the one the registration responses use; only
+ * MM_SIT_SCAN_RAT_LTE is seen in the capture corpus. */
+#define MM_SIT_SCAN_RAT_LTE 2
+
+typedef struct {
+    gchar    plmn[7];
+    gboolean serving;
+    guint8   rat;
+} MMSitScannedNetwork;
 
 typedef struct {
     guint8   version;
@@ -275,6 +295,15 @@ GByteArray *mm_sit_request_new_set_logical_slot_mapping
                                                        const MMSitLogicalSlotMapping *mappings,
                                                        guint                  mapping_count,
                                                        GError               **error);
+GByteArray *mm_sit_request_new_set_network_selection_auto
+                                                      (guint16                token);
+GByteArray *mm_sit_request_new_set_network_selection_manual
+                                                      (guint16                token,
+                                                       const gchar           *plmn,
+                                                       guint8                 rat,
+                                                       GError               **error);
+GByteArray *mm_sit_request_new_start_network_scan      (guint16                token);
+GByteArray *mm_sit_request_new_stop_network_scan       (guint16                token);
 
 gboolean mm_sit_message_parse_radio_state             (const MMSitMessage    *message,
                                                        MMSitRadioState       *out_state,
@@ -303,6 +332,19 @@ gboolean mm_sit_message_parse_data_call               (const MMSitMessage    *me
 /* Parses every PDN of a data-call message into a GArray of MMSitDataCall. */
 gboolean mm_sit_message_parse_data_call_list          (const MMSitMessage    *message,
                                                        GArray               **out_calls,
+                                                       GError               **error);
+
+/* The outcome of a SET_NETWORK_SELECTION_MANUAL ack: 0 on success. The transport
+ * status is zero even when the selection failed, so this is the only signal. */
+gboolean mm_sit_message_parse_network_selection_manual_result
+                                                      (const MMSitMessage    *message,
+                                                       guint16               *out_result,
+                                                       GError               **error);
+/* Fills *out_networks with a GArray of MMSitScannedNetwork (may be empty, never
+ * NULL on success); the caller owns it. Each NET_SCAN_RESULT batch repeats every
+ * network found so far, so callers should replace rather than accumulate. */
+gboolean mm_sit_message_parse_net_scan_result         (const MMSitMessage    *message,
+                                                       GArray               **out_networks,
                                                        GError               **error);
 
 /* Fills *out_calls with a GArray of MMSitCall (may be empty, never NULL on

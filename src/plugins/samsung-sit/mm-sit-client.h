@@ -102,6 +102,48 @@ gboolean mm_sit_client_get_registration_finish (MMSitClient        *self,
                                                 MMSitRegistration  *out_registration,
                                                 GError            **error);
 
+/* CS-domain counterpart of mm_sit_client_get_registration(); without it the core
+ * has no circuit-switched registration state at all. */
+void     mm_sit_client_get_voice_registration        (MMSitClient        *self,
+                                                      GCancellable       *cancellable,
+                                                      GAsyncReadyCallback callback,
+                                                      gpointer            user_data);
+gboolean mm_sit_client_get_voice_registration_finish (MMSitClient        *self,
+                                                      GAsyncResult       *res,
+                                                      MMSitRegistration  *out_registration,
+                                                      GError            **error);
+
+/* Ask the CP to search for a network. Nothing else re-triggers a search once it
+ * has fallen out of service. */
+void     mm_sit_client_set_network_selection_auto        (MMSitClient        *self,
+                                                          GCancellable       *cancellable,
+                                                          GAsyncReadyCallback callback,
+                                                          gpointer            user_data);
+gboolean mm_sit_client_set_network_selection_auto_finish (MMSitClient        *self,
+                                                          GAsyncResult       *res,
+                                                          GError            **error);
+
+void     mm_sit_client_set_network_selection_manual        (MMSitClient        *self,
+                                                            const gchar        *plmn,
+                                                            guint8              rat,
+                                                            GCancellable       *cancellable,
+                                                            GAsyncReadyCallback callback,
+                                                            gpointer            user_data);
+gboolean mm_sit_client_set_network_selection_manual_finish (MMSitClient        *self,
+                                                            GAsyncResult       *res,
+                                                            GError            **error);
+
+/* Runs a PLMN search to completion and returns a GArray of MMSitScannedNetwork;
+ * the CP has no "search done" message, so this settles once its result batches
+ * stop arriving. */
+void    mm_sit_client_scan_networks        (MMSitClient        *self,
+                                            GCancellable       *cancellable,
+                                            GAsyncReadyCallback callback,
+                                            gpointer            user_data);
+GArray *mm_sit_client_scan_networks_finish (MMSitClient        *self,
+                                            GAsyncResult       *res,
+                                            GError            **error);
+
 void     mm_sit_client_get_operator        (MMSitClient        *self,
                                             GCancellable       *cancellable,
                                             GAsyncReadyCallback callback,

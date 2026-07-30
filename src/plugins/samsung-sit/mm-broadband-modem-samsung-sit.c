@@ -111,9 +111,8 @@ sit_signal_get_quality (const MMSitSignal *signal,
     return FALSE;
 }
 
-static void
-update_registration (MMBroadbandModemSamsungSit *self,
-                     const MMSitRegistration    *registration)
+static MMModem3gppRegistrationState
+sit_registration_state (const MMSitRegistration *registration)
 {
     MMModem3gppRegistrationState state;
 
@@ -147,9 +146,32 @@ update_registration (MMBroadbandModemSamsungSit *self,
         break;
     }
 
+    return state;
+}
+
+/* 0x0701 covers the packet-switched domain only. The three states move together
+ * because the CP reports one packet-service registration for whichever RAT it is
+ * on, rather than separate GPRS/EPS/5GS views. */
+static void
+update_ps_registration (MMBroadbandModemSamsungSit *self,
+                        const MMSitRegistration    *registration)
+{
+    MMModem3gppRegistrationState state = sit_registration_state (registration);
+
     mm_iface_modem_3gpp_update_ps_registration_state (MM_IFACE_MODEM_3GPP (self), state, TRUE);
     mm_iface_modem_3gpp_update_eps_registration_state (MM_IFACE_MODEM_3GPP (self), state, TRUE);
     mm_iface_modem_3gpp_update_5gs_registration_state (MM_IFACE_MODEM_3GPP (self), state, TRUE);
+    mm_iface_modem_3gpp_apply_deferred_registration_state (MM_IFACE_MODEM_3GPP (self));
+}
+
+/* 0x0700, the CS-domain counterpart. */
+static void
+update_cs_registration (MMBroadbandModemSamsungSit *self,
+                        const MMSitRegistration    *registration)
+{
+    mm_iface_modem_3gpp_update_cs_registration_state (MM_IFACE_MODEM_3GPP (self),
+                                                      sit_registration_state (registration),
+                                                      TRUE);
     mm_iface_modem_3gpp_apply_deferred_registration_state (MM_IFACE_MODEM_3GPP (self));
 }
 
@@ -1301,6 +1323,26 @@ registration_checks_finish (MMIfaceModem3gpp  *self,
 }
 
 static void
+voice_registration_ready (MMSitClient  *client,
+                          GAsyncResult *res,
+                          GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    MMSitRegistration           registration;
+    g_autoptr(GError)           error = NULL;
+
+    /* A CS query that fails is not fatal: the packet-switched state has already
+     * been applied and is what the core needs to connect. */
+    if (mm_sit_client_get_voice_registration_finish (client, res, &registration, &error))
+        update_cs_registration (self, &registration);
+    else
+        mm_obj_dbg (self, "CS registration check failed: %s", error->message);
+
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
 registration_ready (MMSitClient *client,
                     GAsyncResult *res,
                     GTask *task)
@@ -1309,13 +1351,20 @@ registration_ready (MMSitClient *client,
     MMSitRegistration           registration;
     GError                     *error = NULL;
 
-    if (!mm_sit_client_get_registration_finish (client, res, &registration, &error))
+    if (!mm_sit_client_get_registration_finish (client, res, &registration, &error)) {
         g_task_return_error (task, error);
-    else {
-        update_registration (self, &registration);
-        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
     }
-    g_object_unref (task);
+    update_ps_registration (self, &registration);
+
+    if (!GPOINTER_TO_UINT (g_task_get_task_data (task))) {
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_voice_registration (client, NULL,
+                                          (GAsyncReadyCallback) voice_registration_ready, task);
 }
 
 static void
@@ -1339,6 +1388,7 @@ registration_checks (MMIfaceModem3gpp   *iface,
         g_object_unref (task);
         return;
     }
+    g_task_set_task_data (task, GUINT_TO_POINTER (is_cs_supported), NULL);
     mm_sit_client_get_registration (client, NULL,
                                     (GAsyncReadyCallback) registration_ready, task);
 }
@@ -1468,21 +1518,143 @@ register_in_network_finish (MMIfaceModem3gpp  *self,
 }
 
 static void
+register_in_network_ready (MMSitClient  *client,
+                           GAsyncResult *res,
+                           GTask        *task)
+{
+    gboolean manual = GPOINTER_TO_UINT (g_task_get_task_data (task));
+    GError  *error = NULL;
+    gboolean ok;
+
+    ok = manual ?
+        mm_sit_client_set_network_selection_manual_finish (client, res, &error) :
+        mm_sit_client_set_network_selection_auto_finish (client, res, &error);
+    if (!ok)
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+/*
+ * The CP only starts an automatic search of its own accord when radio power is
+ * first enabled. If it later drops out of service -- a failed reselection, an
+ * attach reject -- it stays put, and this used to return success without sending
+ * anything, so nothing ever asked it to look again and the modem stayed
+ * unregistered until it was power-cycled. Drive the search explicitly instead,
+ * the way downstream does.
+ *
+ * Manual selection needs the RAT to try alongside the PLMN; the currently
+ * reported access technology is the best available guess, and LTE is the
+ * fallback since it is the only RAT this modem is configured for.
+ */
+static void
 register_in_network (MMIfaceModem3gpp   *self,
                      const gchar        *operator_id,
                      GCancellable       *cancellable,
                      GAsyncReadyCallback callback,
                      gpointer            user_data)
 {
-    GTask *task = g_task_new (self, cancellable, callback, user_data);
+    MMSitClient *client;
+    GError      *error = NULL;
+    GTask       *task;
+    gboolean     manual;
 
-    if (operator_id && operator_id[0])
-        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_UNSUPPORTED,
-                                 "Manual network selection is not implemented by the SIT client");
-    else
-        /* The Shannon modem starts automatic selection when radio power is enabled. */
-        g_task_return_boolean (task, TRUE);
+    task = g_task_new (self, cancellable, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (MM_BROADBAND_MODEM_SAMSUNG_SIT (self),
+                                                        &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    manual = (operator_id && operator_id[0]);
+    g_task_set_task_data (task, GUINT_TO_POINTER (manual), NULL);
+
+    if (manual) {
+        mm_obj_dbg (self, "selecting network '%s' manually", operator_id);
+        mm_sit_client_set_network_selection_manual (client, operator_id,
+                                                   MM_SIT_REGISTRATION_RAT_LTE, cancellable,
+                                                   (GAsyncReadyCallback) register_in_network_ready,
+                                                   task);
+    } else {
+        mm_obj_dbg (self, "asking the CP to select a network automatically");
+        mm_sit_client_set_network_selection_auto (client, cancellable,
+                                                 (GAsyncReadyCallback) register_in_network_ready,
+                                                 task);
+    }
+}
+
+static GList *
+scan_networks_finish (MMIfaceModem3gpp *self,
+                      GAsyncResult     *res,
+                      GError          **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+static void
+scan_networks_ready (MMSitClient  *client,
+                     GAsyncResult *res,
+                     GTask        *task)
+{
+    g_autoptr(GArray) networks = NULL;
+    GError           *error = NULL;
+    GList            *results = NULL;
+    guint             i;
+
+    networks = mm_sit_client_scan_networks_finish (client, res, &error);
+    if (!networks) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    for (i = 0; i < networks->len; i++) {
+        const MMSitScannedNetwork *network = &g_array_index (networks, MMSitScannedNetwork, i);
+        MM3gppNetworkInfo         *info;
+
+        if (!network->plmn[0])
+            continue;
+
+        info = g_new0 (MM3gppNetworkInfo, 1);
+        info->operator_code = g_strdup (network->plmn);
+        info->status = network->serving ?
+            MM_MODEM_3GPP_NETWORK_AVAILABILITY_CURRENT :
+            MM_MODEM_3GPP_NETWORK_AVAILABILITY_AVAILABLE;
+        info->access_tech = network->rat == MM_SIT_SCAN_RAT_LTE ?
+            MM_MODEM_ACCESS_TECHNOLOGY_LTE : MM_MODEM_ACCESS_TECHNOLOGY_UNKNOWN;
+        results = g_list_prepend (results, info);
+    }
+
+    g_task_return_pointer (task, g_list_reverse (results),
+                           (GDestroyNotify) mm_3gpp_network_info_list_free);
     g_object_unref (task);
+}
+
+/* The CP scans natively, so nothing here needs the AT port. Results carry the
+ * PLMN and which one the CP is camped on, but no operator names -- the core is
+ * fine with that and fills them in from its own PLMN database. */
+static void
+scan_networks (MMIfaceModem3gpp   *self,
+               GAsyncReadyCallback callback,
+               gpointer            user_data)
+{
+    MMSitClient *client;
+    GError      *error = NULL;
+    GTask       *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (MM_BROADBAND_MODEM_SAMSUNG_SIT (self),
+                                                        &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_scan_networks (client, NULL,
+                                 (GAsyncReadyCallback) scan_networks_ready, task);
 }
 
 static void
@@ -1563,6 +1735,56 @@ clear_unsolicited_events (MMIfaceModem3gpp   *self,
     g_object_unref (task);
 }
 
+/*
+ * Registration state comes from SIT alone. Leaving the generic AT handlers in
+ * place had them enable +CGREG/+CEREG/+C5GREG on the AT port and feed whatever
+ * arrived straight into the core, in parallel with -- and overriding -- the SIT
+ * path. This CP delivers those URCs in bursts of several values at once with
+ * byte-swapped LAC/TAC fields, so the last line of a burst won, and a burst
+ * ending in "registration denied" left the core stuck in a state it treats as
+ * terminal even though the CP went on to camp normally. Never subscribe to them.
+ */
+static void
+enable_registration_events_noop (MMIfaceModem3gpp   *self,
+                          gboolean            cs_supported,
+                          gboolean            ps_supported,
+                          gboolean            eps_supported,
+                          GAsyncReadyCallback callback,
+                          gpointer            user_data)
+{
+    GTask *task = g_task_new (self, NULL, callback, user_data);
+
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static gboolean
+enable_registration_events_noop_finish (MMIfaceModem3gpp  *self,
+                                 GAsyncResult      *res,
+                                 GError           **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+setup_registration_events_noop (MMIfaceModem3gpp   *self,
+                                GAsyncReadyCallback callback,
+                                gpointer            user_data)
+{
+    GTask *task = g_task_new (self, NULL, callback, user_data);
+
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static gboolean
+setup_registration_events_noop_finish (MMIfaceModem3gpp  *self,
+                                       GAsyncResult      *res,
+                                       GError           **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
 static gboolean
 clear_unsolicited_events_finish (MMIfaceModem3gpp  *self,
                                  GAsyncResult      *res,
@@ -1601,6 +1823,17 @@ iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface)
     iface->run_registration_checks_finish = registration_checks_finish;
     iface->register_in_network = register_in_network;
     iface->register_in_network_finish = register_in_network_finish;
+    iface->scan_networks = scan_networks;
+    iface->scan_networks_finish = scan_networks_finish;
+    /* SIT owns registration state; never subscribe to the AT +CxREG URCs. */
+    iface->setup_unsolicited_registration_events = setup_registration_events_noop;
+    iface->setup_unsolicited_registration_events_finish = setup_registration_events_noop_finish;
+    iface->cleanup_unsolicited_registration_events = setup_registration_events_noop;
+    iface->cleanup_unsolicited_registration_events_finish = setup_registration_events_noop_finish;
+    iface->enable_unsolicited_registration_events = enable_registration_events_noop;
+    iface->enable_unsolicited_registration_events_finish = enable_registration_events_noop_finish;
+    iface->disable_unsolicited_registration_events = enable_registration_events_noop;
+    iface->disable_unsolicited_registration_events_finish = enable_registration_events_noop_finish;
     iface->load_operator_code = load_operator_code;
     iface->load_operator_code_finish = load_operator_code_finish;
     iface->load_operator_name = load_operator_name;

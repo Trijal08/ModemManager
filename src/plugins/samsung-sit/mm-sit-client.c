@@ -674,6 +674,37 @@ mm_sit_client_get_registration_finish (MMSitClient       *self,
     return TRUE;
 }
 
+/*
+ * Registration is only reported for the packet-switched domain by 0x0701. The CS
+ * domain has its own query, and without it the core consolidates a permanent
+ * 'unknown' for circuit-switched service. The two responses share a layout apart
+ * from the radio-technology byte, which the codec accounts for.
+ */
+void
+mm_sit_client_get_voice_registration (MMSitClient        *self,
+                                      GCancellable       *cancellable,
+                                      GAsyncReadyCallback callback,
+                                      gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_VOICE_REGISTRATION,
+                                        next_token (self));
+    mm_sit_client_command (self, request, 5, cancellable,
+                           (GAsyncReadyCallback) get_registration_ready, task);
+}
+
+gboolean
+mm_sit_client_get_voice_registration_finish (MMSitClient       *self,
+                                             GAsyncResult      *res,
+                                             MMSitRegistration *out_registration,
+                                             GError           **error)
+{
+    return mm_sit_client_get_registration_finish (self, res, out_registration, error);
+}
+
 static void
 get_operator_ready (MMSitClient *self,
                     GAsyncResult *res,
@@ -1480,6 +1511,279 @@ mm_sit_client_disconnect_data_finish (MMSitClient  *self,
 {
     g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
     return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+/*
+ * PLMN selection. Automatic selection is what recovers a modem that has fallen
+ * out of service: the CP only starts searching on its own when radio power is
+ * first enabled, so without this nothing re-triggers a search and the modem
+ * stays unregistered indefinitely. The ack is empty; the outcome shows up as a
+ * SERVING_NETWORK indication once the CP finds a network.
+ */
+void
+mm_sit_client_set_network_selection_auto (MMSitClient        *self,
+                                          GCancellable       *cancellable,
+                                          GAsyncReadyCallback callback,
+                                          gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+
+    request = mm_sit_request_new_set_network_selection_auto (next_token (self));
+    run_checked_command (self, request, 10, cancellable, callback, user_data);
+}
+
+gboolean
+mm_sit_client_set_network_selection_auto_finish (MMSitClient  *self,
+                                                 GAsyncResult *res,
+                                                 GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+set_network_selection_manual_ready (MMSitClient  *self,
+                                    GAsyncResult *res,
+                                    GTask        *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    GError                 *error = NULL;
+    guint16                 result = 0;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (!response || !message_check_success (response, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    /* The transport status is zero even for a refused PLMN, so the ack's own
+     * result word is the only signal that the selection did not take. */
+    if (!mm_sit_message_parse_network_selection_manual_result (response, &result, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    if (result != 0) {
+        g_task_return_new_error (task, MM_MOBILE_EQUIPMENT_ERROR,
+                                 MM_MOBILE_EQUIPMENT_ERROR_NO_NETWORK,
+                                 "CP refused the manual network selection (result %u)",
+                                 result);
+        g_object_unref (task);
+        return;
+    }
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+/*
+ * Manual selection. Downstream stops any running scan first, then asks for the
+ * PLMN on a specific RAT; a refused network is answered after a long delay (over
+ * a minute in the capture), so the timeout here is generous.
+ */
+void
+mm_sit_client_set_network_selection_manual (MMSitClient        *self,
+                                            const gchar        *plmn,
+                                            guint8              rat,
+                                            GCancellable       *cancellable,
+                                            GAsyncReadyCallback callback,
+                                            gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    g_autoptr(GError)     error = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_set_network_selection_manual (next_token (self), plmn,
+                                                              rat, &error);
+    if (!request) {
+        g_task_return_error (task, g_steal_pointer (&error));
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_command (self, request, 180, cancellable,
+                           (GAsyncReadyCallback) set_network_selection_manual_ready, task);
+}
+
+gboolean
+mm_sit_client_set_network_selection_manual_finish (MMSitClient  *self,
+                                                   GAsyncResult *res,
+                                                   GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+/*
+ * Network scan. The CP has no "search complete" message: it pushes a
+ * NET_SCAN_RESULT batch every few seconds, each one repeating every network
+ * found so far, until it is told to stop. In the captures the batches arrive
+ * 3-6 s apart and downstream stops the scan a few seconds after the last one, so
+ * the scan is treated as finished once a batch has gone unanswered for
+ * SCAN_QUIET_SECONDS, with SCAN_MAX_SECONDS as the hard stop.
+ */
+#define SCAN_QUIET_SECONDS 10
+#define SCAN_MAX_SECONDS   70
+
+typedef struct {
+    GArray *networks;
+    gulong  indication_id;
+    guint   quiet_id;
+    guint   deadline_id;
+} ScanContext;
+
+static void
+scan_context_free (ScanContext *ctx)
+{
+    if (ctx->quiet_id)
+        g_source_remove (ctx->quiet_id);
+    if (ctx->deadline_id)
+        g_source_remove (ctx->deadline_id);
+    if (ctx->networks)
+        g_array_unref (ctx->networks);
+    g_free (ctx);
+}
+
+static void
+scan_stop_ready (MMSitClient  *self,
+                 GAsyncResult *res,
+                 gpointer      user_data)
+{
+    g_autoptr(GError) error = NULL;
+
+    if (!g_task_propagate_boolean (G_TASK (res), &error))
+        mm_obj_dbg (self->priv->port, "network scan: stop request failed: %s", error->message);
+}
+
+/* Detach from the indication stream and stop the CP's search, then hand the
+ * caller whatever the last batch held. */
+static void
+scan_complete (GTask *task)
+{
+    MMSitClient          *self = g_task_get_source_object (task);
+    ScanContext          *ctx = g_task_get_task_data (task);
+    g_autoptr(GByteArray) request = NULL;
+
+    if (ctx->indication_id) {
+        g_signal_handler_disconnect (self, ctx->indication_id);
+        ctx->indication_id = 0;
+    }
+    if (ctx->quiet_id) {
+        g_source_remove (ctx->quiet_id);
+        ctx->quiet_id = 0;
+    }
+    if (ctx->deadline_id) {
+        g_source_remove (ctx->deadline_id);
+        ctx->deadline_id = 0;
+    }
+
+    request = mm_sit_request_new_stop_network_scan (next_token (self));
+    run_checked_command (self, request, 10, NULL,
+                         (GAsyncReadyCallback) scan_stop_ready, NULL);
+
+    if (ctx->networks) {
+        g_task_return_pointer (task, g_steal_pointer (&ctx->networks),
+                               (GDestroyNotify) g_array_unref);
+    } else {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "CP reported no networks before the scan timed out");
+    }
+    g_object_unref (task);
+}
+
+static gboolean
+scan_quiet_elapsed (GTask *task)
+{
+    ScanContext *ctx = g_task_get_task_data (task);
+
+    ctx->quiet_id = 0;
+    scan_complete (task);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean
+scan_deadline_elapsed (GTask *task)
+{
+    ScanContext *ctx = g_task_get_task_data (task);
+
+    ctx->deadline_id = 0;
+    scan_complete (task);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+scan_indication (MMSitClient        *self,
+                 const MMSitMessage *message,
+                 GTask              *task)
+{
+    ScanContext       *ctx = g_task_get_task_data (task);
+    GArray            *networks = NULL;
+    g_autoptr(GError)  error = NULL;
+
+    if (message->id != MM_SIT_MESSAGE_NET_SCAN_RESULT)
+        return;
+
+    if (!mm_sit_message_parse_net_scan_result (message, &networks, &error)) {
+        mm_obj_dbg (self->priv->port, "network scan: unparsable result batch: %s",
+                    error->message);
+        return;
+    }
+
+    mm_obj_dbg (self->priv->port, "network scan: batch of %u network(s)", networks->len);
+    /* Each batch supersedes the previous one rather than adding to it. */
+    if (ctx->networks)
+        g_array_unref (ctx->networks);
+    ctx->networks = networks;
+
+    if (ctx->quiet_id)
+        g_source_remove (ctx->quiet_id);
+    ctx->quiet_id = g_timeout_add_seconds (SCAN_QUIET_SECONDS,
+                                           (GSourceFunc) scan_quiet_elapsed, task);
+}
+
+static void
+scan_start_ready (MMSitClient  *self,
+                  GAsyncResult *res,
+                  GTask        *task)
+{
+    ScanContext *ctx = g_task_get_task_data (task);
+    GError      *error = NULL;
+
+    if (!g_task_propagate_boolean (G_TASK (res), &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    ctx->indication_id = g_signal_connect (self, "indication",
+                                           G_CALLBACK (scan_indication), task);
+    ctx->deadline_id = g_timeout_add_seconds (SCAN_MAX_SECONDS,
+                                              (GSourceFunc) scan_deadline_elapsed, task);
+}
+
+void
+mm_sit_client_scan_networks (MMSitClient        *self,
+                             GCancellable       *cancellable,
+                             GAsyncReadyCallback callback,
+                             gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    g_task_set_task_data (task, g_new0 (ScanContext, 1), (GDestroyNotify) scan_context_free);
+
+    request = mm_sit_request_new_start_network_scan (next_token (self));
+    run_checked_command (self, request, 10, cancellable,
+                         (GAsyncReadyCallback) scan_start_ready, task);
+}
+
+GArray *
+mm_sit_client_scan_networks_finish (MMSitClient  *self,
+                                    GAsyncResult *res,
+                                    GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), NULL);
+    return g_task_propagate_pointer (G_TASK (res), error);
 }
 
 static void

@@ -930,3 +930,112 @@ mm_sit_message_parse_call_list (const MMSitMessage *message,
     *out_calls = array;
     return TRUE;
 }
+
+GByteArray *
+mm_sit_request_new_set_network_selection_auto (guint16 token)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_set_network_selection_auto (token, &buffer, &len);
+    return finish_build (status, buffer, len, NULL);
+}
+
+GByteArray *
+mm_sit_request_new_set_network_selection_manual (guint16      token,
+                                                 const gchar *plmn,
+                                                 guint8       rat,
+                                                 GError     **error)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    g_return_val_if_fail (plmn != NULL, NULL);
+
+    status = samsung_sit_build_set_network_selection_manual (token, plmn, rat, &buffer, &len);
+    return finish_build (status, buffer, len, error);
+}
+
+GByteArray *
+mm_sit_request_new_start_network_scan (guint16 token)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_start_network_scan (token, &buffer, &len);
+    return finish_build (status, buffer, len, NULL);
+}
+
+GByteArray *
+mm_sit_request_new_stop_network_scan (guint16 token)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_stop_network_scan (token, &buffer, &len);
+    return finish_build (status, buffer, len, NULL);
+}
+
+gboolean
+mm_sit_message_parse_network_selection_manual_result (const MMSitMessage *message,
+                                                      guint16            *out_result,
+                                                      GError            **error)
+{
+    const guint8    *data;
+    gsize            len;
+    SamsungSitStatus status;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_result != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_network_selection_manual_result (data, len, out_result);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+gboolean
+mm_sit_message_parse_net_scan_result (const MMSitMessage *message,
+                                      GArray            **out_networks,
+                                      GError            **error)
+{
+    const guint8              *data;
+    gsize                      len;
+    SamsungSitScannedNetwork  *networks = NULL;
+    gsize                      count = 0;
+    SamsungSitStatus           status;
+    GArray                    *array;
+    gsize                      i;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_networks != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_net_scan_result (data, len, &networks, &count);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+
+    array = g_array_sized_new (FALSE, FALSE, sizeof (MMSitScannedNetwork), count);
+    for (i = 0; i < count; i++) {
+        MMSitScannedNetwork network;
+
+        memset (&network, 0, sizeof (network));
+        g_strlcpy (network.plmn, networks[i].plmn, sizeof (network.plmn));
+        network.serving = (networks[i].serving != 0);
+        network.rat     = networks[i].rat;
+        g_array_append_val (array, network);
+    }
+    samsung_sit_scanned_network_list_free (networks, count);
+
+    *out_networks = array;
+    return TRUE;
+}
