@@ -358,13 +358,20 @@ set_radio_request_ready (MMSitClient *self,
                          GAsyncResult *res,
                          GTask *task)
 {
-    GError *error = NULL;
+    g_autoptr(GError) error = NULL;
 
-    if (!g_task_propagate_boolean (G_TASK (res), &error)) {
-        g_task_return_error (task, error);
-        g_object_unref (task);
-        return;
-    }
+    /*
+     * The CP answers GENERIC_FAILURE when asked to put the radio into the state
+     * it is already in, which is not a failure of anything we care about -- and
+     * we send the request unconditionally on purpose (see below), so it is the
+     * expected answer half the time.  The poll that follows is the authority on
+     * the resulting state either way, so note the refusal and carry on; a state
+     * that genuinely never arrives still fails there.
+     */
+    if (!g_task_propagate_boolean (G_TASK (res), &error))
+        mm_obj_dbg (self->priv->port, "radio power request refused (%s); polling the state anyway",
+                    error->message);
+
     set_radio_poll (task);
 }
 
