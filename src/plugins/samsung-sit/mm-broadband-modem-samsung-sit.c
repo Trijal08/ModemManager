@@ -37,6 +37,8 @@ struct _MMBroadbandModemSamsungSitPrivate {
     gchar       *operator_name;
     gboolean     carrier_config_ready;
     gchar       *carrier_config_imsi;
+    /* PLMNs the card lists as forbidden (EF_FPLMN), so a scan can say so. */
+    GPtrArray   *forbidden_plmns;
 };
 
 typedef struct {
@@ -2489,6 +2491,64 @@ scan_networks_finish (MMIfaceModem3gpp *self,
     return g_task_propagate_pointer (G_TASK (res), error);
 }
 
+/* EF_FPLMN (TS 31.102 4.2.16): the forbidden-PLMN list the card keeps, three
+ * packed bytes per entry, unused slots all ones.  This is how a phone knows a
+ * network will refuse it without trying -- the network rewrites the card's list
+ * when it rejects a registration. */
+#define EF_FPLMN        0x6f7b
+#define FPLMN_ENTRY_LEN 3
+
+static void start_network_scan (GTask *task);
+
+static gboolean
+plmn_is_forbidden (MMBroadbandModemSamsungSit *self,
+                   const gchar                *plmn)
+{
+    guint i;
+
+    if (!self->priv->forbidden_plmns)
+        return FALSE;
+    for (i = 0; i < self->priv->forbidden_plmns->len; i++) {
+        if (g_strcmp0 (g_ptr_array_index (self->priv->forbidden_plmns, i), plmn) == 0)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static void
+load_forbidden_plmns_ready (MMSitClient  *client,
+                            GAsyncResult *res,
+                            GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    g_autoptr(GBytes)           data = NULL;
+    g_autoptr(GError)           error = NULL;
+    const guint8               *bytes;
+    gsize                       len = 0;
+    gsize                       offset;
+
+    data = mm_sit_client_read_ef_finish (client, res, NULL, &error);
+    if (!data) {
+        /* Not fatal: without the list a scan simply cannot mark anything
+         * forbidden, which is where we were before. */
+        mm_obj_dbg (self, "couldn't read the forbidden-PLMN list: %s", error->message);
+    } else {
+        g_clear_pointer (&self->priv->forbidden_plmns, g_ptr_array_unref);
+        self->priv->forbidden_plmns = g_ptr_array_new_with_free_func (g_free);
+        bytes = g_bytes_get_data (data, &len);
+        for (offset = 0; offset + FPLMN_ENTRY_LEN <= len; offset += FPLMN_ENTRY_LEN) {
+            gchar *plmn = mm_sit_plmn_from_packed (&bytes[offset]);
+
+            if (plmn)
+                g_ptr_array_add (self->priv->forbidden_plmns, plmn);
+        }
+        mm_obj_dbg (self, "%u forbidden PLMN(s) on the card",
+                    self->priv->forbidden_plmns->len);
+    }
+
+    start_network_scan (task);
+}
+
 static void
 scan_networks_ready (MMSitClient  *client,
                      GAsyncResult *res,
@@ -2534,15 +2594,28 @@ scan_networks_ready (MMSitClient  *client,
 
         info = g_new0 (MM3gppNetworkInfo, 1);
         info->operator_code = g_strdup (network->plmn);
-        info->status = network->serving ?
-            MM_MODEM_3GPP_NETWORK_AVAILABILITY_CURRENT :
-            MM_MODEM_3GPP_NETWORK_AVAILABILITY_AVAILABLE;
+        if (network->serving)
+            info->status = MM_MODEM_3GPP_NETWORK_AVAILABILITY_CURRENT;
+        else if (plmn_is_forbidden (self, network->plmn))
+            info->status = MM_MODEM_3GPP_NETWORK_AVAILABILITY_FORBIDDEN;
+        else
+            info->status = MM_MODEM_3GPP_NETWORK_AVAILABILITY_AVAILABLE;
         info->access_tech = access_tech;
-        /* Scan records carry no operator names. The serving one is known from
-         * GET_OPERATOR, so at least that entry can be labelled. */
+        /*
+         * Scan records carry no operator names -- the CP leaves the whole 316
+         * byte record blank apart from the PLMN -- and nothing else here can
+         * name a *foreign* network: the card's own EF_PNN/EF_OPL describe the
+         * home operator, and a numeric lookup in the provider database is
+         * ambiguous because MVNOs share a network code (five providers list
+         * 26203).  So fall back to the code itself, which at least gives the UI
+         * something to show instead of a blank row.  The serving network is the
+         * one name we have on authority, from GET_OPERATOR.
+         */
         if (network->serving && self->priv->operator_name &&
             g_strcmp0 (self->priv->operator_code, network->plmn) == 0)
             info->operator_long = g_strdup (self->priv->operator_name);
+        else
+            info->operator_long = g_strdup (network->plmn);
 
         g_hash_table_insert (seen, g_steal_pointer (&key), info);
         results = g_list_prepend (results, info);
@@ -2556,16 +2629,33 @@ scan_networks_ready (MMSitClient  *client,
 }
 
 /* The CP scans natively, so nothing here needs the AT port. Results carry the
- * PLMN and which one the CP is camped on, but no operator names -- the core is
- * fine with that and fills them in from its own PLMN database. */
+ * PLMN and which one the CP is camped on, but no operator names. */
+static void
+start_network_scan (GTask *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_scan_networks (client, NULL,
+                                 (GAsyncReadyCallback) scan_networks_ready, task);
+}
+
 static void
 scan_networks (MMIfaceModem3gpp   *self,
                GAsyncReadyCallback callback,
                gpointer            user_data)
 {
-    MMSitClient *client;
-    GError      *error = NULL;
-    GTask       *task;
+    MMSitClient          *client;
+    GError               *error = NULL;
+    GTask                *task;
+    static const guint16  adf_path[] = { 0x3f00, 0x7fff };
 
     task = g_task_new (self, NULL, callback, user_data);
     client = mm_broadband_modem_samsung_sit_peek_client (MM_BROADBAND_MODEM_SAMSUNG_SIT (self),
@@ -2575,8 +2665,12 @@ scan_networks (MMIfaceModem3gpp   *self,
         g_object_unref (task);
         return;
     }
-    mm_sit_client_scan_networks (client, NULL,
-                                 (GAsyncReadyCallback) scan_networks_ready, task);
+
+    /* Refresh the forbidden list first: the network rewrites it on the card
+     * when it rejects a registration, so a stale one would mislabel exactly the
+     * network the user is about to try. */
+    mm_sit_client_read_ef (client, EF_FPLMN, adf_path, G_N_ELEMENTS (adf_path), NULL,
+                           (GAsyncReadyCallback) load_forbidden_plmns_ready, task);
 }
 
 static void
@@ -3538,6 +3632,7 @@ finalize (GObject *object)
     g_free (self->priv->operator_code);
     g_free (self->priv->operator_name);
     g_free (self->priv->carrier_config_imsi);
+    g_clear_pointer (&self->priv->forbidden_plmns, g_ptr_array_unref);
     G_OBJECT_CLASS (mm_broadband_modem_samsung_sit_parent_class)->finalize (object);
 }
 

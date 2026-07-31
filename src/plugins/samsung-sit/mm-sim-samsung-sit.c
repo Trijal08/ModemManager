@@ -573,37 +573,6 @@ load_preferred_networks_finish (MMBaseSim     *self,
     return g_task_propagate_pointer (G_TASK (res), error);
 }
 
-/* Decode the three PLMN bytes of an entry, TS 24.008 10.5.1.13: the MCC digits
- * are the low then high nibble of the first byte and the low nibble of the
- * second, the MNC's *third* digit is the high nibble of the second byte -- 0xf
- * when the MNC has only two -- and its first two are the low then high nibble
- * of the third. So the digits do not come out in reading order and a plain BCD
- * conversion mixes the MNC up. */
-static gchar *
-decode_plmn (const guint8 *entry)
-{
-    guint8 digits[6];
-    gchar  plmn[7];
-    guint  i;
-    guint  len;
-
-    digits[0] = entry[0] & 0x0f;
-    digits[1] = entry[0] >> 4;
-    digits[2] = entry[1] & 0x0f;
-    digits[3] = entry[2] & 0x0f;
-    digits[4] = entry[2] >> 4;
-    digits[5] = entry[1] >> 4;
-
-    len = (digits[5] == 0x0f) ? 5 : 6;
-    for (i = 0; i < len; i++) {
-        if (digits[i] > 9)
-            return NULL;
-        plmn[i] = '0' + digits[i];
-    }
-    plmn[len] = '\0';
-    return g_strdup (plmn);
-}
-
 static GList *
 parse_plmn_w_act (const guint8 *data,
                   gsize         len)
@@ -619,7 +588,7 @@ parse_plmn_w_act (const guint8 *data,
         guint16                  act_bits;
 
         /* An unused entry is all ones, which fails the digit check. */
-        plmn = decode_plmn (entry);
+        plmn = mm_sit_plmn_from_packed (entry);
         if (!plmn)
             continue;
 

@@ -437,6 +437,10 @@ typedef struct {
     guint8 port_id;
 } MMSitLogicalSlotMapping;
 
+/* Decode three packed PLMN bytes (EF_PLMNwAcT, EF_FPLMN, ...) into "MCCMNC";
+ * NULL for an unused or malformed entry. */
+gchar       *mm_sit_plmn_from_packed                  (const guint8          *entry);
+
 gboolean     mm_sit_frame_peek_length                 (const guint8          *data,
                                                        gsize                  data_len,
                                                        guint16               *out_length,

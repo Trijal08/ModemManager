@@ -165,6 +165,41 @@ mm_sit_message_id_get_string (guint16 id)
     return "UNKNOWN";
 }
 
+
+/* Decode the three packed PLMN bytes used by EF_PLMNwAcT, EF_FPLMN and friends,
+ * TS 24.008 10.5.1.13: the MCC digits are the low then high nibble of the first
+ * byte and the low nibble of the second, the MNC's *third* digit is the high
+ * nibble of the second byte -- 0xf when the MNC has only two -- and its first
+ * two are the low then high nibble of the third. So the digits do not come out
+ * in reading order and a plain BCD conversion mixes the MNC up. Returns NULL for
+ * an unused entry (all ones) or any non-digit nibble. */
+gchar *
+mm_sit_plmn_from_packed (const guint8 *entry)
+{
+    guint8 digits[6];
+    gchar  plmn[7];
+    guint  i;
+    guint  len;
+
+    g_return_val_if_fail (entry != NULL, NULL);
+
+    digits[0] = entry[0] & 0x0f;
+    digits[1] = entry[0] >> 4;
+    digits[2] = entry[1] & 0x0f;
+    digits[3] = entry[2] & 0x0f;
+    digits[4] = entry[2] >> 4;
+    digits[5] = entry[1] >> 4;
+
+    len = (digits[5] == 0x0f) ? 5 : 6;
+    for (i = 0; i < len; i++) {
+        if (digits[i] > 9)
+            return NULL;
+        plmn[i] = '0' + digits[i];
+    }
+    plmn[len] = '\0';
+    return g_strdup (plmn);
+}
+
 /*****************************************************************************/
 /* FFI bridging helpers                                                      */
 
