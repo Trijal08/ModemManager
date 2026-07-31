@@ -25,19 +25,6 @@ connect_finish (MMBaseBearer  *bearer,
     return g_task_propagate_pointer (G_TASK (res), error);
 }
 
-/* Which families to ask the network for. A connection that states no
- * preference gets a dual-stack request -- the CP narrows it to whatever the
- * network grants, so asking for both costs nothing on a v4-only APN. */
-MMSitPdpType
-mm_bearer_samsung_sit_pdp_type_from_ip_family (MMBearerIpFamily family)
-{
-    if (family == MM_BEARER_IP_FAMILY_IPV4)
-        return MM_SIT_PDP_TYPE_IPV4;
-    if (family == MM_BEARER_IP_FAMILY_IPV6)
-        return MM_SIT_PDP_TYPE_IPV6;
-    return MM_SIT_PDP_TYPE_IPV4V6;
-}
-
 /* One family's static configuration out of the granted data call. The CP hands
  * back a full address rather than a prefix, so the v4 side takes the /32 a
  * raw-IP bearer wants and the v6 side the /64 a 3GPP PDP context is assigned. */
@@ -146,6 +133,7 @@ carrier_config_ready (MMBroadbandModemSamsungSit *modem,
     MMBearerProperties *properties;
     MMSitClient        *client;
     const gchar        *apn;
+    MMSitApnAuth        auth;
     GError             *error = NULL;
 
     if (!mm_broadband_modem_samsung_sit_ensure_carrier_config_finish (modem, res, &error)) {
@@ -165,8 +153,15 @@ carrier_config_ready (MMBroadbandModemSamsungSit *modem,
     bearer = g_task_get_source_object (task);
     properties = mm_base_bearer_peek_config (bearer);
     apn = mm_bearer_properties_get_apn (properties);
+    if (!mm_sit_apn_auth_from_properties (properties, &auth, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
     mm_sit_client_connect_data (client, apn,
-                                mm_bearer_samsung_sit_pdp_type_from_ip_family (mm_bearer_properties_get_ip_type (properties)),
+                                mm_sit_pdp_type_from_ip_family (mm_bearer_properties_get_ip_type (properties)),
+                                mm_sit_apn_types_from_properties (properties),
+                                &auth,
                                 g_task_get_cancellable (task),
                                 (GAsyncReadyCallback) connect_ready, task);
 }

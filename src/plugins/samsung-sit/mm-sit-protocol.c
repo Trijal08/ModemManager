@@ -377,17 +377,153 @@ mm_sit_request_new_set_logical_slot_mapping (guint16                        toke
     return finish_build (status, buffer, len, error);
 }
 
+/* Which families to ask the network for. A connection that states no
+ * preference gets a dual-stack request -- the CP narrows it to whatever the
+ * network grants, so asking for both costs nothing on a v4-only APN. */
+MMSitPdpType
+mm_sit_pdp_type_from_ip_family (MMBearerIpFamily family)
+{
+    if (family == MM_BEARER_IP_FAMILY_IPV4)
+        return MM_SIT_PDP_TYPE_IPV4;
+    if (family == MM_BEARER_IP_FAMILY_IPV6)
+        return MM_SIT_PDP_TYPE_IPV6;
+    return MM_SIT_PDP_TYPE_IPV4V6;
+}
+
+/* Credentials out of a connection's properties, in the CP's own terms.
+ *
+ * The CP takes a single choice where ModemManager offers a set, so the set has
+ * to be narrowed: PAP and CHAP together become "let the network pick", and
+ * either alone becomes itself. MSCHAP, MSCHAPv2 and EAP have no representation
+ * here at all -- asking for only those is refused rather than quietly
+ * downgraded, because sending PAP to a caller who explicitly refused it would
+ * put the password on the wire in a form they rejected.
+ *
+ * An unstated preference is the common case: NetworkManager leaves the mask
+ * unknown unless the user touches it. Take that as "whatever the network
+ * wants" when there are credentials to send, and as no authentication at all
+ * when there are not. */
+gboolean
+mm_sit_apn_auth_from_properties (MMBearerProperties *properties,
+                                                MMSitApnAuth       *out,
+                                                GError            **error)
+{
+    MMBearerAllowedAuth allowed;
+    gboolean            pap;
+    gboolean            chap;
+
+    out->user = mm_bearer_properties_get_user (properties);
+    out->password = mm_bearer_properties_get_password (properties);
+    allowed = mm_bearer_properties_get_allowed_auth (properties);
+
+    if (allowed == MM_BEARER_ALLOWED_AUTH_UNKNOWN) {
+        out->auth = (out->user || out->password) ?
+            MM_SIT_AUTH_TYPE_PAP_OR_CHAP : MM_SIT_AUTH_TYPE_NONE;
+        return TRUE;
+    }
+
+    if (allowed == MM_BEARER_ALLOWED_AUTH_NONE) {
+        out->auth = MM_SIT_AUTH_TYPE_NONE;
+        return TRUE;
+    }
+
+    pap = !!(allowed & MM_BEARER_ALLOWED_AUTH_PAP);
+    chap = !!(allowed & MM_BEARER_ALLOWED_AUTH_CHAP);
+    if (pap && chap)
+        out->auth = MM_SIT_AUTH_TYPE_PAP_OR_CHAP;
+    else if (pap)
+        out->auth = MM_SIT_AUTH_TYPE_PAP;
+    else if (chap)
+        out->auth = MM_SIT_AUTH_TYPE_CHAP;
+    else {
+        g_autofree gchar *str = NULL;
+
+        str = mm_bearer_allowed_auth_build_string_from_mask (allowed);
+        g_set_error (error, MM_CORE_ERROR, MM_CORE_ERROR_UNSUPPORTED,
+                     "This modem supports only PAP and CHAP, not '%s'", str);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* What a context is for, in the CP's terms.
+ *
+ * ModemManager models this as a set and so does the CP, so this is a straight
+ * bit-for-bit translation of the types both understand. SUPL and HIPRI have no
+ * MM equivalent and nothing maps onto them: the vendor reads those off its APN
+ * database entry, which is exactly the thing we do not have.
+ *
+ * Nothing populates the property today -- NetworkManager never sets it -- so in
+ * practice this returns the default. That follows what ModemManager already
+ * does where a modem insists on a type it was not told: mm-bearer-mbim.c takes
+ * the profile's type and falls back to MM_BEARER_APN_TYPE_DEFAULT, and
+ * mm_base_bearer_get_apn_type says the same in its own words, "when none
+ * explicitly requested, apn type always defaults to internet". */
+guint32
+mm_sit_apn_types_from_properties (MMBearerProperties *properties)
+{
+    static const struct {
+        MMBearerApnType mm;
+        MMSitApnType    sit;
+    } map[] = {
+        { MM_BEARER_APN_TYPE_DEFAULT,    MM_SIT_APN_TYPE_DEFAULT   },
+        { MM_BEARER_APN_TYPE_INITIAL,    MM_SIT_APN_TYPE_IA        },
+        { MM_BEARER_APN_TYPE_IMS,        MM_SIT_APN_TYPE_IMS       },
+        { MM_BEARER_APN_TYPE_MMS,        MM_SIT_APN_TYPE_MMS       },
+        { MM_BEARER_APN_TYPE_MANAGEMENT, MM_SIT_APN_TYPE_FOTA      },
+        { MM_BEARER_APN_TYPE_EMERGENCY,  MM_SIT_APN_TYPE_EMERGENCY },
+        { MM_BEARER_APN_TYPE_XCAP,       MM_SIT_APN_TYPE_XCAP      },
+        { MM_BEARER_APN_TYPE_TETHERING,  MM_SIT_APN_TYPE_DUN       },
+    };
+    MMBearerApnType requested;
+    guint32         types = 0;
+    guint           i;
+
+    requested = mm_bearer_properties_get_apn_type (properties);
+    if (requested == MM_BEARER_APN_TYPE_NONE)
+        return MM_SIT_APN_TYPE_DEFAULT;
+
+    for (i = 0; i < G_N_ELEMENTS (map); i++) {
+        if (requested & map[i].mm)
+            types |= map[i].sit;
+    }
+
+    /* Every type MM knows that the CP does not -- voice, private, purchase and
+     * the rest -- drops out here. A context that is only those is still a
+     * context, so fall back rather than telling the CP it is for nothing. */
+    return types ? types : MM_SIT_APN_TYPE_DEFAULT;
+}
+
+/* Borrow an MMSitApnAuth as the FFI struct, using caller-provided storage so
+ * this stays allocation-free. NULL stays NULL: the codec reads that as "no
+ * authentication", which is the ordinary case. */
+static const SamsungSitApnAuth *
+ffi_auth (const MMSitApnAuth *auth,
+          SamsungSitApnAuth  *storage)
+{
+    if (!auth)
+        return NULL;
+
+    storage->auth_type = (guint8) auth->auth;
+    storage->user = auth->user;
+    storage->password = auth->password;
+    return storage;
+}
+
 GByteArray *
 mm_sit_request_new_set_data_profile (guint16      token,
                                      const gchar *apn,
                                      MMSitPdpType pdp,
+                                     guint32      apn_types,
+                                     const MMSitApnAuth *auth,
                                      GError     **error)
 {
     guint8          *buffer = NULL;
     gsize            len = 0;
+    SamsungSitApnAuth ffi;
     SamsungSitStatus status;
 
-    status = samsung_sit_build_set_data_profile (token, apn, (SamsungSitPdpType) pdp, &buffer, &len);
+    status = samsung_sit_build_set_data_profile (token, apn, (SamsungSitPdpType) pdp, apn_types, ffi_auth (auth, &ffi), &buffer, &len);
     return finish_build (status, buffer, len, error);
 }
 
@@ -395,13 +531,15 @@ GByteArray *
 mm_sit_request_new_set_initial_attach_apn (guint16      token,
                                            const gchar *apn,
                                            MMSitPdpType pdp,
+                                           const MMSitApnAuth *auth,
                                            GError     **error)
 {
     guint8          *buffer = NULL;
     gsize            len = 0;
+    SamsungSitApnAuth ffi;
     SamsungSitStatus status;
 
-    status = samsung_sit_build_set_initial_attach_apn (token, apn, (SamsungSitPdpType) pdp, &buffer, &len);
+    status = samsung_sit_build_set_initial_attach_apn (token, apn, (SamsungSitPdpType) pdp, ffi_auth (auth, &ffi), &buffer, &len);
     return finish_build (status, buffer, len, error);
 }
 
@@ -409,13 +547,16 @@ GByteArray *
 mm_sit_request_new_setup_data_call (guint16      token,
                                     const gchar *apn,
                                     MMSitPdpType pdp,
+                                    guint32      apn_types,
+                                    const MMSitApnAuth *auth,
                                     GError     **error)
 {
     guint8          *buffer = NULL;
     gsize            len = 0;
+    SamsungSitApnAuth ffi;
     SamsungSitStatus status;
 
-    status = samsung_sit_build_setup_data_call (token, apn, (SamsungSitPdpType) pdp, &buffer, &len);
+    status = samsung_sit_build_setup_data_call (token, apn, (SamsungSitPdpType) pdp, apn_types, ffi_auth (auth, &ffi), &buffer, &len);
     return finish_build (status, buffer, len, error);
 }
 

@@ -1810,6 +1810,12 @@ typedef struct {
     ConnectStep    step;
     gchar         *apn;
     MMSitPdpType   pdp;
+    /* Credentials, owned: the properties they came from need not outlive the
+     * connect attempt. auth.user/password point into these two. */
+    MMSitApnAuth   auth;
+    gchar         *auth_user;
+    gchar         *auth_password;
+    guint32        apn_types;
     guint          registration_attempts;
     guint          setup_attempts;
     guint          retry_id;
@@ -1831,6 +1837,8 @@ connect_context_free (ConnectContext *ctx)
     g_clear_pointer (&ctx->indicated_calls, g_array_unref);
     g_clear_object (&ctx->client);
     g_free (ctx->apn);
+    g_free (ctx->auth_user);
+    g_free (ctx->auth_password);
     g_free (ctx);
 }
 
@@ -1999,9 +2007,9 @@ connect_build_request (MMSitClient   *self,
     case CONNECT_STEP_PREFERRED_MODEM:
         return mm_sit_request_new_set_preferred_modem (next_token (self), 0);
     case CONNECT_STEP_DATA_PROFILE:
-        return mm_sit_request_new_set_data_profile (next_token (self), ctx->apn, ctx->pdp, error);
+        return mm_sit_request_new_set_data_profile (next_token (self), ctx->apn, ctx->pdp, ctx->apn_types, &ctx->auth, error);
     case CONNECT_STEP_ATTACH_APN:
-        return mm_sit_request_new_set_initial_attach_apn (next_token (self), ctx->apn, ctx->pdp, error);
+        return mm_sit_request_new_set_initial_attach_apn (next_token (self), ctx->apn, ctx->pdp, &ctx->auth, error);
     case CONNECT_STEP_CONFIG_0900:
         return mm_sit_request_new (0x0900, next_token (self), reserved, sizeof (reserved), error);
     case CONNECT_STEP_CONFIG_0106:
@@ -2015,7 +2023,7 @@ connect_build_request (MMSitClient   *self,
     case CONNECT_STEP_CONFIG_0107:
         return mm_sit_request_new (0x0107, next_token (self), body_0107, sizeof (body_0107), error);
     case CONNECT_STEP_SETUP:
-        return mm_sit_request_new_setup_data_call (next_token (self), ctx->apn, ctx->pdp, error);
+        return mm_sit_request_new_setup_data_call (next_token (self), ctx->apn, ctx->pdp, ctx->apn_types, &ctx->auth, error);
     case CONNECT_STEP_FAST_DORMANCY:
         return mm_sit_request_new_set_fast_dormancy_info (next_token (self));
     case CONNECT_STEP_REGISTRATION:
@@ -2075,6 +2083,8 @@ void
 mm_sit_client_connect_data (MMSitClient        *self,
                             const gchar        *apn,
                             MMSitPdpType        pdp,
+                            guint32             apn_types,
+                            const MMSitApnAuth *auth,
                             GCancellable       *cancellable,
                             GAsyncReadyCallback callback,
                             gpointer            user_data)
@@ -2096,6 +2106,14 @@ mm_sit_client_connect_data (MMSitClient        *self,
     ctx = g_new0 (ConnectContext, 1);
     ctx->apn = g_strdup (apn);
     ctx->pdp = pdp;
+    ctx->apn_types = apn_types;
+    if (auth) {
+        ctx->auth_user = g_strdup (auth->user);
+        ctx->auth_password = g_strdup (auth->password);
+        ctx->auth.auth = auth->auth;
+        ctx->auth.user = ctx->auth_user;
+        ctx->auth.password = ctx->auth_password;
+    }
     ctx->client = g_object_ref (self);
     g_task_set_task_data (task, ctx, (GDestroyNotify) connect_context_free);
     ctx->indication_handler_id = g_signal_connect (self, "indication",
@@ -2421,6 +2439,7 @@ void
 mm_sit_client_set_initial_attach_apn (MMSitClient        *self,
                                       const gchar        *apn,
                                       MMSitPdpType        pdp,
+                                      const MMSitApnAuth *auth,
                                       GCancellable       *cancellable,
                                       GAsyncReadyCallback callback,
                                       gpointer            user_data)
@@ -2428,7 +2447,7 @@ mm_sit_client_set_initial_attach_apn (MMSitClient        *self,
     g_autoptr(GByteArray) request = NULL;
     g_autoptr(GError)     error = NULL;
 
-    request = mm_sit_request_new_set_initial_attach_apn (next_token (self), apn, pdp, &error);
+    request = mm_sit_request_new_set_initial_attach_apn (next_token (self), apn, pdp, auth, &error);
     if (!request) {
         GTask *task = g_task_new (self, cancellable, callback, user_data);
 

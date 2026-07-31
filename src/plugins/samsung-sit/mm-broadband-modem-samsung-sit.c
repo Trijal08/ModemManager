@@ -685,6 +685,8 @@ set_initial_eps_bearer_settings (MMIfaceModem3gpp    *_self,
     GTask                      *task;
     MMSitClient                *client;
     g_autoptr(GError)           error = NULL;
+    GError                     *inner_error = NULL;
+    MMSitApnAuth                auth;
     const gchar                *apn;
 
     task = g_task_new (self, NULL, callback, user_data);
@@ -704,10 +706,17 @@ set_initial_eps_bearer_settings (MMIfaceModem3gpp    *_self,
         return;
     }
 
+    if (!mm_sit_apn_auth_from_properties (properties, &auth, &inner_error)) {
+        g_task_return_error (task, g_steal_pointer (&inner_error));
+        g_object_unref (task);
+        return;
+    }
+
     g_task_set_task_data (task, g_object_ref (properties), g_object_unref);
 
     mm_sit_client_set_initial_attach_apn (client, apn,
-                                          mm_bearer_samsung_sit_pdp_type_from_ip_family (mm_bearer_properties_get_ip_type (properties)),
+                                          mm_sit_pdp_type_from_ip_family (mm_bearer_properties_get_ip_type (properties)),
+                                          &auth,
                                           NULL,
                                           (GAsyncReadyCallback) set_initial_attach_apn_ready,
                                           task);

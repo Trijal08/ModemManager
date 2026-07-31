@@ -155,6 +155,102 @@ test_build_slot_mapping (void)
     g_assert_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT);
 }
 
+/* The CP takes a single auth choice where ModemManager offers a set, so the set
+ * has to be narrowed -- and refused rather than downgraded when it names only
+ * methods this modem cannot do. */
+static void
+test_apn_auth_from_properties (void)
+{
+    static const struct {
+        MMBearerAllowedAuth  allowed;
+        const gchar         *user;
+        MMSitAuthType        expected;
+        gboolean             supported;
+    } cases[] = {
+        /* Nothing stated and nothing to send: no authentication. */
+        { MM_BEARER_ALLOWED_AUTH_UNKNOWN,  NULL,    MM_SIT_AUTH_TYPE_NONE,        TRUE },
+        /* Nothing stated but credentials present: let the network choose. */
+        { MM_BEARER_ALLOWED_AUTH_UNKNOWN,  "alice", MM_SIT_AUTH_TYPE_PAP_OR_CHAP, TRUE },
+        { MM_BEARER_ALLOWED_AUTH_NONE,     "alice", MM_SIT_AUTH_TYPE_NONE,        TRUE },
+        { MM_BEARER_ALLOWED_AUTH_PAP,      "alice", MM_SIT_AUTH_TYPE_PAP,         TRUE },
+        { MM_BEARER_ALLOWED_AUTH_CHAP,     "alice", MM_SIT_AUTH_TYPE_CHAP,        TRUE },
+        { MM_BEARER_ALLOWED_AUTH_PAP |
+          MM_BEARER_ALLOWED_AUTH_CHAP,     "alice", MM_SIT_AUTH_TYPE_PAP_OR_CHAP, TRUE },
+        /* NetworkManager's default mask allows everything it knows; the two the
+         * CP understands are in there, so it still resolves. */
+        { MM_BEARER_ALLOWED_AUTH_PAP | MM_BEARER_ALLOWED_AUTH_CHAP |
+          MM_BEARER_ALLOWED_AUTH_MSCHAP | MM_BEARER_ALLOWED_AUTH_MSCHAPV2 |
+          MM_BEARER_ALLOWED_AUTH_EAP,      "alice", MM_SIT_AUTH_TYPE_PAP_OR_CHAP, TRUE },
+        /* Only methods the CP cannot do: refuse, do not silently send PAP. */
+        { MM_BEARER_ALLOWED_AUTH_EAP,      "alice", 0,                            FALSE },
+        { MM_BEARER_ALLOWED_AUTH_MSCHAPV2, "alice", 0,                            FALSE },
+    };
+    guint i;
+
+    for (i = 0; i < G_N_ELEMENTS (cases); i++) {
+        g_autoptr(MMBearerProperties) props = NULL;
+        g_autoptr(GError)             error = NULL;
+        MMSitApnAuth                  auth = { 0 };
+        gboolean                      ok;
+
+        props = mm_bearer_properties_new ();
+        mm_bearer_properties_set_apn (props, "internet");
+        mm_bearer_properties_set_allowed_auth (props, cases[i].allowed);
+        if (cases[i].user) {
+            mm_bearer_properties_set_user (props, cases[i].user);
+            mm_bearer_properties_set_password (props, "s3cret");
+        }
+
+        ok = mm_sit_apn_auth_from_properties (props, &auth, &error);
+        if (!cases[i].supported) {
+            g_assert_false (ok);
+            g_assert_error (error, MM_CORE_ERROR, MM_CORE_ERROR_UNSUPPORTED);
+            continue;
+        }
+        g_assert_no_error (error);
+        g_assert_true (ok);
+        g_assert_cmpuint (auth.auth, ==, cases[i].expected);
+        if (cases[i].user)
+            g_assert_cmpstr (auth.user, ==, cases[i].user);
+    }
+}
+
+/* The requested families reach the wire; so do credentials, at the offsets each
+ * request uses -- SET_DATA_PROFILE leads with the type, the other two follow
+ * the strings with it. */
+static void
+test_apn_auth_on_the_wire (void)
+{
+    g_autoptr(GByteArray) profile = NULL;
+    g_autoptr(GByteArray) attach = NULL;
+    g_autoptr(GByteArray) setup = NULL;
+    g_autoptr(GError)     error = NULL;
+    const MMSitApnAuth    auth = {
+        .auth = MM_SIT_AUTH_TYPE_CHAP,
+        .user = "alice",
+        .password = "s3cret",
+    };
+
+    profile = mm_sit_request_new_set_data_profile (1, "internet", MM_SIT_PDP_TYPE_IPV4V6, MM_SIT_APN_TYPE_DEFAULT, &auth, &error);
+    attach = mm_sit_request_new_set_initial_attach_apn (2, "internet", MM_SIT_PDP_TYPE_IPV4V6, &auth, &error);
+    setup = mm_sit_request_new_setup_data_call (3, "internet", MM_SIT_PDP_TYPE_IPV4V6, MM_SIT_APN_TYPE_DEFAULT, &auth, &error);
+    g_assert_no_error (error);
+
+    g_assert_cmpuint (profile->data[0x77], ==, MM_SIT_AUTH_TYPE_CHAP);
+    g_assert_cmpmem (&profile->data[0x78], 5, "alice", 5);
+    g_assert_cmpmem (&profile->data[0xaa], 6, "s3cret", 6);
+
+    g_assert_cmpuint (attach->data[0xd9], ==, MM_SIT_AUTH_TYPE_CHAP);
+    g_assert_cmpmem (&attach->data[0x75], 5, "alice", 5);
+    g_assert_cmpmem (&attach->data[0xa7], 6, "s3cret", 6);
+
+    g_assert_cmpuint (setup->data[0xd9], ==, MM_SIT_AUTH_TYPE_CHAP);
+    g_assert_cmpmem (&setup->data[0x75], 5, "alice", 5);
+    g_assert_cmpmem (&setup->data[0xa7], 6, "s3cret", 6);
+    /* The APN stops short of the username rather than running over it. */
+    g_assert_cmpuint (setup->data[0x74], ==, 0);
+}
+
 static void
 test_build_data_requests (void)
 {
@@ -166,7 +262,7 @@ test_build_data_requests (void)
     g_autoptr(GByteArray) fast_dormancy = NULL;
     g_autoptr(GError)     error = NULL;
 
-    profile = mm_sit_request_new_set_data_profile (1, "internet", MM_SIT_PDP_TYPE_IPV4, &error);
+    profile = mm_sit_request_new_set_data_profile (1, "internet", MM_SIT_PDP_TYPE_IPV4, MM_SIT_APN_TYPE_DEFAULT, NULL, &error);
     g_assert_no_error (error);
     g_assert_cmpuint (profile->len, ==, 246);
     g_assert_cmpmem (&profile->data[16], 8, "internet", 8);
@@ -174,18 +270,20 @@ test_build_data_requests (void)
     g_assert_cmpuint (profile->data[0x75], ==, 1);
     g_assert_cmpuint (profile->data[0xe9], ==, 1);
 
-    attach = mm_sit_request_new_set_initial_attach_apn (2, "internet", MM_SIT_PDP_TYPE_IPV4, &error);
+    attach = mm_sit_request_new_set_initial_attach_apn (2, "internet", MM_SIT_PDP_TYPE_IPV4, NULL, &error);
     g_assert_no_error (error);
     g_assert_cmpuint (attach->len, ==, 251);
     g_assert_cmpmem (&attach->data[16], 8, "internet", 8);
     g_assert_cmpuint (attach->data[0xda], ==, 1);
     g_assert_cmpuint (attach->data[0xf8], ==, 1);
 
-    setup = mm_sit_request_new_setup_data_call (3, "internet", MM_SIT_PDP_TYPE_IPV4, &error);
+    setup = mm_sit_request_new_setup_data_call (3, "internet", MM_SIT_PDP_TYPE_IPV4, MM_SIT_APN_TYPE_DEFAULT, NULL, &error);
     g_assert_no_error (error);
     g_assert_cmpuint (setup->len, ==, 983);
     g_assert_cmpmem (&setup->data[16], 8, "internet", 8);
-    g_assert_cmpuint (setup->data[0xf1], ==, 7);
+    /* @0xf1 is a u32 and the caller's to choose: it describes the APN, so only
+     * whoever knows what the context is for can fill it in. */
+    g_assert_cmpuint (GUINT32_FROM_LE (*(guint32 *) &setup->data[0xf1]), ==, MM_SIT_APN_TYPE_DEFAULT);
     g_assert_cmphex (setup->data[0xfc], ==, 0xff);
     g_assert_cmphex (setup->data[0x101], ==, 0xff);
 
@@ -194,9 +292,9 @@ test_build_data_requests (void)
     g_clear_pointer (&profile, g_byte_array_unref);
     g_clear_pointer (&attach, g_byte_array_unref);
     g_clear_pointer (&setup, g_byte_array_unref);
-    profile = mm_sit_request_new_set_data_profile (1, "internet", MM_SIT_PDP_TYPE_IPV4V6, &error);
-    attach = mm_sit_request_new_set_initial_attach_apn (2, "internet", MM_SIT_PDP_TYPE_IPV4V6, &error);
-    setup = mm_sit_request_new_setup_data_call (3, "internet", MM_SIT_PDP_TYPE_IPV6, &error);
+    profile = mm_sit_request_new_set_data_profile (1, "internet", MM_SIT_PDP_TYPE_IPV4V6, MM_SIT_APN_TYPE_DEFAULT, NULL, &error);
+    attach = mm_sit_request_new_set_initial_attach_apn (2, "internet", MM_SIT_PDP_TYPE_IPV4V6, NULL, &error);
+    setup = mm_sit_request_new_setup_data_call (3, "internet", MM_SIT_PDP_TYPE_IPV6, MM_SIT_APN_TYPE_DEFAULT, NULL, &error);
     g_assert_no_error (error);
     g_assert_cmpuint (profile->data[0x75], ==, 3);
     g_assert_cmpuint (profile->data[0x76], ==, 3);
@@ -1510,7 +1608,7 @@ test_client_connect_sequence (void)
     g_assert_no_error (error);
 
     peer = g_thread_new ("sit-client-test-peer", (GThreadFunc) client_test_peer, &ctx);
-    mm_sit_client_connect_data (client, "internet", MM_SIT_PDP_TYPE_IPV4V6, NULL,
+    mm_sit_client_connect_data (client, "internet", MM_SIT_PDP_TYPE_IPV4V6, MM_SIT_APN_TYPE_DEFAULT, NULL, NULL,
                                 (GAsyncReadyCallback) client_test_connect_ready, &ctx);
     timeout_id = g_timeout_add_seconds (10, (GSourceFunc) client_test_timeout, &ctx);
     g_main_loop_run (ctx.loop);
@@ -1754,6 +1852,8 @@ main (int argc,
     g_test_add_func ("/MM/sit/build/radio", test_build_radio);
     g_test_add_func ("/MM/sit/build/slot-mapping", test_build_slot_mapping);
     g_test_add_func ("/MM/sit/build/data", test_build_data_requests);
+    g_test_add_func ("/MM/sit/build/apn-auth", test_apn_auth_on_the_wire);
+    g_test_add_func ("/MM/sit/apn-auth-from-properties", test_apn_auth_from_properties);
     g_test_add_func ("/MM/sit/build/config", test_build_config_requests);
     g_test_add_func ("/MM/sit/build/boot-config", test_build_boot_config_requests);
     g_test_add_func ("/MM/sit/decode/radio", test_parse_radio);

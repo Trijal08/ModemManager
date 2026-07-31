@@ -121,6 +121,41 @@ typedef enum {
     MM_SIT_PDP_TYPE_IPV4V6 = 3,
 } MMSitPdpType;
 
+/* How the network wants an APN's credentials presented, in the CP's own
+ * numbering. It knows only these: MSCHAP, MSCHAPv2 and EAP have no
+ * representation on this modem. */
+typedef enum {
+    MM_SIT_AUTH_TYPE_NONE        = 0,
+    MM_SIT_AUTH_TYPE_PAP         = 1,
+    MM_SIT_AUTH_TYPE_CHAP        = 2,
+    MM_SIT_AUTH_TYPE_PAP_OR_CHAP = 3,
+} MMSitAuthType;
+
+/* What a context is for, in the CP's own bitmask. The values are Android's
+ * ApnTypes: every mask in the captured corpus decomposes into these with
+ * nothing left over. SUPL and HIPRI have no ModemManager equivalent -- the
+ * vendor gets them from its APN database, which we do not have. */
+typedef enum {
+    MM_SIT_APN_TYPE_DEFAULT   = 0x001,
+    MM_SIT_APN_TYPE_MMS       = 0x002,
+    MM_SIT_APN_TYPE_SUPL      = 0x004,
+    MM_SIT_APN_TYPE_DUN       = 0x008,
+    MM_SIT_APN_TYPE_HIPRI     = 0x010,
+    MM_SIT_APN_TYPE_FOTA      = 0x020,
+    MM_SIT_APN_TYPE_IMS       = 0x040,
+    MM_SIT_APN_TYPE_IA        = 0x100,
+    MM_SIT_APN_TYPE_EMERGENCY = 0x200,
+    MM_SIT_APN_TYPE_XCAP      = 0x800,
+} MMSitApnType;
+
+/* Credentials for an APN. Pass NULL wherever one of these is accepted to send
+ * none, which is the ordinary case; user and password may each be NULL. */
+typedef struct {
+    MMSitAuthType  auth;
+    const gchar   *user;
+    const gchar   *password;
+} MMSitApnAuth;
+
 typedef struct {
     MMSitMessageType type;
     guint8           reserved;
@@ -483,17 +518,29 @@ GByteArray *mm_sit_request_new_set_radio_power        (guint16                to
                                                        MMSitRadioState        state);
 GByteArray *mm_sit_request_new_set_preferred_modem    (guint16                token,
                                                        guint8                 modem_index);
+/* ModemManager's notion of a connection, in the CP's terms. */
+MMSitPdpType mm_sit_pdp_type_from_ip_family           (MMBearerIpFamily       family);
+gboolean     mm_sit_apn_auth_from_properties          (MMBearerProperties    *properties,
+                                                       MMSitApnAuth          *out,
+                                                       GError               **error);
+guint32      mm_sit_apn_types_from_properties         (MMBearerProperties    *properties);
+
 GByteArray *mm_sit_request_new_set_data_profile       (guint16                token,
                                                        const gchar           *apn,
                                                        MMSitPdpType           pdp,
+                                                       guint32                apn_types,
+                                                       const MMSitApnAuth    *auth,
                                                        GError               **error);
 GByteArray *mm_sit_request_new_set_initial_attach_apn (guint16                token,
                                                        const gchar           *apn,
                                                        MMSitPdpType           pdp,
+                                                       const MMSitApnAuth    *auth,
                                                        GError               **error);
 GByteArray *mm_sit_request_new_setup_data_call        (guint16                token,
                                                        const gchar           *apn,
                                                        MMSitPdpType           pdp,
+                                                       guint32                apn_types,
+                                                       const MMSitApnAuth    *auth,
                                                        GError               **error);
 GByteArray *mm_sit_request_new_deactivate_data_call   (guint16                token,
                                                        guint8                 cid,
