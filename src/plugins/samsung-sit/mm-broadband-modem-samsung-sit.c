@@ -39,6 +39,10 @@ struct _MMBroadbandModemSamsungSitPrivate {
     gchar       *carrier_config_imsi;
     /* PLMNs the card lists as forbidden (EF_FPLMN), so a scan can say so. */
     GPtrArray   *forbidden_plmns;
+    /* Pending attach retry after a recoverable rejection, and how many we have
+     * spent since the last successful registration. */
+    guint        reject_retry_id;
+    guint        reject_retries;
     /* Reach the SIT ports through sit-proxy rather than owning the device
      * nodes, so mm-sit-tool and the IMS helper can share them. Set from
      * ID_MM_SIT_PROXY on the port. */
@@ -313,6 +317,16 @@ update_ps_registration (MMBroadbandModemSamsungSit *self,
                         const MMSitRegistration    *registration)
 {
     MMModem3gppRegistrationState state = sit_registration_state (registration);
+
+    /* Registered again: forget the rejections, so a later one gets the full
+     * retry budget rather than inheriting an exhausted one. */
+    if (registration->registered) {
+        if (self->priv->reject_retry_id) {
+            g_source_remove (self->priv->reject_retry_id);
+            self->priv->reject_retry_id = 0;
+        }
+        self->priv->reject_retries = 0;
+    }
 
     mm_iface_modem_3gpp_update_ps_registration_state (MM_IFACE_MODEM_3GPP (self), state, TRUE);
     mm_iface_modem_3gpp_update_eps_registration_state (MM_IFACE_MODEM_3GPP (self), state, TRUE);
@@ -607,12 +621,134 @@ create_sms (MMBroadbandModem *self)
 
 /*****************************************************************************/
 
+/* How many times to answer a recoverable rejection before leaving it alone, and
+ * how long to wait before each. The first is short enough to rescue a boot
+ * before anyone notices; the last is long enough not to hammer a network that
+ * keeps saying no. */
+#define REJECT_RETRY_MAX 3
+static const guint reject_retry_delays_secs[REJECT_RETRY_MAX] = { 2, 15, 60 };
+
+static void
+reject_retry_radio_on_ready (MMSitClient                *client,
+                             GAsyncResult               *res,
+                             MMBroadbandModemSamsungSit *self)
+{
+    g_autoptr(GError) error = NULL;
+
+    if (!mm_sit_client_set_radio_state_finish (client, res, &error))
+        mm_obj_warn (self, "attach retry: couldn't bring the radio back up: %s", error->message);
+    g_object_unref (self);
+}
+
+static void
+reject_retry_radio_off_ready (MMSitClient                *client,
+                              GAsyncResult               *res,
+                              MMBroadbandModemSamsungSit *self)
+{
+    g_autoptr(GError) error = NULL;
+
+    if (!mm_sit_client_set_radio_state_finish (client, res, &error)) {
+        mm_obj_warn (self, "attach retry: couldn't take the radio down: %s", error->message);
+        g_object_unref (self);
+        return;
+    }
+    mm_sit_client_set_radio_state (client, MM_SIT_RADIO_STATE_ON, NULL,
+                                   (GAsyncReadyCallback) reject_retry_radio_on_ready, self);
+}
+
+/* Cause 10 asks for a *new* attach, and the CP will not start one on its own --
+ * it makes its burst of attempts, gives up and parks with the radio still
+ * nominally on. Taking the radio down and back up is what makes it try again
+ * from scratch; it is also exactly what recovers this by hand. */
+static gboolean
+reject_retry_cb (MMBroadbandModemSamsungSit *self)
+{
+    g_autoptr(GError)  error = NULL;
+    MMSitClient       *client;
+
+    self->priv->reject_retry_id = 0;
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        mm_obj_dbg (self, "attach retry: no SIT client: %s", error->message);
+        return G_SOURCE_REMOVE;
+    }
+
+    self->priv->reject_retries++;
+    mm_obj_msg (self, "attach retry %u/%u: cycling the radio to force a new attach",
+                self->priv->reject_retries, REJECT_RETRY_MAX);
+    mm_sit_client_set_radio_state (client, MM_SIT_RADIO_STATE_OFF, NULL,
+                                   (GAsyncReadyCallback) reject_retry_radio_off_ready,
+                                   g_object_ref (self));
+    return G_SOURCE_REMOVE;
+}
+
+static void
+handle_registration_failed (MMBroadbandModemSamsungSit *self,
+                            const MMSitMessage         *message)
+{
+    MMSitRegistrationFailure  failure;
+    g_autoptr(GError)         error = NULL;
+    const gchar              *domain;
+    guint                     delay;
+
+    if (!mm_sit_message_parse_registration_failed (message, &failure, &error)) {
+        mm_obj_dbg (self, "couldn't parse the registration failure: %s", error->message);
+        return;
+    }
+
+    if (failure.circuit_switched && failure.packet_switched)
+        domain = "CS+PS";
+    else if (failure.circuit_switched)
+        domain = "CS";
+    else if (failure.packet_switched)
+        domain = "PS";
+    else
+        domain = "no domain";
+
+    if (failure.cause == MM_SIT_REJECT_CAUSE_NONE)
+        mm_obj_msg (self, "network %s refused the %s attach, with no cause given",
+                    failure.plmn, domain);
+    else
+        mm_obj_msg (self, "network %s refused the %s attach: 3GPP cause %u%s",
+                    failure.plmn, domain, failure.cause,
+                    failure.retryable ? " (implicitly detached -- will retry)" : "");
+
+    /* A permanent refusal is the network's decision: cause 11 is what puts the
+     * PLMN on the card's forbidden list, and cause 15 is answered by cell
+     * reselection, which the CP does itself. Retrying either would just be a
+     * busy loop. */
+    if (!failure.retryable)
+        return;
+
+    /* One rejection arrives as several frames within a few milliseconds -- the
+     * combined attach and its per-domain retries -- so the first one schedules
+     * the retry and the rest ride along with it. */
+    if (self->priv->reject_retry_id)
+        return;
+
+    if (self->priv->reject_retries >= REJECT_RETRY_MAX) {
+        mm_obj_warn (self, "network %s still refusing after %u attach retries; leaving it alone",
+                     failure.plmn, self->priv->reject_retries);
+        return;
+    }
+
+    delay = reject_retry_delays_secs[self->priv->reject_retries];
+    mm_obj_dbg (self, "scheduling attach retry in %u s", delay);
+    self->priv->reject_retry_id = g_timeout_add_seconds (delay,
+                                                         (GSourceFunc) reject_retry_cb,
+                                                         self);
+}
+
 static void
 sit_indication (MMSitClient              *client,
                 const MMSitMessage       *message,
                 MMBroadbandModemSamsungSit *self)
 {
     MMSitOperator operator_info;
+
+    if (message->id == MM_SIT_MESSAGE_REGISTRATION_FAILED)
+        handle_registration_failed (self, message);
 
     if (message->id == MM_SIT_MESSAGE_DATA_CALL_LIST_CHANGED)
         handle_data_call_list_changed (self, message);
@@ -3634,6 +3770,10 @@ dispose (GObject *object)
 {
     MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (object);
 
+    if (self->priv->reject_retry_id) {
+        g_source_remove (self->priv->reject_retry_id);
+        self->priv->reject_retry_id = 0;
+    }
     self->priv->client = NULL;
     g_clear_pointer (&self->priv->clients, g_ptr_array_unref);
     G_OBJECT_CLASS (mm_broadband_modem_samsung_sit_parent_class)->dispose (object);

@@ -977,6 +977,35 @@ mm_sit_message_parse_registration (const MMSitMessage *message,
 }
 
 gboolean
+mm_sit_message_parse_registration_failed (const MMSitMessage       *message,
+                                          MMSitRegistrationFailure *out_failure,
+                                          GError                  **error)
+{
+    const guint8                     *data;
+    gsize                             len;
+    SamsungSitRegistrationFailure     failure;
+    SamsungSitStatus                  status;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_failure != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_registration_failed (data, len, &failure);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+
+    g_strlcpy (out_failure->plmn, failure.plmn, sizeof (out_failure->plmn));
+    out_failure->circuit_switched = failure.circuit_switched ? TRUE : FALSE;
+    out_failure->packet_switched  = failure.packet_switched ? TRUE : FALSE;
+    out_failure->cause            = failure.cause;
+    out_failure->additional_cause = failure.additional_cause;
+    out_failure->retryable        = failure.retryable ? TRUE : FALSE;
+    return TRUE;
+}
+
+gboolean
 mm_sit_message_parse_nitz_time (const MMSitMessage *message,
                                 MMSitNitzTime      *out_time,
                                 GError            **error)

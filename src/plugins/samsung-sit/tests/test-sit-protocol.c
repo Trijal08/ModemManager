@@ -439,6 +439,52 @@ test_parse_radio (void)
 }
 
 static void
+test_parse_registration_failed (void)
+{
+    g_autoptr(MMSitMessage)  message = NULL;
+    g_autoptr(GError)        error = NULL;
+    MMSitRegistrationFailure failure;
+    /* The burst this hardware produced on a boot that would not attach: the
+     * home network refusing a combined attach with cause 10. */
+    guint8                   indication[299] = { 2, 0, 0x4a, 0x07, 299 & 0xff, 299 >> 8, 0, 0 };
+
+    memcpy (&indication[8], "26203#", 6);
+    indication[0x0e] = 1;  /* CS+PS */
+    indication[0x0f] = MM_SIT_REJECT_CAUSE_IMPLICITLY_DETACHED;
+    indication[0x10] = 0;
+
+    message = mm_sit_message_parse (indication, sizeof (indication), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_registration_failed (message, &failure, &error));
+    g_assert_no_error (error);
+    g_assert_cmpstr (failure.plmn, ==, "26203");
+    g_assert_true (failure.circuit_switched);
+    g_assert_true (failure.packet_switched);
+    g_assert_cmpuint (failure.cause, ==, MM_SIT_REJECT_CAUSE_IMPLICITLY_DETACHED);
+    g_assert_true (failure.retryable);
+
+    /* A permanent refusal must not be retried: cause 11 is what puts the PLMN
+     * on the card's forbidden list. */
+    indication[0x0f] = 11;
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (indication, sizeof (indication), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_registration_failed (message, &failure, &error));
+    g_assert_false (failure.retryable);
+
+    /* And an absent cause reads as absent, not as 255. */
+    indication[0x0f] = 0xff;
+    indication[0x10] = 0xff;
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (indication, sizeof (indication), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_registration_failed (message, &failure, &error));
+    g_assert_cmpuint (failure.cause, ==, MM_SIT_REJECT_CAUSE_NONE);
+    g_assert_cmpuint (failure.additional_cause, ==, MM_SIT_REJECT_CAUSE_NONE);
+    g_assert_false (failure.retryable);
+}
+
+static void
 test_parse_status_and_registration (void)
 {
     /* One application record plus the card block: 17 + 63 * 2. */
@@ -1727,6 +1773,7 @@ main (int argc,
     g_test_add_func ("/MM/sit/client/connect-sequence", test_client_connect_sequence);
     g_test_add_func ("/MM/sit/client/radio-transition", test_client_radio_transition);
     g_test_add_func ("/MM/sit/client/boot-config", test_client_boot_config);
+    g_test_add_func ("/MM/sit/decode/registration-failed", test_parse_registration_failed);
 
     return g_test_run ();
 }

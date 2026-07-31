@@ -79,6 +79,7 @@ typedef enum {
     MM_SIT_MESSAGE_SERVING_NETWORK             = 0x070e,
     MM_SIT_MESSAGE_NETWORK_SCAN                = 0x0734,
     MM_SIT_MESSAGE_NET_SCAN_RESULT             = 0x0736,
+    MM_SIT_MESSAGE_REGISTRATION_FAILED         = 0x074a,
     MM_SIT_MESSAGE_SET_ALLOWED_NETWORK_TYPE_BITMAP = 0x074f,
     MM_SIT_MESSAGE_GET_ALLOWED_NETWORK_TYPE_BITMAP = 0x0750,
     MM_SIT_MESSAGE_SET_PREFERRED_DATA_MODEM    = 0x0740,
@@ -255,6 +256,22 @@ typedef struct {
     guint8   radio_technology;
     gboolean registered;
 } MMSitRegistration;
+
+/* Reported for a cause the CP says it does not have. */
+#define MM_SIT_REJECT_CAUSE_NONE 0xffff
+/* 3GPP TS 24.301 EMM cause 10: the network has no context for this UE and
+ * expects a fresh attach (TS 24.301 5.5.3.2.5). The one cause worth retrying. */
+#define MM_SIT_REJECT_CAUSE_IMPLICITLY_DETACHED 10
+
+typedef struct {
+    gchar    plmn[7];
+    gboolean circuit_switched;
+    gboolean packet_switched;
+    guint16  cause;
+    guint16  additional_cause;
+    /* The network is asking for a new attach rather than refusing outright. */
+    gboolean retryable;
+} MMSitRegistrationFailure;
 
 typedef struct {
     gchar    plmn[7];
@@ -582,6 +599,9 @@ gboolean mm_sit_file_control_parameters_parse         (const guint8          *da
 gboolean mm_sit_message_parse_registration            (const MMSitMessage    *message,
                                                        MMSitRegistration     *out_registration,
                                                        GError               **error);
+gboolean mm_sit_message_parse_registration_failed     (const MMSitMessage       *message,
+                                                       MMSitRegistrationFailure *out_failure,
+                                                       GError                  **error);
 gboolean mm_sit_message_parse_operator                (const MMSitMessage    *message,
                                                        MMSitOperator         *out_operator,
                                                        GError               **error);
