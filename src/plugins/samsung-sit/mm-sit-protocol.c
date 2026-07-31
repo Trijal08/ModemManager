@@ -416,9 +416,18 @@ mm_sit_apn_auth_from_properties (MMBearerProperties *properties,
     out->password = mm_bearer_properties_get_password (properties);
     allowed = mm_bearer_properties_get_allowed_auth (properties);
 
+    /* Credentials decide before the mask does. NetworkManager sends a mask
+     * allowing everything it knows unless the user refused something, so an
+     * ordinary connection with no username arrives asking for PAP or CHAP with
+     * nothing to present -- and the vendor sends 0 for exactly that case.
+     * mm-bearer-mbim.c guards it the same way, and in the same order. */
+    if (!out->user && !out->password) {
+        out->auth = MM_SIT_AUTH_TYPE_NONE;
+        return TRUE;
+    }
+
     if (allowed == MM_BEARER_ALLOWED_AUTH_UNKNOWN) {
-        out->auth = (out->user || out->password) ?
-            MM_SIT_AUTH_TYPE_PAP_OR_CHAP : MM_SIT_AUTH_TYPE_NONE;
+        out->auth = MM_SIT_AUTH_TYPE_PAP_OR_CHAP;
         return TRUE;
     }
 

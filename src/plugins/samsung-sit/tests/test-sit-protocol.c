@@ -169,6 +169,15 @@ test_apn_auth_from_properties (void)
     } cases[] = {
         /* Nothing stated and nothing to send: no authentication. */
         { MM_BEARER_ALLOWED_AUTH_UNKNOWN,  NULL,    MM_SIT_AUTH_TYPE_NONE,        TRUE },
+        /* Credentials decide before the mask does: NetworkManager's default
+         * mask allows PAP and CHAP, but with no username there is nothing to
+         * present, and the vendor sends 0 for exactly this case. */
+        { MM_BEARER_ALLOWED_AUTH_PAP | MM_BEARER_ALLOWED_AUTH_CHAP |
+          MM_BEARER_ALLOWED_AUTH_MSCHAP | MM_BEARER_ALLOWED_AUTH_MSCHAPV2 |
+          MM_BEARER_ALLOWED_AUTH_EAP,      NULL,    MM_SIT_AUTH_TYPE_NONE,        TRUE },
+        /* ...and a method the CP cannot do is not an error when there are no
+         * credentials to protect. */
+        { MM_BEARER_ALLOWED_AUTH_EAP,      NULL,    MM_SIT_AUTH_TYPE_NONE,        TRUE },
         /* Nothing stated but credentials present: let the network choose. */
         { MM_BEARER_ALLOWED_AUTH_UNKNOWN,  "alice", MM_SIT_AUTH_TYPE_PAP_OR_CHAP, TRUE },
         { MM_BEARER_ALLOWED_AUTH_NONE,     "alice", MM_SIT_AUTH_TYPE_NONE,        TRUE },
