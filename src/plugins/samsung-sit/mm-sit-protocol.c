@@ -98,15 +98,16 @@ mm_sit_message_parse (const guint8  *data,
     self->token = read_le16 (&data[6]);
     self->raw = g_bytes_new (data, data_len);
 
-    if (self->type == MM_SIT_MESSAGE_TYPE_RESPONSE && data_len >= 10) {
+    if (self->type == MM_SIT_MESSAGE_TYPE_RESPONSE && data_len > MM_SIT_STATUS_OFFSET) {
         /*
-         * RCM errors are 16-bit.  Most responses reserve four bytes, but the
-         * 12-byte SET_RADIO_POWER response overlays the resulting state in
-         * the upper half.  Reading a u32 would turn successful state=2 into
-         * the false error 0x00020000.
+         * The status is the single byte at @10, right after the 10-byte header
+         * (the token is 32 bits, so @8/@9 are its high half and always zero --
+         * reading a status there is why a rejected request used to look like a
+         * successful one).  The RIL maps this byte to an Android RIL_Errno;
+         * 2 is GENERIC_FAILURE.
          */
         self->has_status = TRUE;
-        self->status = read_le16 (&data[8]);
+        self->status = data[MM_SIT_STATUS_OFFSET];
     }
 
     return self;
@@ -182,7 +183,7 @@ ffi_status_to_gio (SamsungSitStatus status)
     case SAMSUNG_SIT_STATUS_NULL_POINTER:
     case SAMSUNG_SIT_STATUS_UTF8:
         return G_IO_ERROR_INVALID_ARGUMENT;
-    case SAMSUNG_SIT_STATUS_TRANSPORT_STATUS:
+    case SAMSUNG_SIT_STATUS_CP_STATUS:
         return G_IO_ERROR_FAILED;
     case SAMSUNG_SIT_STATUS_UNSUPPORTED:
         return G_IO_ERROR_NOT_SUPPORTED;
@@ -384,15 +385,16 @@ mm_sit_request_new_setup_data_call (guint16      token,
 }
 
 GByteArray *
-mm_sit_request_new_deactivate_data_call (guint16 token,
-                                         guint8  cid,
-                                         guint8  reason)
+mm_sit_request_new_deactivate_data_call (guint16          token,
+                                         guint8           cid,
+                                         MMSitDeactReason reason)
 {
     guint8          *buffer = NULL;
     gsize            len = 0;
     SamsungSitStatus status;
 
-    status = samsung_sit_build_deactivate_data_call (token, cid, reason, &buffer, &len);
+    status = samsung_sit_build_deactivate_data_call (token, cid, (SamsungSitDeactReason) reason,
+                                                    &buffer, &len);
     return finish_build (status, buffer, len, NULL);
 }
 
@@ -1309,19 +1311,17 @@ mm_sit_request_new_stop_network_scan (guint16 token)
 }
 
 gboolean
-mm_sit_message_parse_network_selection_manual_result (const MMSitMessage *message,
-                                                      guint16            *out_result,
-                                                      GError            **error)
+mm_sit_message_parse_network_selection_manual_ack (const MMSitMessage *message,
+                                                   GError            **error)
 {
     const guint8    *data;
     gsize            len;
     SamsungSitStatus status;
 
     g_return_val_if_fail (message != NULL, FALSE);
-    g_return_val_if_fail (out_result != NULL, FALSE);
 
     data = mm_sit_message_get_data (message, &len);
-    status = samsung_sit_parse_network_selection_manual_result (data, len, out_result);
+    status = samsung_sit_parse_network_selection_manual_ack (data, len);
     if (status != SAMSUNG_SIT_STATUS_OK) {
         set_ffi_error (error, status);
         return FALSE;

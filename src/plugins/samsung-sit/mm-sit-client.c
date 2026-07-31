@@ -2027,6 +2027,61 @@ mm_sit_client_connect_data_finish (MMSitClient    *self,
     return TRUE;
 }
 
+/* Second attempt at a teardown the CP refused, with the reason its own RIL
+ * reserves for a context that is up but broken. */
+static void
+disconnect_reset_ready (MMSitClient  *self,
+                        GAsyncResult *res,
+                        GTask        *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    GError                 *error = NULL;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (!response || !message_check_success (response, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+disconnect_normal_ready (MMSitClient  *self,
+                         GAsyncResult *res,
+                         GTask        *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    g_autoptr(GByteArray)   retry = NULL;
+    g_autoptr(GError)       error = NULL;
+    guint8                  cid;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (response && message_check_success (response, &error)) {
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+
+    /*
+     * A NORMAL deactivate is refused (status 2, GENERIC_FAILURE) for a context
+     * the CP will not drop on request -- seen after a long suspend, where the
+     * network had degraded a dual-stack context to IPv4-only.  Leaving it up is
+     * worse than it sounds: SETUP_DATA_CALL then keeps handing that same
+     * context back and ignores the PDP type asked for, so the bearer can never
+     * renegotiate its address families.  The RIL's own recovery for this is
+     * DEACT_REASON_PDP_RESET, so escalate once before giving up.
+     */
+    cid = GPOINTER_TO_UINT (g_task_get_task_data (task));
+    mm_obj_dbg (self->priv->port,
+                "data call %u refused a normal deactivate (%s); retrying as PDP reset",
+                cid, error->message);
+
+    retry = mm_sit_request_new_deactivate_data_call (next_token (self), cid,
+                                                     MM_SIT_DEACT_REASON_PDP_RESET);
+    mm_sit_client_command (self, retry, 10, g_task_get_cancellable (task),
+                           (GAsyncReadyCallback) disconnect_reset_ready, task);
+}
+
 void
 mm_sit_client_disconnect_data (MMSitClient        *self,
                                guint8              cid,
@@ -2035,9 +2090,14 @@ mm_sit_client_disconnect_data (MMSitClient        *self,
                                gpointer            user_data)
 {
     g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
 
-    request = mm_sit_request_new_deactivate_data_call (next_token (self), cid, 0);
-    run_checked_command (self, request, 10, cancellable, callback, user_data);
+    task = g_task_new (self, cancellable, callback, user_data);
+    g_task_set_task_data (task, GUINT_TO_POINTER ((guint) cid), NULL);
+    request = mm_sit_request_new_deactivate_data_call (next_token (self), cid,
+                                                       MM_SIT_DEACT_REASON_NORMAL);
+    mm_sit_client_command (self, request, 10, cancellable,
+                           (GAsyncReadyCallback) disconnect_normal_ready, task);
 }
 
 gboolean
@@ -2084,7 +2144,6 @@ set_network_selection_manual_ready (MMSitClient  *self,
 {
     g_autoptr(MMSitMessage) response = NULL;
     GError                 *error = NULL;
-    guint16                 result = 0;
 
     response = mm_sit_client_command_finish (self, res, &error);
     if (!response || !message_check_success (response, &error)) {
@@ -2092,18 +2151,11 @@ set_network_selection_manual_ready (MMSitClient  *self,
         g_object_unref (task);
         return;
     }
-    /* The transport status is zero even for a refused PLMN, so the ack's own
-     * result word is the only signal that the selection did not take. */
-    if (!mm_sit_message_parse_network_selection_manual_result (response, &result, &error)) {
+    /* A refusal is the CP's status byte -- captured ones carry 2
+     * (GENERIC_FAILURE) and 7 (CANCELLED) -- so message_check_success above has
+     * already caught it and there is nothing further to inspect. */
+    if (!mm_sit_message_parse_network_selection_manual_ack (response, &error)) {
         g_task_return_error (task, error);
-        g_object_unref (task);
-        return;
-    }
-    if (result != 0) {
-        g_task_return_new_error (task, MM_MOBILE_EQUIPMENT_ERROR,
-                                 MM_MOBILE_EQUIPMENT_ERROR_NO_NETWORK,
-                                 "CP refused the manual network selection (result %u)",
-                                 result);
         g_object_unref (task);
         return;
     }

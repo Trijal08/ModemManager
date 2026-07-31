@@ -43,6 +43,11 @@ set_le32 (guint8 *data,
 static void
 test_parse_header (void)
 {
+    /* A captured 12-byte SET_RADIO_POWER reply: header, then the token's high
+     * half at @8/@9 and the status byte at @10.  This particular one is the
+     * refusal the CP sends when the radio is already in the requested state --
+     * status 2, GENERIC_FAILURE -- which used to read as success because the
+     * status was taken from @8. */
     static const guint8 raw[] = {
         0x01, 0x00, 0x00, 0x08, 0x0c, 0x00, 0x34, 0x12,
         0x00, 0x00, 0x02, 0x00,
@@ -58,7 +63,7 @@ test_parse_header (void)
     g_assert_cmpuint (message->length, ==, sizeof (raw));
     g_assert_cmphex (message->token, ==, 0x1234);
     g_assert_true (message->has_status);
-    g_assert_cmpuint (message->status, ==, 0);
+    g_assert_cmpuint (message->status, ==, 2);
 }
 
 static void
@@ -1488,7 +1493,11 @@ client_radio_test_peer (ClientTestContext *ctx)
                 g_assert_cmpuint (body[0xda - MM_SIT_HEADER_SIZE], ==, MM_SIT_PDP_TYPE_IPV4V6);
         }
 
-        response_len = (expected_ids[i] == MM_SIT_MESSAGE_GET_RADIO_POWER) ? 16 : 12;
+        /* Captured shapes: a successful SET reply is 13 bytes carrying nothing
+         * but a zero status, and the state comes from the GET reply's u32 at
+         * @12.  (A 12-byte SET reply with 2 at @10 is not "state on" but the
+         * CP's GENERIC_FAILURE for a radio already in that state.) */
+        response_len = (expected_ids[i] == MM_SIT_MESSAGE_GET_RADIO_POWER) ? 16 : 13;
         response[0] = MM_SIT_MESSAGE_TYPE_RESPONSE;
         response[2] = header[2];
         response[3] = header[3];
@@ -1497,8 +1506,6 @@ client_radio_test_peer (ClientTestContext *ctx)
         response[7] = header[7];
         if (response_len == 16)
             response[12] = MM_SIT_RADIO_STATE_ON;
-        else
-            response[10] = MM_SIT_RADIO_STATE_ON;
         g_assert_true (write_all (ctx->peer_fd, response, response_len));
     }
     return NULL;

@@ -8,6 +8,8 @@
 
 #define MM_SIT_HEADER_SIZE          8
 #define MM_SIT_STATUS_SIZE          4
+/* Offset of a response's status byte, past the 10-byte header. */
+#define MM_SIT_STATUS_OFFSET        10
 #define MM_SIT_MAX_APN_LENGTH       100
 #define MM_SIT_SHA1_LENGTH          20
 #define MM_SIT_MAX_SIM_SLOTS        4
@@ -104,6 +106,14 @@ typedef enum {
 
 /* Address families to ask the network for in a data context. The CP's own
  * numbering, so a data call's granted addr_type uses the same values. */
+/* Why a data call is being torn down. PDP_RESET is the RIL's own
+ * DEACT_REASON_PDP_RESET, which a context the CP refuses to drop normally does
+ * respond to. */
+typedef enum {
+    MM_SIT_DEACT_REASON_NORMAL    = 0,
+    MM_SIT_DEACT_REASON_PDP_RESET = 2,
+} MMSitDeactReason;
+
 typedef enum {
     MM_SIT_PDP_TYPE_IPV4   = 1,
     MM_SIT_PDP_TYPE_IPV6   = 2,
@@ -466,7 +476,7 @@ GByteArray *mm_sit_request_new_setup_data_call        (guint16                to
                                                        GError               **error);
 GByteArray *mm_sit_request_new_deactivate_data_call   (guint16                token,
                                                        guint8                 cid,
-                                                       guint8                 reason);
+                                                       MMSitDeactReason       reason);
 GByteArray *mm_sit_request_new_get_data_call_list     (guint16                token);
 GByteArray *mm_sit_request_new_dial                   (guint16                token,
                                                        const gchar           *number,
@@ -603,11 +613,10 @@ gboolean mm_sit_message_parse_data_call_list          (const MMSitMessage    *me
                                                        GArray               **out_calls,
                                                        GError               **error);
 
-/* The outcome of a SET_NETWORK_SELECTION_MANUAL ack: 0 on success. The transport
- * status is zero even when the selection failed, so this is the only signal. */
-gboolean mm_sit_message_parse_network_selection_manual_result
+/* Validate a SET_NETWORK_SELECTION_MANUAL ack. There is nothing to read out of
+ * it: a refusal is the CP's status byte, so it comes back as an error. */
+gboolean mm_sit_message_parse_network_selection_manual_ack
                                                       (const MMSitMessage    *message,
-                                                       guint16               *out_result,
                                                        GError               **error);
 /* Fills *out_networks with a GArray of MMSitScannedNetwork (may be empty, never
  * NULL on success); the caller owns it. Each NET_SCAN_RESULT batch repeats every
