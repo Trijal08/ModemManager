@@ -376,8 +376,17 @@ test_parse_radio (void)
     static const guint8 indication_on[] = {
         2, 0, 2, 8, 12, 0, 0, 0, 2, 0, 0, 0,
     };
-    static const guint8 indication[] = {
+    /* The two messages do not share a value space. An indication's 1 is off
+     * (ProtocolRadioStateAdapter's table maps 0 and 1 alike), while a GET's 1
+     * is UNAVAILABLE and a GET reports off as 0. */
+    static const guint8 indication_off[] = {
         2, 0, 2, 8, 12, 0, 0, 0, 1, 0, 0, 0,
+    };
+    static const guint8 get_response_off[] = {
+        1, 0, 1, 8, 16, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    };
+    static const guint8 get_response_unavailable[] = {
+        1, 0, 1, 8, 16, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0,
     };
     g_autoptr(MMSitMessage) message = NULL;
     g_autoptr(GError)       error = NULL;
@@ -405,7 +414,24 @@ test_parse_radio (void)
     g_assert_cmpuint (state, ==, MM_SIT_RADIO_STATE_ON);
 
     g_clear_pointer (&message, mm_sit_message_free);
-    message = mm_sit_message_parse (indication, sizeof (indication), &error);
+    message = mm_sit_message_parse (indication_off, sizeof (indication_off), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_radio_state (message, &state, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (state, ==, MM_SIT_RADIO_STATE_OFF);
+
+    /* The frame the radio-off poll waits for: read as anything but OFF, the
+     * poll runs to its timeout and reports "did not reach state 1". */
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (get_response_off, sizeof (get_response_off), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_radio_state (message, &state, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (state, ==, MM_SIT_RADIO_STATE_OFF);
+
+    g_clear_pointer (&message, mm_sit_message_free);
+    message = mm_sit_message_parse (get_response_unavailable,
+                                    sizeof (get_response_unavailable), &error);
     g_assert_no_error (error);
     g_assert_true (mm_sit_message_parse_radio_state (message, &state, &error));
     g_assert_no_error (error);
