@@ -39,6 +39,10 @@ struct _MMBroadbandModemSamsungSitPrivate {
     gchar       *carrier_config_imsi;
     /* PLMNs the card lists as forbidden (EF_FPLMN), so a scan can say so. */
     GPtrArray   *forbidden_plmns;
+    /* Reach the SIT ports through sit-proxy rather than owning the device
+     * nodes, so mm-sit-tool and the IMS helper can share them. Set from
+     * ID_MM_SIT_PROXY on the port. */
+    gboolean     use_proxy;
 };
 
 typedef struct {
@@ -909,7 +913,9 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
             continue;
         }
 
-        client = mm_sit_client_new (mm_port_get_device (port));
+        client = self->priv->use_proxy
+            ? mm_sit_client_new_proxy (mm_port_get_device (port))
+            : mm_sit_client_new (mm_port_get_device (port));
         if (!mm_sit_client_open (client, error)) {
             g_object_unref (client);
             self->priv->client = NULL;
@@ -918,8 +924,9 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
             return NULL;
         }
         g_ptr_array_add (self->priv->clients, client);
-        mm_obj_info (self, "opened Samsung SIT logical stack %u on %s",
-                     self->priv->clients->len - 1, mm_port_get_device (port));
+        mm_obj_info (self, "opened Samsung SIT logical stack %u on %s%s",
+                     self->priv->clients->len - 1, mm_port_get_device (port),
+                     mm_sit_client_is_proxied (client) ? " (via sit-proxy)" : "");
     }
     g_list_free_full (ports, g_object_unref);
 
@@ -3595,9 +3602,12 @@ mm_broadband_modem_samsung_sit_new (const gchar  *device,
                                     const gchar  *plugin,
                                     guint16       vendor_id,
                                     guint16       product_id,
-                                    const gchar  *carrier_config_database)
+                                    const gchar  *carrier_config_database,
+                                    gboolean      use_proxy)
 {
-    return g_object_new (MM_TYPE_BROADBAND_MODEM_SAMSUNG_SIT,
+    MMBroadbandModemSamsungSit *self;
+
+    self = g_object_new (MM_TYPE_BROADBAND_MODEM_SAMSUNG_SIT,
                          MM_BASE_MODEM_DEVICE, device,
                          MM_BASE_MODEM_PHYSDEV, physdev,
                          MM_BASE_MODEM_DRIVERS, drivers,
@@ -3612,6 +3622,11 @@ mm_broadband_modem_samsung_sit_new (const gchar  *device,
                          MM_IFACE_MODEM_3GPP_5GS_NETWORK_SUPPORTED, TRUE,
                          MM_IFACE_MODEM_CARRIER_CONFIG_MAPPING, carrier_config_database,
                          NULL);
+
+    /* Not a construct property: nothing reads it until peek_client, which is
+     * well after construction. */
+    self->priv->use_proxy = use_proxy;
+    return self;
 }
 
 static void

@@ -20,11 +20,15 @@ static gchar    *opt_model;
 static gchar    *opt_build_id;
 static gchar    *opt_carrier_directory;
 static gchar    *opt_carrier_sha1;
+static gboolean  opt_no_proxy;
 static gint      opt_indication_filter = 0x7f;
 
 static GOptionEntry entries[] = {
     { "device", 'd', 0, G_OPTION_ARG_FILENAME, &opt_device,
       "SIT device (default: first /dev/wwan*sit*, then /dev/umts_ipc0)", "PATH" },
+    { "no-proxy", 0, 0, G_OPTION_ARG_NONE, &opt_no_proxy,
+      "Open the device node directly instead of going through sit-proxy "
+      "(requires stopping ModemManager first)", NULL },
     { "verbose", 'v', 0, G_OPTION_ARG_NONE, &opt_verbose,
       "Enable transport debug logging (payloads stay redacted)", NULL },
     { "dump-payload", 0, 0, G_OPTION_ARG_NONE, &opt_dump_payload,
@@ -910,7 +914,22 @@ main (int argc,
         return EXIT_FAILURE;
     }
 
-    client = mm_sit_client_new (device);
+    /* Prefer sit-proxy when it is there. The device node has a single useful
+     * owner -- concurrent readers race one shared rxq and steal each other's
+     * frames -- so without the proxy this tool needs ModemManager stopped,
+     * which has always been the tax on every debugging session. */
+    if (!opt_no_proxy) {
+        g_autofree gchar *socket_path = mm_sit_proxy_socket_path (device);
+
+        if (g_file_test (socket_path, G_FILE_TEST_EXISTS)) {
+            if (opt_verbose)
+                g_printerr ("Using sit-proxy at %s\n", socket_path);
+            client = mm_sit_client_new_proxy (device);
+        }
+    }
+    if (!client)
+        client = mm_sit_client_new (device);
+
     if (!mm_sit_client_open (client, &error)) {
         g_printerr ("Cannot open %s: %s\n", device, error->message);
         mm_log_shutdown ();

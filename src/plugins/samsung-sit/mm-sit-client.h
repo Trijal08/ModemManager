@@ -26,10 +26,22 @@ struct _MMSitClientClass {
     GObjectClass parent;
 };
 
+/* Where sit-proxy puts its per-port sockets, one per SIT device node. */
+#define MM_SIT_PROXY_SOCKET_DIRECTORY "/run/sit-proxy"
+
 GType        mm_sit_client_get_type   (void);
+/* Own the device node directly. Nothing else can then use the port. */
 MMSitClient *mm_sit_client_new        (const gchar *device);
+/* Go through sit-proxy so debug tools can share the port, falling back to the
+ * device node at open() time if the proxy is not there. */
+MMSitClient *mm_sit_client_new_proxy  (const gchar *device);
 MMSitClient *mm_sit_client_new_from_port (MMPortSerialSit *port);
 const gchar *mm_sit_client_get_device (MMSitClient *self);
+/* TRUE if this client actually ended up talking to sit-proxy. */
+gboolean     mm_sit_client_is_proxied (MMSitClient *self);
+
+/* sit-proxy's socket for the SIT device node @device (with or without /dev/). */
+gchar       *mm_sit_proxy_socket_path (const gchar *device);
 
 gboolean mm_sit_client_open    (MMSitClient  *self,
                                 GError      **error);

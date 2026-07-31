@@ -32,7 +32,10 @@ typedef void (*MMPortSerialSitUnsolicitedFn) (MMPortSerialSit    *self,
                                               gpointer            user_data);
 
 GType            mm_port_serial_sit_get_type (void);
+/* Talk to the device node itself: @name is a /dev entry without the prefix. */
 MMPortSerialSit *mm_port_serial_sit_new      (const gchar *name);
+/* Talk to sit-proxy: @path is its AF_UNIX socket for one SIT port. */
+MMPortSerialSit *mm_port_serial_sit_new_socket (const gchar *path);
 
 guint16 mm_port_serial_sit_next_token (MMPortSerialSit *self);
 

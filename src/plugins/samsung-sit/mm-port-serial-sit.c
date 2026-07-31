@@ -314,6 +314,22 @@ mm_port_serial_sit_new (const gchar *name)
                                              NULL));
 }
 
+MMPortSerialSit *
+mm_port_serial_sit_new_socket (const gchar *path)
+{
+    /* MM_PORT_SUBSYS_UNIX is all it takes: mm_port_serial_open() then connects
+     * an AF_UNIX GSocket to MM_PORT_DEVICE instead of open()ing /dev/<device>.
+     * The framing above is unchanged -- it reassembles by the header's declared
+     * length rather than trusting message boundaries, which is exactly what a
+     * SOCK_STREAM connection needs (and what the device itself needs anyway,
+     * since the kernel splits messages over 2036 bytes across reads). */
+    return MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+                                             MM_PORT_DEVICE, path,
+                                             MM_PORT_SUBSYS, MM_PORT_SUBSYS_UNIX,
+                                             MM_PORT_TYPE, MM_PORT_TYPE_SIT,
+                                             NULL));
+}
+
 static void
 mm_port_serial_sit_init (MMPortSerialSit *self)
 {

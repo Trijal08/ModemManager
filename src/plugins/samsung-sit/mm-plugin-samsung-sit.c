@@ -26,6 +26,7 @@ create_modem (MMPlugin      *self,
 {
     g_autofree gchar *database = NULL;
     const gchar      *directory = MM_SIT_DEFAULT_CARRIER_CONFIG_DIRECTORY;
+    gboolean          use_proxy = FALSE;
     GList            *l;
 
     if (!mm_port_probe_list_has_sit_port (probes)) {
@@ -46,12 +47,16 @@ create_modem (MMPlugin      *self,
             port, "ID_MM_SIT_CARRIER_CONFIG_DIRECTORY");
         if (configured_directory && configured_directory[0])
             directory = configured_directory;
+        /* Declared by the udev rule that ships with sit-proxy, so the transport
+         * is a packaging decision rather than something probed at runtime. */
+        use_proxy = mm_kernel_device_get_property_as_boolean (port, "ID_MM_SIT_PROXY");
         break;
     }
 
     database = g_build_filename (directory, "cfg.db", NULL);
     return MM_BASE_MODEM (mm_broadband_modem_samsung_sit_new (
-        uid, physdev, drivers, mm_plugin_get_name (self), vendor, product, database));
+        uid, physdev, drivers, mm_plugin_get_name (self), vendor, product, database,
+        use_proxy));
 }
 
 MM_PLUGIN_NAMED_CREATOR_SCOPE MMPlugin *

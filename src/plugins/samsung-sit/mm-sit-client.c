@@ -16,6 +16,9 @@ static guint signals[SIGNAL_LAST];
 struct _MMSitClientPrivate {
     gchar               *device;
     MMPortSerialSit     *port;
+    /* Device node to retry on if the proxy socket will not open; NULL when we
+     * were told to talk to the node directly in the first place. */
+    gchar               *proxy_fallback_device;
     guint                unsolicited_handler_id;
     gboolean             has_carrier_sim_info;
     MMSitCarrierSimInfo  carrier_sim_info;
@@ -85,6 +88,56 @@ mm_sit_client_new (const gchar *device)
     return self;
 }
 
+gchar *
+mm_sit_proxy_socket_path (const gchar *device)
+{
+    const gchar *sit;
+    const gchar *index = NULL;
+
+    g_return_val_if_fail (device != NULL, NULL);
+
+    /* sit-proxy names one socket per device node, by the node's own index:
+     * wwan0sit0 -> /run/sit-proxy/0.  The port is the stack selector under
+     * DSDS, so this mapping is the whole routing story -- there is no selector
+     * inside the protocol. */
+    sit = g_strrstr (device, "sit");
+    if (sit) {
+        const gchar *p = sit + strlen ("sit");
+
+        if (g_ascii_isdigit (*p))
+            index = p;
+    }
+    if (!index) {
+        /* An unrecognised name (a downstream-style /dev/umts_ipc0, say) has no
+         * index to read; assume the first stack, which is the one that carries
+         * everything today. */
+        index = "0";
+    }
+    return g_build_filename (MM_SIT_PROXY_SOCKET_DIRECTORY, index, NULL);
+}
+
+MMSitClient *
+mm_sit_client_new_proxy (const gchar *device)
+{
+    MMSitClient      *self;
+    const gchar      *name;
+    g_autofree gchar *socket_path = NULL;
+
+    g_return_val_if_fail (device != NULL, NULL);
+
+    name = g_str_has_prefix (device, "/dev/") ? device + strlen ("/dev/") : device;
+    socket_path = mm_sit_proxy_socket_path (name);
+
+    self = g_object_new (MM_TYPE_SIT_CLIENT, NULL);
+    /* Keep the device node as the identity -- it is what logs, DSDS and the
+     * user think in, and it is what libqmi does when proxying too. Only the
+     * transport underneath differs. */
+    self->priv->device = g_strdup (name);
+    self->priv->proxy_fallback_device = g_strdup (name);
+    self->priv->port = mm_port_serial_sit_new_socket (socket_path);
+    return self;
+}
+
 MMSitClient *
 mm_sit_client_new_from_port (MMPortSerialSit *port)
 {
@@ -106,15 +159,50 @@ mm_sit_client_get_device (MMSitClient *self)
 }
 
 gboolean
+mm_sit_client_is_proxied (MMSitClient *self)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+
+    /* Ask the port rather than remembering what was asked for: open() may have
+     * fallen back to the device node, and a log that claims otherwise is worse
+     * than no log at all. */
+    return mm_port_get_subsys (MM_PORT (self->priv->port)) == MM_PORT_SUBSYS_UNIX;
+}
+
+gboolean
 mm_sit_client_open (MMSitClient  *self,
                     GError      **error)
 {
+    g_autoptr(GError) inner = NULL;
+
     g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
 
     if (mm_port_serial_is_open (MM_PORT_SERIAL (self->priv->port)))
         return TRUE;
-    if (!mm_port_serial_open (MM_PORT_SERIAL (self->priv->port), error))
-        return FALSE;
+
+    if (!mm_port_serial_open (MM_PORT_SERIAL (self->priv->port), &inner)) {
+        g_autofree gchar *node = NULL;
+
+        /* Configured for the proxy but it did not answer. Rather than leave the
+         * modem dead, say so loudly and take the device node -- the two
+         * transports are interchangeable, so a proxy that is not running should
+         * cost debuggability, not the network. */
+        if (!self->priv->proxy_fallback_device) {
+            g_propagate_error (error, g_steal_pointer (&inner));
+            return FALSE;
+        }
+
+        mm_obj_warn (self->priv->port,
+                     "couldn't reach sit-proxy (%s); falling back to %s directly, "
+                     "so tools cannot share the port",
+                     inner->message, self->priv->proxy_fallback_device);
+
+        node = g_steal_pointer (&self->priv->proxy_fallback_device);
+        g_clear_object (&self->priv->port);
+        self->priv->port = mm_port_serial_sit_new (node);
+        if (!mm_port_serial_open (MM_PORT_SERIAL (self->priv->port), error))
+            return FALSE;
+    }
 
     self->priv->unsolicited_handler_id =
         mm_port_serial_sit_add_unsolicited_handler (self->priv->port,
@@ -2548,6 +2636,7 @@ finalize (GObject *object)
     MMSitClient *self = MM_SIT_CLIENT (object);
 
     g_free (self->priv->device);
+    g_free (self->priv->proxy_fallback_device);
     G_OBJECT_CLASS (mm_sit_client_parent_class)->finalize (object);
 }
 
