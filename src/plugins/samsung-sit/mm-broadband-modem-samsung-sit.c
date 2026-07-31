@@ -43,6 +43,10 @@ struct _MMBroadbandModemSamsungSitPrivate {
      * spent since the last successful registration. */
     guint        reject_retry_id;
     guint        reject_retries;
+    /* The attach APN we last gave the CP. The CP cannot read it back, so this
+     * is what load reports, and in turn what the core compares a new request
+     * against to decide whether it is a change worth a power cycle. */
+    MMBearerProperties *initial_eps_bearer_settings;
     /* Reach the SIT ports through sit-proxy rather than owning the device
      * nodes, so mm-sit-tool and the IMS helper can share them. Set from
      * ID_MM_SIT_PROXY on the port. */
@@ -617,6 +621,158 @@ static MMBaseSms *
 create_sms (MMBroadbandModem *self)
 {
     return mm_sms_samsung_sit_new (MM_BASE_MODEM (self));
+}
+
+/*****************************************************************************/
+
+/*****************************************************************************/
+/* Initial EPS bearer settings (the attach APN) */
+
+/* The APN the CP attaches with is not part of a data call: it is state the CP
+ * carries into the attach itself, and it only takes effect at the *next*
+ * attach. Setting it while already attached leaves the CP attached without it,
+ * and SETUP_DATA_CALL then binds to an attach that has no APN behind it and
+ * comes back with no address at all.
+ *
+ * Forcing that next attach is not this code's job: mm-iface-modem-3gpp powers
+ * the modem down, calls in here, and then restores the previous power state, so
+ * the CP attaches again from scratch with whatever was just set. It also skips
+ * the whole sequence when the request matches what load reported, so repeating
+ * a setting costs nothing.
+ *
+ * ModemManager's model already has the right shape for this -- the attach APN
+ * is the initial EPS bearer, configured out of band by whoever owns the
+ * connection rather than assembled inside a connect attempt -- which is why
+ * this lives here and not in the bearer. */
+
+static gboolean
+set_initial_eps_bearer_settings_finish (MMIfaceModem3gpp  *self,
+                                        GAsyncResult      *res,
+                                        GError           **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+set_initial_attach_apn_ready (MMSitClient  *client,
+                              GAsyncResult *res,
+                              GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    MMBearerProperties         *properties = g_task_get_task_data (task);
+    g_autoptr(GError)           error = NULL;
+
+    if (!mm_sit_client_set_initial_attach_apn_finish (client, res, &error)) {
+        g_task_return_error (task, g_steal_pointer (&error));
+        g_object_unref (task);
+        return;
+    }
+
+    g_clear_object (&self->priv->initial_eps_bearer_settings);
+    self->priv->initial_eps_bearer_settings = g_object_ref (properties);
+
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+set_initial_eps_bearer_settings (MMIfaceModem3gpp    *_self,
+                                 MMBearerProperties  *properties,
+                                 GAsyncReadyCallback  callback,
+                                 gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (_self);
+    GTask                      *task;
+    MMSitClient                *client;
+    g_autoptr(GError)           error = NULL;
+    const gchar                *apn;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, g_steal_pointer (&error));
+        g_object_unref (task);
+        return;
+    }
+
+    apn = mm_bearer_properties_get_apn (properties);
+    if (!apn || !apn[0]) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_INVALID_ARGS,
+                                 "The initial EPS bearer needs an APN");
+        g_object_unref (task);
+        return;
+    }
+
+    g_task_set_task_data (task, g_object_ref (properties), g_object_unref);
+
+    mm_sit_client_set_initial_attach_apn (client, apn,
+                                          mm_bearer_samsung_sit_pdp_type_from_ip_family (mm_bearer_properties_get_ip_type (properties)),
+                                          NULL,
+                                          (GAsyncReadyCallback) set_initial_attach_apn_ready,
+                                          task);
+}
+
+static MMBearerProperties *
+load_initial_eps_bearer_settings_finish (MMIfaceModem3gpp  *self,
+                                         GAsyncResult      *res,
+                                         GError           **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+/* The CP has no way to read the attach APN back, so report what we last set --
+ * which is also what ModemManager needs to tell whether a new request is a
+ * change. Before anything has been set this is empty rather than an error: an
+ * unconfigured attach APN is a legitimate state, not a failure. */
+static void
+load_initial_eps_bearer_settings (MMIfaceModem3gpp    *_self,
+                                  GAsyncReadyCallback  callback,
+                                  gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (_self);
+    GTask                      *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    g_task_return_pointer (task,
+                           self->priv->initial_eps_bearer_settings ?
+                           g_object_ref (self->priv->initial_eps_bearer_settings) :
+                           mm_bearer_properties_new (),
+                           g_object_unref);
+    g_object_unref (task);
+}
+
+static MMBearerProperties *
+load_initial_eps_bearer_finish (MMIfaceModem3gpp  *self,
+                                GAsyncResult      *res,
+                                GError           **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+/* What the *network* settled on, as opposed to what we asked for above. The CP
+ * cannot report it -- there is no SIT request that reads the live attach back --
+ * so decline, rather than pass the settings we requested off as what we got.
+ * Those differ in the ordinary case: with nothing configured the CP still
+ * attaches, on the default APN the HSS holds for the subscriber, and claiming
+ * the empty APN we never sent would be worse than admitting we cannot see it.
+ * Callers treat a failure as "no information" and carry on.
+ *
+ * This has to be implemented even though it only ever fails. MMBroadbandModem's
+ * AT version asserts on a context-id lookup that only the AT
+ * load_initial_eps_bearer_settings performs -- and we replace that one -- so
+ * inheriting it aborts the daemon the moment registration reloads the bearer. */
+static void
+load_initial_eps_bearer (MMIfaceModem3gpp    *self,
+                         GAsyncReadyCallback  callback,
+                         gpointer             user_data)
+{
+    GTask *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_UNSUPPORTED,
+                             "The CP cannot report the negotiated initial EPS bearer");
+    g_object_unref (task);
 }
 
 /*****************************************************************************/
@@ -3224,6 +3380,12 @@ iface_modem_init (MMIfaceModemInterface *iface)
 static void
 iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface)
 {
+    iface->set_initial_eps_bearer_settings = set_initial_eps_bearer_settings;
+    iface->set_initial_eps_bearer_settings_finish = set_initial_eps_bearer_settings_finish;
+    iface->load_initial_eps_bearer_settings = load_initial_eps_bearer_settings;
+    iface->load_initial_eps_bearer_settings_finish = load_initial_eps_bearer_settings_finish;
+    iface->load_initial_eps_bearer = load_initial_eps_bearer;
+    iface->load_initial_eps_bearer_finish = load_initial_eps_bearer_finish;
     iface->run_registration_checks = registration_checks;
     iface->run_registration_checks_finish = registration_checks_finish;
     iface->register_in_network = register_in_network;
@@ -3774,6 +3936,7 @@ dispose (GObject *object)
         g_source_remove (self->priv->reject_retry_id);
         self->priv->reject_retry_id = 0;
     }
+    g_clear_object (&self->priv->initial_eps_bearer_settings);
     self->priv->client = NULL;
     g_clear_pointer (&self->priv->clients, g_ptr_array_unref);
     G_OBJECT_CLASS (mm_broadband_modem_samsung_sit_parent_class)->dispose (object);

@@ -2418,6 +2418,37 @@ mm_sit_client_get_allowed_network_types_finish (MMSitClient             *self,
 }
 
 void
+mm_sit_client_set_initial_attach_apn (MMSitClient        *self,
+                                      const gchar        *apn,
+                                      MMSitPdpType        pdp,
+                                      GCancellable       *cancellable,
+                                      GAsyncReadyCallback callback,
+                                      gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    g_autoptr(GError)     error = NULL;
+
+    request = mm_sit_request_new_set_initial_attach_apn (next_token (self), apn, pdp, &error);
+    if (!request) {
+        GTask *task = g_task_new (self, cancellable, callback, user_data);
+
+        g_task_return_error (task, g_steal_pointer (&error));
+        g_object_unref (task);
+        return;
+    }
+    run_checked_command (self, request, 10, cancellable, callback, user_data);
+}
+
+gboolean
+mm_sit_client_set_initial_attach_apn_finish (MMSitClient  *self,
+                                             GAsyncResult *res,
+                                             GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+void
 mm_sit_client_set_allowed_network_types (MMSitClient                   *self,
                                          const MMSitNetworkGenerations *generations,
                                          GCancellable                  *cancellable,

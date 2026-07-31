@@ -347,6 +347,19 @@ gboolean mm_sit_client_send_boot_config_finish (MMSitClient        *self,
                                                 GAsyncResult       *res,
                                                 GError            **error);
 
+/* The APN the CP attaches with. It takes effect at the *next* attach, not the
+ * current one, so a caller changing it has to force a re-attach for it to mean
+ * anything. */
+void     mm_sit_client_set_initial_attach_apn        (MMSitClient        *self,
+                                                      const gchar        *apn,
+                                                      MMSitPdpType        pdp,
+                                                      GCancellable       *cancellable,
+                                                      GAsyncReadyCallback callback,
+                                                      gpointer            user_data);
+gboolean mm_sit_client_set_initial_attach_apn_finish (MMSitClient        *self,
+                                                      GAsyncResult       *res,
+                                                      GError            **error);
+
 /* 'pdp' is the address family to request; the CP may grant less, and the
  * resulting MMSitDataCall says which families actually came back. */
 void     mm_sit_client_connect_data        (MMSitClient        *self,

@@ -28,8 +28,8 @@ connect_finish (MMBaseBearer  *bearer,
 /* Which families to ask the network for. A connection that states no
  * preference gets a dual-stack request -- the CP narrows it to whatever the
  * network grants, so asking for both costs nothing on a v4-only APN. */
-static MMSitPdpType
-ip_family_to_pdp_type (MMBearerIpFamily family)
+MMSitPdpType
+mm_bearer_samsung_sit_pdp_type_from_ip_family (MMBearerIpFamily family)
 {
     if (family == MM_BEARER_IP_FAMILY_IPV4)
         return MM_SIT_PDP_TYPE_IPV4;
@@ -166,7 +166,7 @@ carrier_config_ready (MMBroadbandModemSamsungSit *modem,
     properties = mm_base_bearer_peek_config (bearer);
     apn = mm_bearer_properties_get_apn (properties);
     mm_sit_client_connect_data (client, apn,
-                                ip_family_to_pdp_type (mm_bearer_properties_get_ip_type (properties)),
+                                mm_bearer_samsung_sit_pdp_type_from_ip_family (mm_bearer_properties_get_ip_type (properties)),
                                 g_task_get_cancellable (task),
                                 (GAsyncReadyCallback) connect_ready, task);
 }

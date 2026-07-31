@@ -5,6 +5,7 @@
 #define MM_BEARER_SAMSUNG_SIT_H
 
 #include "mm-base-bearer.h"
+#include "mm-sit-protocol.h"
 
 typedef struct _MMBroadbandModemSamsungSit MMBroadbandModemSamsungSit;
 
@@ -28,6 +29,10 @@ struct _MMBearerSamsungSitClass {
 GType         mm_bearer_samsung_sit_get_type (void);
 MMBaseBearer *mm_bearer_samsung_sit_new      (MMBroadbandModemSamsungSit *modem,
                                                MMBearerProperties         *properties);
+
+/* Which families to ask the network for. Shared with the attach APN, which has
+ * to make the same choice from the same MM property. */
+MMSitPdpType  mm_bearer_samsung_sit_pdp_type_from_ip_family (MMBearerIpFamily family);
 
 /* The CP's context id for the PDN this bearer carries, or 0 when not connected;
  * used to match it against a data-call list the CP reports. */
