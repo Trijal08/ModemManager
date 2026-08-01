@@ -1410,6 +1410,197 @@ port_test_timeout (PortTestContext *ctx)
     return G_SOURCE_REMOVE;
 }
 
+/* Peer that answers with a stale response first -- the wreckage of a command
+ * that already timed out -- and only then with the real one. Reproduces the
+ * race a busy CP produces: MMPortSerial has moved on, and the late frame lands
+ * in front of a caller it has nothing to do with. */
+static gpointer
+port_test_stale_peer (PortTestContext *ctx)
+{
+    guint8 request[64];
+    /* A response to some earlier command: same shape, a token nobody awaits. */
+    guint8 stale[] = {
+        1, 0, 0x00, 0x02, 20, 0, 0xff, 0xee, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+    };
+    guint8 reply[] = {
+        1, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+    };
+    gssize request_len;
+
+    request_len = read (ctx->peer_fd, request, sizeof (request));
+    g_assert_cmpint (request_len, >=, MM_SIT_HEADER_SIZE);
+    g_assert_true (write_all (ctx->peer_fd, stale, sizeof (stale)));
+    reply[2] = request[2];
+    reply[3] = request[3];
+    reply[6] = request[6];
+    reply[7] = request[7];
+    g_assert_true (write_all (ctx->peer_fd, reply, sizeof (reply)));
+    return NULL;
+}
+
+static void
+port_test_stale_ready (MMPortSerialSit *port,
+                       GAsyncResult    *res,
+                       PortTestContext *ctx)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    g_autoptr(GError)       error = NULL;
+
+    response = mm_port_serial_sit_command_finish (port, res, &error);
+    /* The stale frame must not be mistaken for this command's answer. */
+    g_assert_no_error (error);
+    g_assert_nonnull (response);
+    g_assert_cmphex (response->id, ==, MM_SIT_MESSAGE_GET_SIM_STATUS);
+    g_assert_cmphex (response->token, ==, 1);
+    ctx->command_completed = TRUE;
+    g_main_loop_quit (ctx->loop);
+}
+
+static void
+test_port_drops_a_stale_response (void)
+{
+    PortTestContext            ctx = { 0 };
+    gint                       sockets[2];
+    guint                      timeout_id;
+    g_autoptr(GThread)         peer = NULL;
+    g_autoptr(MMPortSerialSit) port = NULL;
+    g_autoptr(GByteArray)      request = NULL;
+    g_autoptr(GError)          error = NULL;
+
+    g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    ctx.peer_fd = sockets[1];
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+
+    port = MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+                                             MM_PORT_DEVICE, "test-sit-stale",
+                                             MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+                                             MM_PORT_TYPE, MM_PORT_TYPE_SIT,
+                                             MM_PORT_SERIAL_FD, sockets[0],
+                                             NULL));
+    g_assert_true (mm_port_serial_open (MM_PORT_SERIAL (port), &error));
+    g_assert_no_error (error);
+
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_SIM_STATUS,
+                                        mm_port_serial_sit_next_token (port));
+    peer = g_thread_new ("sit-test-stale-peer", (GThreadFunc) port_test_stale_peer, &ctx);
+    mm_port_serial_sit_command (port, request, 2, NULL,
+                                (GAsyncReadyCallback) port_test_stale_ready, &ctx);
+    timeout_id = g_timeout_add_seconds (5, (GSourceFunc) port_test_timeout, &ctx);
+    g_main_loop_run (ctx.loop);
+
+    if (!ctx.timed_out)
+        g_source_remove (timeout_id);
+    g_thread_join (g_steal_pointer (&peer));
+    mm_port_serial_close (MM_PORT_SERIAL (port));
+    close (ctx.peer_fd);
+    g_main_loop_unref (ctx.loop);
+
+    g_assert_false (ctx.timed_out);
+    g_assert_true (ctx.command_completed);
+}
+
+/* Peer for the queued-commands case: answer each request in the order it
+ * arrives, promptly and correctly. Nothing is stale here -- the point is that
+ * two commands are outstanding at once. */
+static gpointer
+port_test_queue_peer (PortTestContext *ctx)
+{
+    guint i;
+
+    for (i = 0; i < 2; i++) {
+        guint8 request[64];
+        guint8 reply[] = {
+            1, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0,
+        };
+        gssize request_len;
+
+        request_len = read (ctx->peer_fd, request, sizeof (request));
+        g_assert_cmpint (request_len, >=, MM_SIT_HEADER_SIZE);
+        reply[2] = request[2];
+        reply[3] = request[3];
+        reply[6] = request[6];
+        reply[7] = request[7];
+        g_assert_true (write_all (ctx->peer_fd, reply, sizeof (reply)));
+    }
+    return NULL;
+}
+
+static void
+port_test_queue_ready (MMPortSerialSit *port,
+                       GAsyncResult    *res,
+                       PortTestContext *ctx)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    g_autoptr(GError)       error = NULL;
+
+    response = mm_port_serial_sit_command_finish (port, res, &error);
+    /* Each command must get its own answer. Tracking a single in-flight token
+     * instead of one per queued command discards the running command's reply as
+     * soon as a second command is submitted behind it, and both time out. */
+    g_assert_no_error (error);
+    g_assert_nonnull (response);
+    ctx->indication_count++;
+    if (ctx->indication_count == 2) {
+        ctx->command_completed = TRUE;
+        g_main_loop_quit (ctx->loop);
+    }
+}
+
+/* Two commands submitted back to back, before the first has been written.
+ * MMPortSerial queues them and runs them in order, so both tokens are
+ * outstanding at once. */
+static void
+test_port_answers_queued_commands (void)
+{
+    PortTestContext            ctx = { 0 };
+    gint                       sockets[2];
+    guint                      timeout_id;
+    g_autoptr(GThread)         peer = NULL;
+    g_autoptr(MMPortSerialSit) port = NULL;
+    g_autoptr(GByteArray)      first = NULL;
+    g_autoptr(GByteArray)      second = NULL;
+    g_autoptr(GError)          error = NULL;
+
+    g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    ctx.peer_fd = sockets[1];
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+
+    port = MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+                                             MM_PORT_DEVICE, "test-sit-queue",
+                                             MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+                                             MM_PORT_TYPE, MM_PORT_TYPE_SIT,
+                                             MM_PORT_SERIAL_FD, sockets[0],
+                                             NULL));
+    g_assert_true (mm_port_serial_open (MM_PORT_SERIAL (port), &error));
+    g_assert_no_error (error);
+
+    first = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_SIM_STATUS,
+                                      mm_port_serial_sit_next_token (port));
+    second = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_RADIO_POWER,
+                                       mm_port_serial_sit_next_token (port));
+    peer = g_thread_new ("sit-test-queue-peer", (GThreadFunc) port_test_queue_peer, &ctx);
+    mm_port_serial_sit_command (port, first, 2, NULL,
+                                (GAsyncReadyCallback) port_test_queue_ready, &ctx);
+    mm_port_serial_sit_command (port, second, 2, NULL,
+                                (GAsyncReadyCallback) port_test_queue_ready, &ctx);
+    timeout_id = g_timeout_add_seconds (5, (GSourceFunc) port_test_timeout, &ctx);
+    g_main_loop_run (ctx.loop);
+
+    if (!ctx.timed_out)
+        g_source_remove (timeout_id);
+    g_thread_join (g_steal_pointer (&peer));
+    mm_port_serial_close (MM_PORT_SERIAL (port));
+    close (ctx.peer_fd);
+    g_main_loop_unref (ctx.loop);
+
+    g_assert_false (ctx.timed_out);
+    g_assert_true (ctx.command_completed);
+    g_assert_cmpuint (ctx.indication_count, ==, 2);
+}
+
 static void
 test_port_command_and_indication (void)
 {
@@ -1879,6 +2070,8 @@ main (int argc,
     g_test_add_func ("/MM/sit/carrier-config/resolve", test_carrier_config_resolver);
     g_test_add_func ("/MM/sit/carrier-config/reference-database", test_carrier_config_reference_database);
     g_test_add_func ("/MM/sit/port/command-and-indication", test_port_command_and_indication);
+    g_test_add_func ("/MM/sit/port/stale-response", test_port_drops_a_stale_response);
+    g_test_add_func ("/MM/sit/port/queued-commands", test_port_answers_queued_commands);
     g_test_add_func ("/MM/sit/client/connect-sequence", test_client_connect_sequence);
     g_test_add_func ("/MM/sit/client/radio-transition", test_client_radio_transition);
     g_test_add_func ("/MM/sit/client/boot-config", test_client_boot_config);
