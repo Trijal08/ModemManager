@@ -706,14 +706,16 @@ mm_sit_request_new_set_ap_system_time (guint16    token,
 }
 
 GByteArray *
-mm_sit_request_new_oem_config (guint16 token)
+mm_sit_request_new_oem_config (guint16       token,
+                               const gchar  *software_version,
+                               GError      **error)
 {
     guint8          *buffer = NULL;
     gsize            len = 0;
     SamsungSitStatus status;
 
-    status = samsung_sit_build_oem_config (token, &buffer, &len);
-    return finish_build (status, buffer, len, NULL);
+    status = samsung_sit_build_oem_config (token, software_version, &buffer, &len);
+    return finish_build (status, buffer, len, error);
 }
 
 GByteArray *
@@ -1089,6 +1091,32 @@ mm_sit_message_parse_imei (const MMSitMessage  *message,
         return FALSE;
     }
     *out_imei = imei_len ? g_strndup ((const gchar *) imei, imei_len) : NULL;
+    return TRUE;
+}
+
+gboolean
+mm_sit_message_parse_software_version (const MMSitMessage  *message,
+                                       gchar              **out_version,
+                                       GError             **error)
+{
+    const guint8    *data;
+    gsize            len;
+    gsize            version_len = 0;
+    guint8           version[MM_SIT_SOFTWARE_VERSION_LEN];
+    SamsungSitStatus status;
+
+    G_STATIC_ASSERT (sizeof (version) == SAMSUNG_SIT_SOFTWARE_VERSION_LEN);
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_version != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_software_version (data, len, version, &version_len);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+    *out_version = version_len ? g_strndup ((const gchar *) version, version_len) : NULL;
     return TRUE;
 }
 

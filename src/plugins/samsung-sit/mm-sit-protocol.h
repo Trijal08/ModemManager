@@ -24,6 +24,7 @@
 #define MM_SIT_MAX_SMS_PDU          244
 #define MM_SIT_MAX_SMSC_LEN         12
 #define MM_SIT_MAX_IMEI_LEN         15
+#define MM_SIT_SOFTWARE_VERSION_LEN 2
 #define MM_SIT_MAX_VERSION_FIELD    33
 #define MM_SIT_MAX_DEVICE_INFO_FIELD 32
 /* INET_ADDRSTRLEN / INET6_ADDRSTRLEN, spelled out so this header does not have
@@ -66,6 +67,7 @@ typedef enum {
     MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED    = 0x024e,
     MM_SIT_MESSAGE_SET_LOGICAL_SLOT_MAPPING   = 0x0250,
     MM_SIT_MESSAGE_GET_IMEI                    = 0x0401,
+    MM_SIT_MESSAGE_GET_IMEISV                  = 0x0402,
     MM_SIT_MESSAGE_GET_BASE_BAND_VERSION       = 0x0901,
     MM_SIT_MESSAGE_SETUP_DATA_CALL             = 0x0600,
     MM_SIT_MESSAGE_DEACTIVATE_DATA_CALL        = 0x0601,
@@ -567,7 +569,9 @@ GByteArray *mm_sit_request_new_set_screen_state       (guint16                to
 GByteArray *mm_sit_request_new_set_ap_system_time     (guint16                token,
                                                        GDateTime             *time,
                                                        GError               **error);
-GByteArray *mm_sit_request_new_oem_config             (guint16                token);
+GByteArray *mm_sit_request_new_oem_config             (guint16                token,
+                                                       const gchar           *software_version,
+                                                       GError               **error);
 GByteArray *mm_sit_request_new_set_modem_config       (guint16                token);
 GByteArray *mm_sit_request_new_device_info            (guint16                token,
                                                        const gchar           *model,
@@ -666,6 +670,11 @@ gboolean mm_sit_message_parse_network_selection_mode  (const MMSitMessage       
                                                        GError                   **error);
 gboolean mm_sit_message_parse_imei                    (const MMSitMessage    *message,
                                                        gchar                **out_imei,
+                                                       GError               **error);
+/* The CP firmware's two software-version digits, off the tail of a GET_IMEISV
+ * reply. NULL out on a CP whose identity is unprovisioned. */
+gboolean mm_sit_message_parse_software_version        (const MMSitMessage    *message,
+                                                       gchar                **out_version,
                                                        GError               **error);
 gboolean mm_sit_message_parse_sim_status              (const MMSitMessage    *message,
                                                        MMSitSimStatus        *out_status,

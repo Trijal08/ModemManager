@@ -383,8 +383,16 @@ test_build_boot_config_requests (void)
     assert_bytes (request, expected_time, sizeof (expected_time));
 
     g_clear_pointer (&request, g_byte_array_unref);
-    request = mm_sit_request_new_oem_config (0x43);
+    request = mm_sit_request_new_oem_config (0x43, "33", &error);
+    g_assert_no_error (error);
     assert_bytes (request, expected_oem, sizeof (expected_oem));
+
+    /* The version is the CP's, so anything that is not two digits of it is a
+     * caller bug rather than something to send. */
+    g_clear_pointer (&request, g_byte_array_unref);
+    g_assert_null (mm_sit_request_new_oem_config (0x43, "3", &error));
+    g_assert_nonnull (error);
+    g_clear_error (&error);
 
     g_clear_pointer (&request, g_byte_array_unref);
     request = mm_sit_request_new_set_modem_config (0x44);
@@ -1942,14 +1950,23 @@ client_boot_config_test_peer (ClientTestContext *ctx)
     static const guint16 expected_ids[] = {
         MM_SIT_MESSAGE_SET_AP_SYSTEM_TIME,
         MM_SIT_MESSAGE_DEVICE_INFO,
+        MM_SIT_MESSAGE_GET_IMEISV,
         MM_SIT_MESSAGE_OEM_CONFIG,
         MM_SIT_MESSAGE_SET_MODEM_CONFIG,
+    };
+    /* A GET_IMEISV payload of the captured shape -- a length byte and 17
+     * digits -- with a test identity, so the software version the batch then
+     * sends can be checked against its tail. */
+    static const guint8 imeisv_payload[] = {
+        17, '4', '9', '0', '1', '5', '4', '2', '0', '3',
+        '2', '3', '7', '5', '1', '8', '3', '3',
     };
     guint i;
 
     for (i = 0; i < G_N_ELEMENTS (expected_ids); i++) {
         guint8  header[MM_SIT_HEADER_SIZE];
-        guint8  response[12] = { 0 };
+        guint8  response[12 + sizeof (imeisv_payload)] = { 0 };
+        gsize   response_len = 12;
         guint16 request_len;
 
         g_assert_true (read_all (ctx->peer_fd, header, sizeof (header)));
@@ -1963,15 +1980,26 @@ client_boot_config_test_peer (ClientTestContext *ctx)
              * so 0xda - 8 of the body. */
             if (expected_ids[i] == MM_SIT_MESSAGE_SETUP_DATA_CALL)
                 g_assert_cmpuint (body[0xda - MM_SIT_HEADER_SIZE], ==, MM_SIT_PDP_TYPE_IPV4V6);
+            /* And the software version has to be the one the CP just gave,
+             * not a constant: @12 of the frame, ASCII. */
+            if (expected_ids[i] == MM_SIT_MESSAGE_OEM_CONFIG) {
+                g_assert_cmpuint (request_len, ==, 14);
+                g_assert_cmpuint (body[12 - MM_SIT_HEADER_SIZE], ==, '3');
+                g_assert_cmpuint (body[13 - MM_SIT_HEADER_SIZE], ==, '3');
+            }
         }
 
+        if (expected_ids[i] == MM_SIT_MESSAGE_GET_IMEISV) {
+            memcpy (&response[12], imeisv_payload, sizeof (imeisv_payload));
+            response_len = sizeof (response);
+        }
         response[0] = MM_SIT_MESSAGE_TYPE_RESPONSE;
         response[2] = header[2];
         response[3] = header[3];
-        response[4] = sizeof (response);
+        response[4] = response_len;
         response[6] = header[6];
         response[7] = header[7];
-        g_assert_true (write_all (ctx->peer_fd, response, sizeof (response)));
+        g_assert_true (write_all (ctx->peer_fd, response, response_len));
     }
     return NULL;
 }

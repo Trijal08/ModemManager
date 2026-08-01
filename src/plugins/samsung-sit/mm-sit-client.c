@@ -1905,7 +1905,11 @@ mm_sit_client_set_carrier_manifest_finish (MMSitClient  *self,
  * the same version list, and registration, attach and data were unaffected.
  *
  * ID_MM_SIT_DEVICE_MODEL / _BUILD / _CODENAME override them, in case a CP or a
- * carrier profile ever turns out to care what it is told. */
+ * carrier profile ever turns out to care what it is told.
+ *
+ * 0x4605 SET_SW_VERSION_NUMBER, further down the batch, is the CP's own
+ * two-digit firmware version rather than anything about the AP, so the batch
+ * reads it back off GET_IMEISV first instead of carrying a constant. */
 static void set_device_info (MMSitClient *self,
                              const gchar *model,
                              const gchar *build,
@@ -1917,14 +1921,23 @@ static void set_device_info (MMSitClient *self,
 typedef enum {
     BOOT_CONFIG_STEP_AP_TIME,
     BOOT_CONFIG_STEP_DEVICE_INFO,
+    BOOT_CONFIG_STEP_SOFTWARE_VERSION,
     BOOT_CONFIG_STEP_OEM_CONFIG,
     BOOT_CONFIG_STEP_MODEM_CONFIG,
     BOOT_CONFIG_STEP_LAST,
 } BootConfigStep;
 
 typedef struct {
-    BootConfigStep step;
+    BootConfigStep  step;
+    gchar          *software_version;
 } BootConfigContext;
+
+static void
+boot_config_context_free (BootConfigContext *ctx)
+{
+    g_free (ctx->software_version);
+    g_free (ctx);
+}
 
 static void boot_config_step (GTask *task);
 
@@ -1941,6 +1954,29 @@ boot_config_step_ready (MMSitClient *self,
         g_object_unref (task);
         return;
     }
+    ctx->step++;
+    boot_config_step (task);
+}
+
+/* The software version 0x4605 carries is the CP's own, so a CP that will not
+ * tell us has nothing for us to send back. Skip the message rather than fall
+ * back on a constant -- a stale constant is the bug this replaced -- and say so,
+ * because every other step of this batch answered. */
+static void
+boot_config_software_version_ready (MMSitClient  *self,
+                                    GAsyncResult *res,
+                                    GTask        *task)
+{
+    BootConfigContext       *ctx = g_task_get_task_data (task);
+    g_autoptr(MMSitMessage)  response = NULL;
+    g_autoptr(GError)        error = NULL;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (!response || !mm_sit_message_parse_software_version (response, &ctx->software_version, &error))
+        mm_obj_warn (self, "could not read the CP software version: %s", error->message);
+    else if (!ctx->software_version)
+        mm_obj_warn (self, "the CP holds no software version");
+
     ctx->step++;
     boot_config_step (task);
 }
@@ -1974,8 +2010,18 @@ boot_config_step (GTask *task)
                                                   self->priv->device_codename,
                                                   &error);
         break;
+    case BOOT_CONFIG_STEP_SOFTWARE_VERSION:
+        request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_IMEISV, next_token (self));
+        mm_sit_client_command (self, request, 5, g_task_get_cancellable (task),
+                               (GAsyncReadyCallback) boot_config_software_version_ready, task);
+        return;
     case BOOT_CONFIG_STEP_OEM_CONFIG:
-        request = mm_sit_request_new_oem_config (next_token (self));
+        if (!ctx->software_version) {
+            ctx->step++;
+            boot_config_step (task);
+            return;
+        }
+        request = mm_sit_request_new_oem_config (next_token (self), ctx->software_version, &error);
         break;
     case BOOT_CONFIG_STEP_MODEM_CONFIG:
         request = mm_sit_request_new_set_modem_config (next_token (self));
@@ -2014,7 +2060,7 @@ mm_sit_client_send_boot_config (MMSitClient        *self,
         return;
     }
     ctx = g_new0 (BootConfigContext, 1);
-    g_task_set_task_data (task, ctx, g_free);
+    g_task_set_task_data (task, ctx, (GDestroyNotify) boot_config_context_free);
     boot_config_step (task);
 }
 
