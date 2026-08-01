@@ -1246,6 +1246,82 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
 /*****************************************************************************/
 /* Modem interface */
 
+/* Capabilities
+ *
+ * The CP has no capability query and the downstream RIL never asks for one --
+ * which generations a baseband speaks is a property of the part, not runtime
+ * state. ModemManager's generic path infers it from `ATI`, `+GCAP` and
+ * `+WS46=?`, and on this modem that lands on `gsm-umts` alone: `+GCAP` names
+ * only the circuit-switched capability and `+WS46=?` is answered malformed (a
+ * closing parenthesis with no opening one), so the packet-switched generations
+ * never appear. The modem then reports itself 2G/3G-only while registered on
+ * LTE.
+ *
+ * So answer for the part. Both capability steps are also *fatal* to modem
+ * initialization (`mm-iface-modem.c`, `load_{current,supported}_capabilities_
+ * ready`), which makes this the one thing that has to exist before the AT port
+ * can go away at all.
+ *
+ * One combination, not a list: the generations are not switchable here. What
+ * *is* switchable is which of them the CP may use, and that is the Modes
+ * property, which 0x074f/0x0750 already drive. */
+#define SAMSUNG_SIT_CAPABILITIES (MM_MODEM_CAPABILITY_GSM_UMTS | \
+                                  MM_MODEM_CAPABILITY_LTE |      \
+                                  MM_MODEM_CAPABILITY_5GNR)
+
+static MMModemCapability
+load_current_capabilities_finish (MMIfaceModem  *self,
+                                  GAsyncResult  *res,
+                                  GError       **error)
+{
+    GError *inner_error = NULL;
+    gssize  value;
+
+    value = g_task_propagate_int (G_TASK (res), &inner_error);
+    if (inner_error) {
+        g_propagate_error (error, inner_error);
+        return MM_MODEM_CAPABILITY_NONE;
+    }
+    return (MMModemCapability) value;
+}
+
+static void
+load_current_capabilities (MMIfaceModem        *self,
+                           GAsyncReadyCallback  callback,
+                           gpointer             user_data)
+{
+    GTask *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    g_task_return_int (task, SAMSUNG_SIT_CAPABILITIES);
+    g_object_unref (task);
+}
+
+static GArray *
+load_supported_capabilities_finish (MMIfaceModem  *self,
+                                    GAsyncResult  *res,
+                                    GError       **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+static void
+load_supported_capabilities (MMIfaceModem        *self,
+                             GAsyncReadyCallback  callback,
+                             gpointer             user_data)
+{
+    GArray            *capabilities;
+    MMModemCapability  capability = SAMSUNG_SIT_CAPABILITIES;
+    GTask             *task;
+
+    capabilities = g_array_sized_new (FALSE, FALSE, sizeof (MMModemCapability), 1);
+    g_array_append_val (capabilities, capability);
+
+    task = g_task_new (self, NULL, callback, user_data);
+    g_task_return_pointer (task, capabilities, (GDestroyNotify) g_array_unref);
+    g_object_unref (task);
+}
+
 static guint
 load_signal_quality_finish (MMIfaceModem  *self,
                             GAsyncResult  *res,
@@ -3348,6 +3424,10 @@ set_current_modes (MMIfaceModem       *self,
 static void
 iface_modem_init (MMIfaceModemInterface *iface)
 {
+    iface->load_current_capabilities = load_current_capabilities;
+    iface->load_current_capabilities_finish = load_current_capabilities_finish;
+    iface->load_supported_capabilities = load_supported_capabilities;
+    iface->load_supported_capabilities_finish = load_supported_capabilities_finish;
     iface->load_power_state = load_power_state;
     iface->load_power_state_finish = load_power_state_finish;
     iface->load_signal_quality = load_signal_quality;
