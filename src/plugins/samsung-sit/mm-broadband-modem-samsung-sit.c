@@ -4176,6 +4176,102 @@ iface_modem_time_init (MMIfaceModemTimeInterface *iface)
     iface->disable_unsolicited_events_finish = NULL;
 }
 
+/*****************************************************************************/
+/* Initialization and enabling, with no AT port
+ *
+ * MMBroadbandModem opens the primary AT port before anything else runs, in both
+ * the initialization and the enabling sequence, and treats its absence as fatal
+ * -- "Couldn't get primary port". On this modem there is no primary AT port to
+ * open: MMBaseModem's "primary port" is specifically the primary *AT* port, the
+ * target of mm_base_modem_at_command, and every interface here is driven over
+ * SIT instead. mm_base_modem_organize_ports already tolerates that (it allows a
+ * modem with no AT port when a SIT port is present); the two hooks below are
+ * what is left.
+ *
+ * Chain to the parent and demote its failure to a debug line, which is exactly
+ * what the QMI and MBIM modems do for the same reason. The parent's context
+ * pointer is passed straight through, NULL included -- initialization_stopped
+ * takes a NULL context.
+ *
+ * There is deliberately no SIT-side "primary port" concept introduced here.
+ * The primary logical stack is the plugin's own (peek_client), which keeps that
+ * choice inside the plugin and out of the core -- and means a per-port
+ * ID_MM_PHYSDEV_UID split, which would give each logical stack its own MMDevice
+ * with exactly one SIT port, needs nothing changed here. */
+
+static gpointer
+initialization_started_finish (MMBroadbandModem  *self,
+                               GAsyncResult      *res,
+                               GError           **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+static void
+parent_initialization_started_ready (MMBroadbandModem *self,
+                                     GAsyncResult     *res,
+                                     GTask            *task)
+{
+    g_autoptr(GError)  error = NULL;
+    gpointer           parent_ctx;
+
+    parent_ctx = MM_BROADBAND_MODEM_CLASS (mm_broadband_modem_samsung_sit_parent_class)->initialization_started_finish (
+        self, res, &error);
+    if (error)
+        mm_obj_dbg (self, "couldn't start parent initialization: %s", error->message);
+
+    g_task_return_pointer (task, parent_ctx, NULL);
+    g_object_unref (task);
+}
+
+static void
+initialization_started (MMBroadbandModem    *self,
+                        GAsyncReadyCallback  callback,
+                        gpointer             user_data)
+{
+    GTask *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    MM_BROADBAND_MODEM_CLASS (mm_broadband_modem_samsung_sit_parent_class)->initialization_started (
+        self, (GAsyncReadyCallback) parent_initialization_started_ready, task);
+}
+
+static gboolean
+enabling_started_finish (MMBroadbandModem  *self,
+                         GAsyncResult      *res,
+                         GError           **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+parent_enabling_started_ready (MMBroadbandModem *self,
+                               GAsyncResult     *res,
+                               GTask            *task)
+{
+    g_autoptr(GError) error = NULL;
+
+    if (!MM_BROADBAND_MODEM_CLASS (mm_broadband_modem_samsung_sit_parent_class)->enabling_started_finish (self, res, &error))
+        mm_obj_dbg (self, "couldn't start parent enabling: %s", error->message);
+
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+enabling_started (MMBroadbandModem    *self,
+                  GAsyncReadyCallback  callback,
+                  gpointer             user_data)
+{
+    GTask *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    MM_BROADBAND_MODEM_CLASS (mm_broadband_modem_samsung_sit_parent_class)->enabling_started (
+        self, (GAsyncReadyCallback) parent_enabling_started_ready, task);
+}
+
+/*****************************************************************************/
+
 MMBroadbandModemSamsungSit *
 mm_broadband_modem_samsung_sit_new (const gchar  *device,
                                     const gchar  *physdev,
@@ -4261,4 +4357,8 @@ mm_broadband_modem_samsung_sit_class_init (MMBroadbandModemSamsungSitClass *klas
     broadband_modem_class->create_sms = create_sms;
     broadband_modem_class->enabling_modem_init = NULL;
     broadband_modem_class->enabling_modem_init_finish = NULL;
+    broadband_modem_class->initialization_started = initialization_started;
+    broadband_modem_class->initialization_started_finish = initialization_started_finish;
+    broadband_modem_class->enabling_started = enabling_started;
+    broadband_modem_class->enabling_started_finish = enabling_started_finish;
 }
