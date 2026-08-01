@@ -18,6 +18,7 @@ static gboolean  opt_hold;
 static gchar    *opt_configure;
 static gchar    *opt_model;
 static gchar    *opt_build_id;
+static gchar    *opt_codename;
 static gchar    *opt_carrier_directory;
 static gchar    *opt_carrier_sha1;
 static gboolean  opt_no_proxy;
@@ -39,6 +40,8 @@ static GOptionEntry entries[] = {
       "Configure this raw-IP interface after connect", "INTERFACE" },
     { "model", 0, 0, G_OPTION_ARG_STRING, &opt_model,
       "Device model for the initialize command", "MODEL" },
+    { "codename", 0, 0, G_OPTION_ARG_STRING, &opt_codename,
+      "Board codename for the initialize command", "NAME" },
     { "build-id", 0, 0, G_OPTION_ARG_STRING, &opt_build_id,
       "Build ID for the initialize command", "BUILD" },
     { "carrier-directory", 0, 0, G_OPTION_ARG_FILENAME, &opt_carrier_directory,
@@ -720,7 +723,8 @@ run_initialize (MMSitClient *client,
             return FALSE;
         }
         g_clear_pointer (&request, g_byte_array_unref);
-        request = mm_sit_request_new_device_info (1, opt_model, opt_build_id, error);
+        request = mm_sit_request_new_device_info (1, opt_model, opt_build_id,
+                                                 opt_codename ?: "", error);
         if (!request || !run_request (client, request, 5, error))
             return FALSE;
     }

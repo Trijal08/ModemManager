@@ -25,6 +25,7 @@
 #define MM_SIT_MAX_SMSC_LEN         12
 #define MM_SIT_MAX_IMEI_LEN         15
 #define MM_SIT_MAX_VERSION_FIELD    33
+#define MM_SIT_MAX_DEVICE_INFO_FIELD 32
 /* INET_ADDRSTRLEN / INET6_ADDRSTRLEN, spelled out so this header does not have
  * to pull <arpa/inet.h> into every user (it declares connect(), which collides
  * with the bearer's own static one). */
@@ -571,6 +572,7 @@ GByteArray *mm_sit_request_new_set_modem_config       (guint16                to
 GByteArray *mm_sit_request_new_device_info            (guint16                token,
                                                        const gchar           *model,
                                                        const gchar           *build,
+                                                       const gchar           *codename,
                                                        GError               **error);
 GByteArray *mm_sit_request_new_carrier_manifest       (guint16                token,
                                                        const gchar           *directory,

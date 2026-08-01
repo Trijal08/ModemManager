@@ -255,6 +255,15 @@ gboolean mm_sit_client_get_network_time_finish (MMSitClient        *self,
                                                 MMSitNitzTime      *out_time,
                                                 GError            **error);
 
+/* Tell the CP what the AP is, sent in the boot-config batch. Any argument may
+ * be NULL, in which case the running system answers for it: the device-tree
+ * model and compatible, and os-release. Must be called before the first
+ * command, which is when the batch runs. */
+void     mm_sit_client_set_device_info (MMSitClient *self,
+                                        const gchar *model,
+                                        const gchar *build,
+                                        const gchar *codename);
+
 /* Reads which radio generations the modem has. */
 void     mm_sit_client_get_radio_capability        (MMSitClient        *self,
                                                     GCancellable       *cancellable,

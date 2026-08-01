@@ -23,6 +23,11 @@ struct _MMSitClientPrivate {
     gboolean             has_carrier_sim_info;
     MMSitCarrierSimInfo  carrier_sim_info;
     gboolean             boot_config_done;
+    /* What we tell the CP the AP is, in 0x0922. Resolved from the running
+     * system, overridable per device. */
+    gchar               *device_model;
+    gchar               *device_build;
+    gchar               *device_codename;
     gboolean             radio_state_trusted;
     /* AID of the subscription application, cached from the last SIM status so
      * file reads can address it the way the downstream RIL does. */
@@ -1888,10 +1893,26 @@ mm_sit_client_set_carrier_manifest_finish (MMSitClient  *self,
 /* Identity handshake the downstream RIL performs once per CP boot before
  * turning the radio on: the CP parks a radio-on request that arrives before
  * it has digested this batch (and the carrier-config manifest), leaving the
- * radio in state "on" but never searching.  The device strings are the
- * captured corpus values; the CP answers 0x0922 with a capability list. */
-#define BOOT_CONFIG_DEVICE_MODEL "Pixel 9a"
-#define BOOT_CONFIG_DEVICE_BUILD "BP4A.251205.006"
+ * radio in state "on" but never searching.  The CP answers 0x0922 with the
+ * struct versions it speaks, e.g. "CellInfo=5,CellIdentity=5,SignalStrength=5".
+ *
+ * The three strings describe the *AP*, and they were the captured corpus values
+ * -- "Pixel 9a" and an Android build id -- baked into a plugin that is not
+ * specific to one board. They now come from the running system. Nothing in
+ * 3GPP carries them: the network identifies a device by the IMEI's TAC, which
+ * lives in the modem. HW-checked 2026-08-01 by sending
+ * "Google Pixel 9a"/"postmarketOS edge"/"tegu": the CP answered status 0 with
+ * the same version list, and registration, attach and data were unaffected.
+ *
+ * ID_MM_SIT_DEVICE_MODEL / _BUILD / _CODENAME override them, in case a CP or a
+ * carrier profile ever turns out to care what it is told. */
+static void set_device_info (MMSitClient *self,
+                             const gchar *model,
+                             const gchar *build,
+                             const gchar *codename);
+
+#define BOOT_CONFIG_DEVICE_MODEL_FALLBACK "Linux"
+#define BOOT_CONFIG_DEVICE_BUILD_FALLBACK "unknown"
 
 typedef enum {
     BOOT_CONFIG_STEP_AP_TIME,
@@ -1945,9 +1966,12 @@ boot_config_step (GTask *task)
         break;
     }
     case BOOT_CONFIG_STEP_DEVICE_INFO:
+        if (!self->priv->device_model)
+            set_device_info (self, NULL, NULL, NULL);
         request = mm_sit_request_new_device_info (next_token (self),
-                                                  BOOT_CONFIG_DEVICE_MODEL,
-                                                  BOOT_CONFIG_DEVICE_BUILD,
+                                                  self->priv->device_model,
+                                                  self->priv->device_build,
+                                                  self->priv->device_codename,
                                                   &error);
         break;
     case BOOT_CONFIG_STEP_OEM_CONFIG:
@@ -2909,7 +2933,133 @@ finalize (GObject *object)
 
     g_free (self->priv->device);
     g_free (self->priv->proxy_fallback_device);
+    g_free (self->priv->device_model);
+    g_free (self->priv->device_build);
+    g_free (self->priv->device_codename);
     G_OBJECT_CLASS (mm_sit_client_parent_class)->finalize (object);
+}
+
+/* First line of a file, trimmed, or NULL. Device-tree properties are
+ * NUL-terminated, which g_strstrip leaves alone but the length hides. */
+static gchar *
+read_first_line (const gchar *path)
+{
+    g_autofree gchar *contents = NULL;
+    gchar            *newline;
+
+    if (!g_file_get_contents (path, &contents, NULL, NULL))
+        return NULL;
+    newline = strchr (contents, '\n');
+    if (newline)
+        *newline = '\0';
+    g_strstrip (contents);
+    return contents[0] ? g_strdup (contents) : NULL;
+}
+
+/* The board codename, as the CP knows it: the machine part of the first
+ * device-tree compatible, e.g. "google,zumapro-tegu" -> "tegu". */
+static gchar *
+read_board_codename (void)
+{
+    g_autofree gchar *compatible = NULL;
+    const gchar      *dash;
+
+    compatible = read_first_line ("/proc/device-tree/compatible");
+    if (!compatible)
+        return NULL;
+    dash = strrchr (compatible, '-');
+    return g_strdup (dash ? dash + 1 : compatible);
+}
+
+/* os-release values are shell-quoted; GKeyFile hands back the quotes. */
+static gchar *
+os_release_value (GKeyFile    *keyfile,
+                  const gchar *key)
+{
+    g_autofree gchar *raw = NULL;
+    gchar            *unquoted;
+
+    raw = g_key_file_get_string (keyfile, "os", key, NULL);
+    if (!raw || !raw[0])
+        return NULL;
+    unquoted = g_shell_unquote (raw, NULL);
+    return unquoted ?: g_strdup (raw);
+}
+
+static gchar *
+read_os_build (void)
+{
+    g_autoptr(GError)      error = NULL;
+    g_autofree gchar      *name = NULL;
+    g_autofree gchar      *version = NULL;
+    g_autoptr(GKeyFile)    keyfile = NULL;
+    g_autofree gchar      *contents = NULL;
+
+    /* os-release is shell syntax, not a key file, but the values we want are
+     * plain enough that GKeyFile reads them once a group header is added. */
+    if (!g_file_get_contents ("/etc/os-release", &contents, NULL, NULL))
+        return NULL;
+    keyfile = g_key_file_new ();
+    {
+        g_autofree gchar *wrapped = g_strconcat ("[os]\n", contents, NULL);
+
+        if (!g_key_file_load_from_data (keyfile, wrapped, -1, G_KEY_FILE_NONE, &error))
+            return NULL;
+    }
+    name = os_release_value (keyfile, "ID");
+    version = os_release_value (keyfile, "BUILD_ID");
+    if (!version)
+        version = os_release_value (keyfile, "VERSION_ID");
+    if (!name && !version)
+        return NULL;
+    return g_strdup_printf ("%s %s", name ?: "linux", version ?: "unknown");
+}
+
+static void
+set_device_info (MMSitClient *self,
+                 const gchar *model,
+                 const gchar *build,
+                 const gchar *codename)
+{
+    g_free (self->priv->device_model);
+    g_free (self->priv->device_build);
+    g_free (self->priv->device_codename);
+
+    self->priv->device_model = model && model[0] ? g_strdup (model)
+        : read_first_line ("/proc/device-tree/model");
+    self->priv->device_build = build && build[0] ? g_strdup (build) : read_os_build ();
+    self->priv->device_codename = codename && codename[0] ? g_strdup (codename)
+        : read_board_codename ();
+
+    if (!self->priv->device_model)
+        self->priv->device_model = g_strdup (BOOT_CONFIG_DEVICE_MODEL_FALLBACK);
+    if (!self->priv->device_build)
+        self->priv->device_build = g_strdup (BOOT_CONFIG_DEVICE_BUILD_FALLBACK);
+    if (!self->priv->device_codename)
+        self->priv->device_codename = g_strdup ("");
+
+    /* 31 characters plus a NUL each; the builder refuses anything longer. */
+    self->priv->device_model[MIN (strlen (self->priv->device_model), MM_SIT_MAX_DEVICE_INFO_FIELD - 1)] = '\0';
+    self->priv->device_build[MIN (strlen (self->priv->device_build), MM_SIT_MAX_DEVICE_INFO_FIELD - 1)] = '\0';
+    self->priv->device_codename[MIN (strlen (self->priv->device_codename), MM_SIT_MAX_DEVICE_INFO_FIELD - 1)] = '\0';
+
+    mm_obj_dbg (self, "telling the CP the AP is '%s' / '%s' / '%s'",
+                self->priv->device_model, self->priv->device_build,
+                self->priv->device_codename);
+}
+
+/* Tell the CP what the AP is. Any argument may be NULL, in which case the
+ * running system answers for it. Each field is truncated to what 0x0922
+ * carries. */
+void
+mm_sit_client_set_device_info (MMSitClient *self,
+                               const gchar *model,
+                               const gchar *build,
+                               const gchar *codename)
+{
+    g_return_if_fail (MM_IS_SIT_CLIENT (self));
+
+    set_device_info (self, model, build, codename);
 }
 
 /* The client is its own log object rather than borrowing the port's. The port

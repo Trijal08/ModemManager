@@ -1225,6 +1225,17 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
         client = self->priv->use_proxy
             ? mm_sit_client_new_proxy (mm_port_get_device (port))
             : mm_sit_client_new (mm_port_get_device (port));
+        /* What the boot-config batch tells the CP the AP is. NULL lets the
+         * running system answer; the properties exist so a device package can
+         * pin exact strings without a code change. */
+        mm_sit_client_set_device_info (
+            client,
+            mm_kernel_device_get_property (mm_port_peek_kernel_device (port),
+                                           "ID_MM_SIT_DEVICE_MODEL"),
+            mm_kernel_device_get_property (mm_port_peek_kernel_device (port),
+                                           "ID_MM_SIT_DEVICE_BUILD"),
+            mm_kernel_device_get_property (mm_port_peek_kernel_device (port),
+                                           "ID_MM_SIT_DEVICE_CODENAME"));
         if (!mm_sit_client_open (client, error)) {
             g_object_unref (client);
             self->priv->client = NULL;

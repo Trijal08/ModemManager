@@ -335,7 +335,7 @@ test_build_config_requests (void)
     g_autoptr(GByteArray) screen_state = NULL;
     g_autoptr(GError)     error = NULL;
 
-    info = mm_sit_request_new_device_info (2, "Pixel 9a", "TEST.BUILD", &error);
+    info = mm_sit_request_new_device_info (2, "Pixel 9a", "TEST.BUILD", "tegu", &error);
     g_assert_no_error (error);
     g_assert_cmpuint (info->len, ==, 140);
     g_assert_cmpmem (&info->data[12], 8, "Pixel 9a", 8);

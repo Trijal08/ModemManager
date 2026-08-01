@@ -731,13 +731,14 @@ GByteArray *
 mm_sit_request_new_device_info (guint16      token,
                                 const gchar *model,
                                 const gchar *build,
+                                const gchar *codename,
                                 GError     **error)
 {
     guint8          *buffer = NULL;
     gsize            len = 0;
     SamsungSitStatus status;
 
-    status = samsung_sit_build_device_info (token, model, build, &buffer, &len);
+    status = samsung_sit_build_device_info (token, model, build, codename, &buffer, &len);
     return finish_build (status, buffer, len, error);
 }
 
