@@ -480,6 +480,48 @@ test_parse_nitz_time (void)
 }
 
 static void
+test_parse_nitz_time_indication (void)
+{
+    /* The same NITZ as the CP pushes it (0x0905): no status word, so 33 bytes
+     * with the payload four earlier, and an age of zero because it has just
+     * arrived. Modelled on the live indications. */
+    static const guint8 indication[] = {
+        2, 0, 0x05, 0x09, 33, 0, 0, 0,
+        1, 26, 7, 30, 16, 55, 50, 8, 1, 4, 1,
+        '0', '0', '1', '0', '1', '#',
+        0, 0, 0, 0, 0, 0, 0, 0,
+    };
+    g_autoptr(MMSitMessage) message = NULL;
+    g_autoptr(GError)       error = NULL;
+    g_autofree gchar       *iso8601 = NULL;
+    MMSitNitzTime           time;
+
+    g_assert_cmpstr (mm_sit_message_id_get_string (0x0905), ==, "NITZ_TIME_RECEIVED_IND");
+
+    message = mm_sit_message_parse (indication, sizeof (indication), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_nitz_time (message, &time, &error));
+    g_assert_no_error (error);
+    g_assert_true (time.valid);
+    g_assert_cmpuint (time.year, ==, 2026);
+    g_assert_cmpuint (time.month, ==, 7);
+    g_assert_cmpuint (time.day, ==, 30);
+    g_assert_cmpuint (time.hour, ==, 16);
+    g_assert_cmpuint (time.minute, ==, 55);
+    g_assert_cmpuint (time.second, ==, 50);
+    g_assert_cmpint (time.timezone_quarter_hours, ==, 8);
+    g_assert_cmpuint (time.daylight_saving_hours, ==, 1);
+    g_assert_cmpuint (time.day_of_week, ==, 4);
+    g_assert_cmpstr (time.plmn, ==, "00101");
+    /* A pushed NITZ is the arrival, so it is never stale. */
+    g_assert_cmpuint (time.age_ms, ==, 0);
+
+    iso8601 = mm_sit_nitz_time_to_iso8601 (&time, &error);
+    g_assert_no_error (error);
+    g_assert_cmpstr (iso8601, ==, "2026-07-30T18:55:50+02");
+}
+
+static void
 test_parse_radio (void)
 {
     static const guint8 get_response[] = {
@@ -2098,6 +2140,7 @@ main (int argc,
     g_test_add_func ("/MM/sit/decode/sim-slot-status", test_parse_sim_slot_status);
     g_test_add_func ("/MM/sit/decode/signal", test_parse_signal);
     g_test_add_func ("/MM/sit/decode/nitz-time", test_parse_nitz_time);
+    g_test_add_func ("/MM/sit/decode/nitz-time-indication", test_parse_nitz_time_indication);
     g_test_add_func ("/MM/sit/decode/cell-info-lte-v5", test_parse_cell_info_lte_v5);
     g_test_add_func ("/MM/sit/decode/data-call", test_parse_data_call);
     g_test_add_func ("/MM/sit/decode/data-call-list", test_parse_data_call_list);

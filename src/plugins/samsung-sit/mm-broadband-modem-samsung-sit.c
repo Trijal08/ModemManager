@@ -529,6 +529,45 @@ handle_new_sms (MMBroadbandModemSamsungSit *self,
                                (GAsyncReadyCallback) ack_sms_ready, g_object_ref (self));
 }
 
+/* NITZ_TIME_RECEIVED (0x0905): the CP pushing a network time as it arrives.
+ * Same payload as the GET_NITZ_TIME response minus its status word, so the same
+ * parser reads both -- and the age is always zero here, which is the tell that
+ * this is the arrival rather than a cached read. See the Time interface below.
+ */
+static void
+handle_nitz_time (MMBroadbandModemSamsungSit *self,
+                  const MMSitMessage         *message)
+{
+    g_autoptr(GError)            error = NULL;
+    g_autoptr(MMNetworkTimezone) tz = NULL;
+    g_autofree gchar            *iso8601 = NULL;
+    MMSitNitzTime                time;
+
+    if (!mm_sit_message_parse_nitz_time (message, &time, &error)) {
+        mm_obj_warn (self, "couldn't parse a pushed network time: %s", error->message);
+        return;
+    }
+    /* The CP pushes the indication whenever it has one to push, including
+     * before it has anything meaningful; an empty NITZ is not an error. */
+    if (!time.valid) {
+        mm_obj_dbg (self, "CP pushed an empty network time");
+        return;
+    }
+
+    iso8601 = mm_sit_nitz_time_to_iso8601 (&time, &error);
+    if (!iso8601) {
+        mm_obj_warn (self, "couldn't render a pushed network time: %s", error->message);
+        return;
+    }
+    mm_obj_dbg (self, "CP pushed a network time: %s", iso8601);
+    mm_iface_modem_time_update_network_time (MM_IFACE_MODEM_TIME (self), iso8601);
+
+    tz = mm_network_timezone_new ();
+    mm_network_timezone_set_offset (tz, time.timezone_quarter_hours * 15);
+    mm_network_timezone_set_dst_offset (tz, time.daylight_saving_hours * 60);
+    mm_iface_modem_time_update_network_timezone (MM_IFACE_MODEM_TIME (self), tz);
+}
+
 static gboolean
 messaging_check_support_finish (MMIfaceModemMessaging *self,
                                 GAsyncResult          *res,
@@ -959,6 +998,9 @@ sit_indication (MMSitClient              *client,
         if (update_operator (self, &operator_info))
             mm_iface_modem_3gpp_reload_current_registration_info (MM_IFACE_MODEM_3GPP (self), NULL, NULL);
     }
+
+    if (message->id == MM_SIT_MESSAGE_NITZ_TIME_RECEIVED)
+        handle_nitz_time (self, message);
 
     if (message->id == MM_SIT_MESSAGE_SIGNAL_STRENGTH_CHANGED) {
         MMSitSignal        signal;
@@ -4035,12 +4077,21 @@ signal_load_values (MMIfaceModemSignal  *iface,
  * the current network time is the timestamp plus the age.  A fresh NITZ lands
  * on every (re-)attach, which is what keeps the cached value honest.
  *
- * Both vfuncs read that one message on demand.  There is no unsolicited path to
- * hook: the CP emits no NITZ indication -- checked with the 0x0928 indication
- * filter set to 0xffffffff across a re-attach that did land a fresh NITZ, and
- * 0x1007 NETWORK_TIME is the EMBMS query, which reports unavailable here.  So
- * setup/enable_unsolicited_events stay unimplemented and the interface's own
- * post-registration timezone poll does the refreshing.
+ * Both vfuncs read that one message on demand.
+ *
+ * The CP *does* also push each NITZ as it arrives, as NITZ_TIME_RECEIVED
+ * (0x0905), and this comment used to say it did not.  That was wrong: the
+ * indications were arriving all along and being dropped, because nothing looked
+ * for that id.  They carry the response payload without its status word (33
+ * bytes rather than 37) and always with a zero age, since they *are* the
+ * arrival.  Identified from the corpus -- the only 33-byte indication in 20 746
+ * frames, 26 of them, every field decoding and the dates matching each
+ * capture's own day -- then confirmed live, where the pushed timestamps match
+ * their arrival times to the second.
+ *
+ * So the interface no longer depends on its post-registration poll to notice a
+ * new time.  0x1007 NETWORK_TIME remains the EMBMS query, which reports
+ * unavailable here and is unrelated.
  */
 
 static gboolean
@@ -4465,7 +4516,11 @@ iface_modem_time_init (MMIfaceModemTimeInterface *iface)
     iface->load_network_time_finish    = modem_time_load_network_time_finish;
     iface->load_network_timezone       = modem_time_load_network_timezone;
     iface->load_network_timezone_finish = modem_time_load_network_timezone_finish;
-    /* The CP pushes no NITZ indication, so there is nothing to subscribe to. */
+    /* NITZ_TIME_RECEIVED arrives on the one control port every other indication
+     * comes in on, and the plugin's single handler is already attached for the
+     * life of the port. There is no per-interface subscription to make and no
+     * arming command to send, so these stay unimplemented -- unlike before, not
+     * because nothing is pushed, but because nothing has to be turned on. */
     iface->setup_unsolicited_events    = NULL;
     iface->setup_unsolicited_events_finish = NULL;
     iface->cleanup_unsolicited_events  = NULL;

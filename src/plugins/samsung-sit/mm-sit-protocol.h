@@ -68,6 +68,9 @@ typedef enum {
     MM_SIT_MESSAGE_SET_LOGICAL_SLOT_MAPPING   = 0x0250,
     MM_SIT_MESSAGE_GET_IMEI                    = 0x0401,
     MM_SIT_MESSAGE_GET_IMEISV                  = 0x0402,
+    /* The CP pushing a NITZ as it arrives: the GET_NITZ_TIME payload with no
+     * status word, so 33 bytes rather than 37. */
+    MM_SIT_MESSAGE_NITZ_TIME_RECEIVED          = 0x0905,
     MM_SIT_MESSAGE_GET_BASE_BAND_VERSION       = 0x0901,
     MM_SIT_MESSAGE_SETUP_DATA_CALL             = 0x0600,
     MM_SIT_MESSAGE_DEACTIVATE_DATA_CALL        = 0x0601,
