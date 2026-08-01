@@ -4111,6 +4111,26 @@ iface_modem_voice_init (MMIfaceModemVoiceInterface *iface)
     iface->create_call             = modem_voice_create_call;
     iface->load_call_list          = modem_voice_load_call_list;
     iface->load_call_list_finish   = modem_voice_load_call_list_finish;
+    /* Every supplementary service is inherited from the generic AT
+     * implementation and none of them can work here, so say so rather than
+     * letting a caller get "No AT port available to run command" -- an
+     * unimplemented vfunc is reported as Unsupported, which is the truth. */
+    iface->hold_and_accept                = NULL;
+    iface->hold_and_accept_finish         = NULL;
+    iface->hangup_and_accept              = NULL;
+    iface->hangup_and_accept_finish       = NULL;
+    iface->hangup_all                     = NULL;
+    iface->hangup_all_finish              = NULL;
+    iface->join_multiparty                = NULL;
+    iface->join_multiparty_finish         = NULL;
+    iface->leave_multiparty               = NULL;
+    iface->leave_multiparty_finish        = NULL;
+    iface->transfer                       = NULL;
+    iface->transfer_finish                = NULL;
+    iface->call_waiting_setup             = NULL;
+    iface->call_waiting_setup_finish      = NULL;
+    iface->call_waiting_query             = NULL;
+    iface->call_waiting_query_finish      = NULL;
     /* SIT owns call state; never arm the AT +CLIP/+CRC/+CCWA URCs. */
     iface->setup_unsolicited_events           = modem_voice_unsolicited_events_noop;
     iface->setup_unsolicited_events_finish    = modem_voice_unsolicited_events_noop_finish;
@@ -4120,6 +4140,12 @@ iface_modem_voice_init (MMIfaceModemVoiceInterface *iface)
     iface->enable_unsolicited_events_finish   = modem_voice_unsolicited_events_noop_finish;
     iface->disable_unsolicited_events         = modem_voice_unsolicited_events_noop;
     iface->disable_unsolicited_events_finish  = modem_voice_unsolicited_events_noop_finish;
+    /* Likewise the in-call pair, which otherwise opens the AT port for the
+     * duration of every call to watch URCs nothing here consumes. */
+    iface->setup_in_call_unsolicited_events          = modem_voice_unsolicited_events_noop;
+    iface->setup_in_call_unsolicited_events_finish   = modem_voice_unsolicited_events_noop_finish;
+    iface->cleanup_in_call_unsolicited_events        = modem_voice_unsolicited_events_noop;
+    iface->cleanup_in_call_unsolicited_events_finish = modem_voice_unsolicited_events_noop_finish;
 }
 
 static void
