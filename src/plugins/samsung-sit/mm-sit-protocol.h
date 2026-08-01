@@ -23,6 +23,7 @@
 #define MM_SIT_MAX_SIM_IO_PATH      6
 #define MM_SIT_MAX_SMS_PDU          244
 #define MM_SIT_MAX_SMSC_LEN         12
+#define MM_SIT_MAX_IMEI_LEN         15
 /* INET_ADDRSTRLEN / INET6_ADDRSTRLEN, spelled out so this header does not have
  * to pull <arpa/inet.h> into every user (it declares connect(), which collides
  * with the bearer's own static one). */
@@ -62,6 +63,7 @@ typedef enum {
     MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS        = 0x024d,
     MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED    = 0x024e,
     MM_SIT_MESSAGE_SET_LOGICAL_SLOT_MAPPING   = 0x0250,
+    MM_SIT_MESSAGE_GET_IMEI                    = 0x0401,
     MM_SIT_MESSAGE_SETUP_DATA_CALL             = 0x0600,
     MM_SIT_MESSAGE_DEACTIVATE_DATA_CALL        = 0x0601,
     MM_SIT_MESSAGE_SET_INITIAL_ATTACH_APN      = 0x0603,
@@ -621,6 +623,11 @@ gboolean mm_sit_message_parse_send_sms_result         (const MMSitMessage    *me
 gboolean mm_sit_message_parse_smsc_address            (const MMSitMessage    *message,
                                                        guint8                *out_smsc,
                                                        gsize                 *out_len,
+                                                       GError               **error);
+/* '*out_imei' is set to NULL, with no error, when the CP holds no IMEI --
+ * an unprovisioned board, which is a state to report rather than a failure. */
+gboolean mm_sit_message_parse_imei                    (const MMSitMessage    *message,
+                                                       gchar                **out_imei,
                                                        GError               **error);
 gboolean mm_sit_message_parse_sim_status              (const MMSitMessage    *message,
                                                        MMSitSimStatus        *out_status,

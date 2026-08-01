@@ -1322,6 +1322,115 @@ load_supported_capabilities (MMIfaceModem        *self,
     g_object_unref (task);
 }
 
+/* Identity
+ *
+ * Only the equipment identifier has a source on this control plane: the CP
+ * holds its own IMEI and 0x0401 GET_IMEI reads it back. Everything else the
+ * generic path gets from +CGMI/+CGMM/+CGMR has no SIT equivalent --
+ * 0x0901 GET_BASE_BAND_VERSION answers a near-empty frame naming only an IMS
+ * capability level, and 0x0931 AT_COMMAND, which would have tunnelled the same
+ * three commands, is refused with status 2 on this firmware.
+ *
+ * So the two that are properties of the part are stated, and the revision is
+ * left unset rather than filled with something that is not one. That changes
+ * Modem.DeviceIdentifier, which is hashed from these together with the
+ * equipment identifier -- nothing here keys a NetworkManager connection on it,
+ * but it does not survive the switch. */
+#define SAMSUNG_SIT_MANUFACTURER "Samsung Electronics"
+/* The baseband part, which is what +CGMM names too (as "S5300" plus a firmware
+ * variant suffix we have no way to read back). */
+#define SAMSUNG_SIT_MODEL "S5300"
+
+static gchar *
+load_identity_string_finish (MMIfaceModem  *self,
+                             GAsyncResult  *res,
+                             GError       **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+static void
+load_manufacturer (MMIfaceModem        *self,
+                   GAsyncReadyCallback  callback,
+                   gpointer             user_data)
+{
+    GTask *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    g_task_return_pointer (task, g_strdup (SAMSUNG_SIT_MANUFACTURER), g_free);
+    g_object_unref (task);
+}
+
+static void
+load_model (MMIfaceModem        *self,
+            GAsyncReadyCallback  callback,
+            gpointer             user_data)
+{
+    GTask *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    g_task_return_pointer (task, g_strdup (SAMSUNG_SIT_MODEL), g_free);
+    g_object_unref (task);
+}
+
+static void
+load_imei_ready (MMSitClient  *client,
+                 GAsyncResult *res,
+                 GTask        *task)
+{
+    GError *error = NULL;
+    gchar  *imei;
+
+    imei = mm_sit_client_get_imei_finish (client, res, &error);
+    if (!imei)
+        g_task_return_error (task, error);
+    else
+        g_task_return_pointer (task, imei, g_free);
+    g_object_unref (task);
+}
+
+static void
+load_equipment_identifier (MMIfaceModem        *iface,
+                           GAsyncReadyCallback  callback,
+                           gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_imei (client, NULL, (GAsyncReadyCallback) load_imei_ready, task);
+}
+
+/* The generic implementation runs an AT sequence purely to feed ATI/ATI1 into
+ * the hash. The helper accepts empty ones -- QMI and MBIM pass "" here for the
+ * same reason -- and the identity loaded above carries the uniqueness. */
+static void
+load_device_identifier (MMIfaceModem        *self,
+                        GAsyncReadyCallback  callback,
+                        gpointer             user_data)
+{
+    GTask  *task;
+    GError *error = NULL;
+    gchar  *device_identifier;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    device_identifier = mm_broadband_modem_create_device_identifier (
+        MM_BROADBAND_MODEM (self), "", "", &error);
+    if (!device_identifier)
+        g_task_return_error (task, error);
+    else
+        g_task_return_pointer (task, device_identifier, g_free);
+    g_object_unref (task);
+}
+
 static guint
 load_signal_quality_finish (MMIfaceModem  *self,
                             GAsyncResult  *res,
@@ -2595,6 +2704,37 @@ create_bearer (MMIfaceModem        *iface,
 /*****************************************************************************/
 /* 3GPP interface */
 
+/* The same value the Modem interface publishes as the equipment identifier,
+ * from the same 0x0401 read; the two properties are separate on D-Bus and both
+ * would otherwise fall back to +CGSN. */
+static gchar *
+modem_3gpp_load_imei_finish (MMIfaceModem3gpp  *self,
+                             GAsyncResult      *res,
+                             GError           **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+static void
+modem_3gpp_load_imei (MMIfaceModem3gpp    *iface,
+                      GAsyncReadyCallback  callback,
+                      gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_imei (client, NULL, (GAsyncReadyCallback) load_imei_ready, task);
+}
+
 static gboolean
 registration_checks_finish (MMIfaceModem3gpp  *self,
                             GAsyncResult      *res,
@@ -3428,6 +3568,14 @@ iface_modem_init (MMIfaceModemInterface *iface)
     iface->load_current_capabilities_finish = load_current_capabilities_finish;
     iface->load_supported_capabilities = load_supported_capabilities;
     iface->load_supported_capabilities_finish = load_supported_capabilities_finish;
+    iface->load_manufacturer = load_manufacturer;
+    iface->load_manufacturer_finish = load_identity_string_finish;
+    iface->load_model = load_model;
+    iface->load_model_finish = load_identity_string_finish;
+    iface->load_equipment_identifier = load_equipment_identifier;
+    iface->load_equipment_identifier_finish = load_identity_string_finish;
+    iface->load_device_identifier = load_device_identifier;
+    iface->load_device_identifier_finish = load_identity_string_finish;
     iface->load_power_state = load_power_state;
     iface->load_power_state_finish = load_power_state_finish;
     iface->load_signal_quality = load_signal_quality;
@@ -3469,6 +3617,8 @@ iface_modem_init (MMIfaceModemInterface *iface)
 static void
 iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface)
 {
+    iface->load_imei = modem_3gpp_load_imei;
+    iface->load_imei_finish = modem_3gpp_load_imei_finish;
     iface->set_initial_eps_bearer_settings = set_initial_eps_bearer_settings;
     iface->set_initial_eps_bearer_settings_finish = set_initial_eps_bearer_settings_finish;
     iface->load_initial_eps_bearer_settings = load_initial_eps_bearer_settings;

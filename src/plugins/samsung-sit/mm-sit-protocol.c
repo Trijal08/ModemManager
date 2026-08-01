@@ -977,6 +977,30 @@ mm_sit_message_parse_smsc_address (const MMSitMessage *message,
 }
 
 gboolean
+mm_sit_message_parse_imei (const MMSitMessage  *message,
+                           gchar              **out_imei,
+                           GError             **error)
+{
+    const guint8    *data;
+    gsize            len;
+    gsize            imei_len = 0;
+    guint8           imei[MM_SIT_MAX_IMEI_LEN];
+    SamsungSitStatus status;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_imei != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_imei (data, len, imei, &imei_len);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+    *out_imei = imei_len ? g_strndup ((const gchar *) imei, imei_len) : NULL;
+    return TRUE;
+}
+
+gboolean
 mm_sit_file_control_parameters_parse (const guint8 *data,
                                       gsize         data_len,
                                       MMSitEfInfo  *out_info,
