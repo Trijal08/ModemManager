@@ -132,6 +132,10 @@ struct _MMBaseModemPrivate {
     /* Some audio-capable devices will have a port for audio specifically */
     MMPortSerial *audio;
 
+    /* The Samsung SIT control port, on modems that have one. It is a plain
+     * MMPort: the transport is the plugin's, not a serial one the core drives. */
+    MMPort *sit;
+
 #if defined WITH_QMI
     /* QMI ports */
     GList *qmi;
@@ -1203,6 +1207,14 @@ mm_base_modem_peek_port_gps (MMBaseModem *self)
     return self->priv->gps;
 }
 
+MMPort *
+mm_base_modem_peek_port_sit (MMBaseModem *self)
+{
+    g_return_val_if_fail (MM_IS_BASE_MODEM (self), NULL);
+
+    return self->priv->sit;
+}
+
 MMPortSerial *
 mm_base_modem_get_port_audio (MMBaseModem *self)
 {
@@ -1791,6 +1803,7 @@ mm_base_modem_organize_ports (MMBaseModem *self,
     self->priv->primary = (primary ? g_object_ref (primary) : NULL);
     self->priv->secondary = (secondary ? g_object_ref (secondary) : NULL);
     self->priv->qcdm = (qcdm ? g_object_ref (qcdm) : NULL);
+    self->priv->sit = (sit ? g_object_ref (sit) : NULL);
     self->priv->gps_control = (gps_control ? g_object_ref (gps_control) : NULL);
     self->priv->gps = (gps ? g_object_ref (gps) : NULL);
 
@@ -2678,6 +2691,7 @@ dispose (GObject *object)
     g_clear_object (&self->priv->secondary);
     g_list_free_full (g_steal_pointer (&self->priv->data), g_object_unref);
     g_clear_object (&self->priv->qcdm);
+    g_clear_object (&self->priv->sit);
     g_clear_object (&self->priv->gps_control);
     g_clear_object (&self->priv->gps);
     g_clear_object (&self->priv->audio);

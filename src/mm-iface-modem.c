@@ -5756,6 +5756,10 @@ interface_initialization_step (GTask *task)
 #endif
             if (!primary)
                 primary = MM_PORT (mm_base_modem_peek_port_primary (MM_BASE_MODEM (self)));
+            /* A modem driven over SIT has no AT port at all; its control port
+             * is the one to report, exactly as for QMI and MBIM above. */
+            if (!primary)
+                primary = mm_base_modem_peek_port_sit (MM_BASE_MODEM (self));
 
             if (!primary) {
                 g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,

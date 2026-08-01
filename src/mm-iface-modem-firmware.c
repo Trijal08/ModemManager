@@ -415,6 +415,8 @@ mm_iface_firmware_build_generic_device_ids (MMIfaceModemFirmware  *self,
 #endif
     if (!primary)
         primary = MM_PORT (mm_base_modem_peek_port_primary (MM_BASE_MODEM (self)));
+    if (!primary)
+        primary = mm_base_modem_peek_port_sit (MM_BASE_MODEM (self));
 
     if (!primary) {
         g_set_error (error, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
