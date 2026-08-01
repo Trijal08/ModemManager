@@ -255,6 +255,17 @@ gboolean mm_sit_client_get_network_time_finish (MMSitClient        *self,
                                                 MMSitNitzTime      *out_time,
                                                 GError            **error);
 
+/* Reads the CP's version block: firmware build, hardware revision and the
+ * baseband part. Fields the CP does not report come back empty. */
+void     mm_sit_client_get_base_band_version        (MMSitClient        *self,
+                                                     GCancellable       *cancellable,
+                                                     GAsyncReadyCallback callback,
+                                                     gpointer            user_data);
+gboolean mm_sit_client_get_base_band_version_finish (MMSitClient          *self,
+                                                     GAsyncResult         *res,
+                                                     MMSitBaseBandVersion *out_version,
+                                                     GError              **error);
+
 /* Reads how the CP is currently choosing a network. */
 void     mm_sit_client_get_network_selection_mode        (MMSitClient        *self,
                                                           GCancellable       *cancellable,

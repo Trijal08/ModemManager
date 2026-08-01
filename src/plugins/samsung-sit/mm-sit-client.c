@@ -1367,6 +1367,60 @@ mm_sit_client_get_network_time_finish (MMSitClient   *self,
 }
 
 static void
+get_base_band_version_ready (MMSitClient  *self,
+                             GAsyncResult *res,
+                             GTask        *task)
+{
+    g_autoptr(MMSitMessage)  response = NULL;
+    GError                  *error = NULL;
+    MMSitBaseBandVersion    *version;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    version = g_new0 (MMSitBaseBandVersion, 1);
+    if (response && mm_sit_message_parse_base_band_version (response, version, &error))
+        g_task_return_pointer (task, version, g_free);
+    else {
+        g_free (version);
+        g_task_return_error (task, error);
+    }
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_get_base_band_version (MMSitClient        *self,
+                                     GCancellable       *cancellable,
+                                     GAsyncReadyCallback callback,
+                                     gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_get_base_band_version (next_token (self));
+    mm_sit_client_command (self, request, 5, cancellable,
+                           (GAsyncReadyCallback) get_base_band_version_ready, task);
+}
+
+gboolean
+mm_sit_client_get_base_band_version_finish (MMSitClient           *self,
+                                            GAsyncResult          *res,
+                                            MMSitBaseBandVersion  *out_version,
+                                            GError               **error)
+{
+    MMSitBaseBandVersion *version;
+
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    g_return_val_if_fail (out_version != NULL, FALSE);
+
+    version = g_task_propagate_pointer (G_TASK (res), error);
+    if (!version)
+        return FALSE;
+    *out_version = *version;
+    g_free (version);
+    return TRUE;
+}
+
+static void
 get_network_selection_mode_ready (MMSitClient  *self,
                                   GAsyncResult *res,
                                   GTask        *task)

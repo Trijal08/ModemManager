@@ -24,6 +24,7 @@
 #define MM_SIT_MAX_SMS_PDU          244
 #define MM_SIT_MAX_SMSC_LEN         12
 #define MM_SIT_MAX_IMEI_LEN         15
+#define MM_SIT_MAX_VERSION_FIELD    33
 /* INET_ADDRSTRLEN / INET6_ADDRSTRLEN, spelled out so this header does not have
  * to pull <arpa/inet.h> into every user (it declares connect(), which collides
  * with the bearer's own static one). */
@@ -64,6 +65,7 @@ typedef enum {
     MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED    = 0x024e,
     MM_SIT_MESSAGE_SET_LOGICAL_SLOT_MAPPING   = 0x0250,
     MM_SIT_MESSAGE_GET_IMEI                    = 0x0401,
+    MM_SIT_MESSAGE_GET_BASE_BAND_VERSION       = 0x0901,
     MM_SIT_MESSAGE_SETUP_DATA_CALL             = 0x0600,
     MM_SIT_MESSAGE_DEACTIVATE_DATA_CALL        = 0x0601,
     MM_SIT_MESSAGE_SET_INITIAL_ATTACH_APN      = 0x0603,
@@ -633,6 +635,24 @@ typedef enum {
     MM_SIT_NETWORK_SELECTION_MANUAL    = 1,
 } MMSitNetworkSelectionMode;
 
+/* The CP's version block. Every field is NUL-terminated and empty when the CP
+ * does not report it; 'sw_ver' is the firmware build, the same string the AT
+ * service answers +CGMR with, and 'cp_chipset' is the baseband part. */
+typedef struct {
+    gchar sw_ver[MM_SIT_MAX_VERSION_FIELD];
+    gchar hw_ver[MM_SIT_MAX_VERSION_FIELD];
+    gchar rf_cal_date[MM_SIT_MAX_VERSION_FIELD];
+    gchar prod_code[MM_SIT_MAX_VERSION_FIELD];
+    gchar model_id[MM_SIT_MAX_VERSION_FIELD];
+    gchar cp_chipset[MM_SIT_MAX_VERSION_FIELD];
+} MMSitBaseBandVersion;
+
+/* The selector is mandatory: a bare query leaves it off and the CP answers a
+ * partly filled block. */
+GByteArray *mm_sit_request_new_get_base_band_version  (guint16                token);
+gboolean mm_sit_message_parse_base_band_version       (const MMSitMessage    *message,
+                                                       MMSitBaseBandVersion  *out_version,
+                                                       GError               **error);
 gboolean mm_sit_message_parse_network_selection_mode  (const MMSitMessage        *message,
                                                        MMSitNetworkSelectionMode *out_mode,
                                                        GError                   **error);

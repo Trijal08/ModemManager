@@ -976,6 +976,48 @@ mm_sit_message_parse_smsc_address (const MMSitMessage *message,
     return TRUE;
 }
 
+GByteArray *
+mm_sit_request_new_get_base_band_version (guint16 token)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_get_base_band_version (token, SAMSUNG_SIT_VERSION_ALL_FIELDS,
+                                                      &buffer, &len);
+    return finish_build (status, buffer, len, NULL);
+}
+
+gboolean
+mm_sit_message_parse_base_band_version (const MMSitMessage    *message,
+                                        MMSitBaseBandVersion  *out_version,
+                                        GError               **error)
+{
+    const guint8                 *data;
+    gsize                         len;
+    SamsungSitBaseBandVersion     version;
+    SamsungSitStatus              status;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_version != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_base_band_version (data, len, &version);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+
+    G_STATIC_ASSERT (sizeof (version.sw_ver) == MM_SIT_MAX_VERSION_FIELD);
+    memcpy (out_version->sw_ver,      version.sw_ver,      MM_SIT_MAX_VERSION_FIELD);
+    memcpy (out_version->hw_ver,      version.hw_ver,      MM_SIT_MAX_VERSION_FIELD);
+    memcpy (out_version->rf_cal_date, version.rf_cal_date, MM_SIT_MAX_VERSION_FIELD);
+    memcpy (out_version->prod_code,   version.prod_code,   MM_SIT_MAX_VERSION_FIELD);
+    memcpy (out_version->model_id,    version.model_id,    MM_SIT_MAX_VERSION_FIELD);
+    memcpy (out_version->cp_chipset,  version.cp_chipset,  MM_SIT_MAX_VERSION_FIELD);
+    return TRUE;
+}
+
 gboolean
 mm_sit_message_parse_network_selection_mode (const MMSitMessage        *message,
                                              MMSitNetworkSelectionMode *out_mode,

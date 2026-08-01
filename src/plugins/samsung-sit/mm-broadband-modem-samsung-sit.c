@@ -51,6 +51,10 @@ struct _MMBroadbandModemSamsungSitPrivate {
      * nodes, so mm-sit-tool and the IMS helper can share them. Set from
      * ID_MM_SIT_PROXY on the port. */
     gboolean     use_proxy;
+    /* The CP's version block, read once. Three separate loaders want fields of
+     * it and the values do not change while the CP is up. */
+    MMSitBaseBandVersion  version;
+    gboolean              version_valid;
 };
 
 typedef struct {
@@ -1324,22 +1328,19 @@ load_supported_capabilities (MMIfaceModem        *self,
 
 /* Identity
  *
- * Only the equipment identifier has a source on this control plane: the CP
- * holds its own IMEI and 0x0401 GET_IMEI reads it back. Everything else the
- * generic path gets from +CGMI/+CGMM/+CGMR has no SIT equivalent --
- * 0x0901 GET_BASE_BAND_VERSION answers a near-empty frame naming only an IMS
- * capability level, and 0x0931 AT_COMMAND, which would have tunnelled the same
- * three commands, is refused with status 2 on this firmware.
+ * All of it comes off the control plane. 0x0401 GET_IMEI holds the equipment
+ * identifier, and 0x0901 GET_BASE_BAND_VERSION holds the rest: 'sw_ver' is the
+ * firmware build (the same string the AT service answers +CGMR with), 'hw_ver'
+ * the hardware revision, and 'cp_chipset' the baseband part.
  *
- * So the two that are properties of the part are stated, and the revision is
- * left unset rather than filled with something that is not one. That changes
- * Modem.DeviceIdentifier, which is hashed from these together with the
- * equipment identifier -- nothing here keys a NetworkManager connection on it,
- * but it does not survive the switch. */
+ * The model is built from the chipset rather than stated, because this plugin
+ * is not specific to one part -- the S5400 speaks the same protocol, and the
+ * downstream RIL these layouts came from is built from an s5400 tree. Anything
+ * the CP does not report is left unset rather than guessed.
+ *
+ * Manufacturer stays a constant: it is what the plugin is, not something the
+ * modem could disagree about. */
 #define SAMSUNG_SIT_MANUFACTURER "Samsung Electronics"
-/* The baseband part, which is what +CGMM names too (as "S5300" plus a firmware
- * variant suffix we have no way to read back). */
-#define SAMSUNG_SIT_MODEL "S5300"
 
 static gchar *
 load_identity_string_finish (MMIfaceModem  *self,
@@ -1361,16 +1362,121 @@ load_manufacturer (MMIfaceModem        *self,
     g_object_unref (task);
 }
 
+/* Which field of the version block a loader wants. */
+typedef enum {
+    VERSION_FIELD_MODEL,
+    VERSION_FIELD_REVISION,
+    VERSION_FIELD_HARDWARE_REVISION,
+} VersionField;
+
+static gchar *
+version_field_dup (MMBroadbandModemSamsungSit *self,
+                   VersionField                field)
+{
+    const MMSitBaseBandVersion *v = &self->priv->version;
+
+    switch (field) {
+    case VERSION_FIELD_MODEL:
+        /* "S" + the part, e.g. S5300. +CGMM answers the same with a firmware
+         * variant suffix we have no way to read back. */
+        return v->cp_chipset[0] ? g_strdup_printf ("S%s", v->cp_chipset) : NULL;
+    case VERSION_FIELD_REVISION:
+        return v->sw_ver[0] ? g_strdup (v->sw_ver) : NULL;
+    case VERSION_FIELD_HARDWARE_REVISION:
+        return v->hw_ver[0] ? g_strdup (v->hw_ver) : NULL;
+    default:
+        g_assert_not_reached ();
+    }
+}
+
+static void
+load_version_field_ready (MMSitClient  *client,
+                          GAsyncResult *res,
+                          GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    VersionField                field = GPOINTER_TO_UINT (g_task_get_task_data (task));
+    g_autoptr(GError)           error = NULL;
+    gchar                      *value;
+
+    if (!mm_sit_client_get_base_band_version_finish (client, res, &self->priv->version, &error)) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "couldn't read the CP version block: %s", error->message);
+        g_object_unref (task);
+        return;
+    }
+    self->priv->version_valid = TRUE;
+
+    value = version_field_dup (self, field);
+    if (!value)
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_NOT_FOUND,
+                                 "the CP does not report this");
+    else
+        g_task_return_pointer (task, value, g_free);
+    g_object_unref (task);
+}
+
+/* Read the block once and serve all three loaders from it: the core calls them
+ * in sequence during initialization and the values cannot change while the CP
+ * is up. */
+static void
+load_version_field (MMIfaceModem        *iface,
+                    VersionField         field,
+                    GAsyncReadyCallback  callback,
+                    gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    g_task_set_task_data (task, GUINT_TO_POINTER (field), NULL);
+
+    if (self->priv->version_valid) {
+        gchar *value = version_field_dup (self, field);
+
+        if (!value)
+            g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_NOT_FOUND,
+                                     "the CP does not report this");
+        else
+            g_task_return_pointer (task, value, g_free);
+        g_object_unref (task);
+        return;
+    }
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_base_band_version (client, NULL,
+                                         (GAsyncReadyCallback) load_version_field_ready, task);
+}
+
 static void
 load_model (MMIfaceModem        *self,
             GAsyncReadyCallback  callback,
             gpointer             user_data)
 {
-    GTask *task;
+    load_version_field (self, VERSION_FIELD_MODEL, callback, user_data);
+}
 
-    task = g_task_new (self, NULL, callback, user_data);
-    g_task_return_pointer (task, g_strdup (SAMSUNG_SIT_MODEL), g_free);
-    g_object_unref (task);
+static void
+load_revision (MMIfaceModem        *self,
+               GAsyncReadyCallback  callback,
+               gpointer             user_data)
+{
+    load_version_field (self, VERSION_FIELD_REVISION, callback, user_data);
+}
+
+static void
+load_hardware_revision (MMIfaceModem        *self,
+                        GAsyncReadyCallback  callback,
+                        gpointer             user_data)
+{
+    load_version_field (self, VERSION_FIELD_HARDWARE_REVISION, callback, user_data);
 }
 
 static void
@@ -3615,6 +3721,10 @@ iface_modem_init (MMIfaceModemInterface *iface)
     iface->load_manufacturer_finish = load_identity_string_finish;
     iface->load_model = load_model;
     iface->load_model_finish = load_identity_string_finish;
+    iface->load_revision = load_revision;
+    iface->load_revision_finish = load_identity_string_finish;
+    iface->load_hardware_revision = load_hardware_revision;
+    iface->load_hardware_revision_finish = load_identity_string_finish;
     iface->load_equipment_identifier = load_equipment_identifier;
     iface->load_equipment_identifier_finish = load_identity_string_finish;
     iface->load_device_identifier = load_device_identifier;
