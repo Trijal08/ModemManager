@@ -1367,6 +1367,60 @@ mm_sit_client_get_network_time_finish (MMSitClient   *self,
 }
 
 static void
+get_radio_capability_ready (MMSitClient  *self,
+                            GAsyncResult *res,
+                            GTask        *task)
+{
+    g_autoptr(MMSitMessage)   response = NULL;
+    GError                   *error = NULL;
+    MMSitNetworkGenerations  *generations;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    generations = g_new0 (MMSitNetworkGenerations, 1);
+    if (response && mm_sit_message_parse_radio_capability (response, generations, &error))
+        g_task_return_pointer (task, generations, g_free);
+    else {
+        g_free (generations);
+        g_task_return_error (task, error);
+    }
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_get_radio_capability (MMSitClient        *self,
+                                    GCancellable       *cancellable,
+                                    GAsyncReadyCallback callback,
+                                    gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_RADIO_CAPABILITY, next_token (self));
+    mm_sit_client_command (self, request, 5, cancellable,
+                           (GAsyncReadyCallback) get_radio_capability_ready, task);
+}
+
+gboolean
+mm_sit_client_get_radio_capability_finish (MMSitClient              *self,
+                                           GAsyncResult             *res,
+                                           MMSitNetworkGenerations  *out_generations,
+                                           GError                  **error)
+{
+    MMSitNetworkGenerations *generations;
+
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    g_return_val_if_fail (out_generations != NULL, FALSE);
+
+    generations = g_task_propagate_pointer (G_TASK (res), error);
+    if (!generations)
+        return FALSE;
+    *out_generations = *generations;
+    g_free (generations);
+    return TRUE;
+}
+
+static void
 get_base_band_version_ready (MMSitClient  *self,
                              GAsyncResult *res,
                              GTask        *task)

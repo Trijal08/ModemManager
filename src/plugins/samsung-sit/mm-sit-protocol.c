@@ -976,6 +976,32 @@ mm_sit_message_parse_smsc_address (const MMSitMessage *message,
     return TRUE;
 }
 
+gboolean
+mm_sit_message_parse_radio_capability (const MMSitMessage      *message,
+                                       MMSitNetworkGenerations *out_generations,
+                                       GError                 **error)
+{
+    const guint8                   *data;
+    gsize                           len;
+    SamsungSitNetworkGenerations    generations;
+    SamsungSitStatus                status;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_generations != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_radio_capability (data, len, &generations);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+    out_generations->gsm  = generations.gsm;
+    out_generations->umts = generations.umts;
+    out_generations->lte  = generations.lte;
+    out_generations->nr   = generations.nr;
+    return TRUE;
+}
+
 GByteArray *
 mm_sit_request_new_get_base_band_version (guint16 token)
 {

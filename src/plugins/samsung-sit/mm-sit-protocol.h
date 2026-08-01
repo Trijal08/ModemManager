@@ -79,6 +79,7 @@ typedef enum {
     MM_SIT_MESSAGE_QUERY_NETWORK_SELECTION_MODE = 0x0703,
     MM_SIT_MESSAGE_SET_NETWORK_SELECTION_AUTO   = 0x0704,
     MM_SIT_MESSAGE_SET_NETWORK_SELECTION_MANUAL = 0x0705,
+    MM_SIT_MESSAGE_GET_RADIO_CAPABILITY        = 0x0718,
     MM_SIT_MESSAGE_GET_CELL_INFO_LIST          = 0x070c,
     MM_SIT_MESSAGE_SERVING_NETWORK             = 0x070e,
     MM_SIT_MESSAGE_NETWORK_SCAN                = 0x0734,
@@ -650,6 +651,11 @@ typedef struct {
 /* The selector is mandatory: a bare query leaves it off and the CP answers a
  * partly filled block. */
 GByteArray *mm_sit_request_new_get_base_band_version  (guint16                token);
+/* Which generations the modem *has*, as opposed to which it is allowed to use.
+ * Unlike the allowed bitmap this does not move when the modes are restricted. */
+gboolean mm_sit_message_parse_radio_capability        (const MMSitMessage      *message,
+                                                       MMSitNetworkGenerations *out_generations,
+                                                       GError                 **error);
 gboolean mm_sit_message_parse_base_band_version       (const MMSitMessage    *message,
                                                        MMSitBaseBandVersion  *out_version,
                                                        GError               **error);

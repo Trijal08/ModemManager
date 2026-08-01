@@ -255,6 +255,16 @@ gboolean mm_sit_client_get_network_time_finish (MMSitClient        *self,
                                                 MMSitNitzTime      *out_time,
                                                 GError            **error);
 
+/* Reads which radio generations the modem has. */
+void     mm_sit_client_get_radio_capability        (MMSitClient        *self,
+                                                    GCancellable       *cancellable,
+                                                    GAsyncReadyCallback callback,
+                                                    gpointer            user_data);
+gboolean mm_sit_client_get_radio_capability_finish (MMSitClient             *self,
+                                                    GAsyncResult            *res,
+                                                    MMSitNetworkGenerations *out_generations,
+                                                    GError                 **error);
+
 /* Reads the CP's version block: firmware build, hardware revision and the
  * baseband part. Fields the CP does not report come back empty. */
 void     mm_sit_client_get_base_band_version        (MMSitClient        *self,

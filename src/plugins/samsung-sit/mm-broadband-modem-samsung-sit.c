@@ -55,6 +55,10 @@ struct _MMBroadbandModemSamsungSitPrivate {
      * it and the values do not change while the CP is up. */
     MMSitBaseBandVersion  version;
     gboolean              version_valid;
+    /* Which generations the modem has, from 0x0718. Read once; it does not
+     * change while the CP is up, and three loaders want it. */
+    MMSitNetworkGenerations  radio_capability;
+    gboolean                 radio_capability_valid;
 };
 
 typedef struct {
@@ -1250,28 +1254,27 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
 /*****************************************************************************/
 /* Modem interface */
 
-/* Capabilities
+/* Capabilities and supported modes
  *
- * The CP has no capability query and the downstream RIL never asks for one --
- * which generations a baseband speaks is a property of the part, not runtime
- * state. ModemManager's generic path infers it from `ATI`, `+GCAP` and
+ * Both come from 0x0718 GET_RC_NETWORK_TYPE -- the modem's radio capability,
+ * i.e. which generations it *has*. Not to be confused with 0x0750, the allowed
+ * bitmap, which is a setting: restricting the modem to 2G moves 0x0750 to
+ * 0x00000206 and 0x070b to 0x00000001 while 0x0718 stays 0x00040288. Sourcing
+ * capabilities from the allowed set would make the modem disown LTE whenever
+ * someone restricted the modes, and the core turns off EPS and 5GS
+ * registration checks based on capabilities.
+ *
+ * ModemManager's generic path would infer capabilities from `ATI`, `+GCAP` and
  * `+WS46=?`, and on this modem that lands on `gsm-umts` alone: `+GCAP` names
- * only the circuit-switched capability and `+WS46=?` is answered malformed (a
- * closing parenthesis with no opening one), so the packet-switched generations
- * never appear. The modem then reports itself 2G/3G-only while registered on
- * LTE.
+ * only the circuit-switched capability and `+WS46=?` is answered malformed,
+ * so the packet-switched generations never appear.
  *
- * So answer for the part. Both capability steps are also *fatal* to modem
- * initialization (`mm-iface-modem.c`, `load_{current,supported}_capabilities_
- * ready`), which makes this the one thing that has to exist before the AT port
- * can go away at all.
+ * One capability combination, not a list: the generations are not switchable,
+ * only maskable, and the maskable part is the Modes property.
  *
- * One combination, not a list: the generations are not switchable here. What
- * *is* switchable is which of them the CP may use, and that is the Modes
- * property, which 0x074f/0x0750 already drive. */
-#define SAMSUNG_SIT_CAPABILITIES (MM_MODEM_CAPABILITY_GSM_UMTS | \
-                                  MM_MODEM_CAPABILITY_LTE |      \
-                                  MM_MODEM_CAPABILITY_5GNR)
+ * Both capability steps are *fatal* to modem initialization
+ * (`mm-iface-modem.c`), so a failed read falls back to reporting everything
+ * rather than refusing to bring the modem up; the warning says so. */
 
 static MMModemCapability
 load_current_capabilities_finish (MMIfaceModem  *self,
@@ -1289,16 +1292,95 @@ load_current_capabilities_finish (MMIfaceModem  *self,
     return (MMModemCapability) value;
 }
 
+static MMModemCapability
+generations_to_capabilities (const MMSitNetworkGenerations *g)
+{
+    MMModemCapability caps = MM_MODEM_CAPABILITY_NONE;
+
+    if (g->gsm || g->umts)
+        caps |= MM_MODEM_CAPABILITY_GSM_UMTS;
+    if (g->lte)
+        caps |= MM_MODEM_CAPABILITY_LTE;
+    if (g->nr)
+        caps |= MM_MODEM_CAPABILITY_5GNR;
+    return caps;
+}
+
+/* What a modem that answers nothing is assumed to have. Only reached when the
+ * capability read fails, which is fatal to initialization otherwise. */
+static const MMSitNetworkGenerations all_generations = {
+    .gsm = TRUE, .umts = TRUE, .lte = TRUE, .nr = TRUE
+};
+
+static void
+radio_capability_ready (MMSitClient  *client,
+                        GAsyncResult *res,
+                        GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    g_autoptr(GError)           error = NULL;
+
+    if (!mm_sit_client_get_radio_capability_finish (client, res, &self->priv->radio_capability,
+                                                    &error)) {
+        mm_obj_warn (self, "couldn't read the modem's radio capability (%s); assuming it has all "
+                     "the generations it could have", error->message);
+        self->priv->radio_capability = all_generations;
+    }
+    self->priv->radio_capability_valid = TRUE;
+
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+/* Read 0x0718 once and serve the capability and mode loaders from it. */
+static void
+ensure_radio_capability (MMBroadbandModemSamsungSit *self,
+                         GAsyncReadyCallback         callback,
+                         gpointer                    user_data)
+{
+    MMSitClient *client;
+    GError      *error = NULL;
+    GTask       *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    if (self->priv->radio_capability_valid) {
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        mm_obj_warn (self, "couldn't reach the CP to read its radio capability (%s); assuming it "
+                     "has all the generations it could have", error->message);
+        g_clear_error (&error);
+        self->priv->radio_capability = all_generations;
+        self->priv->radio_capability_valid = TRUE;
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_radio_capability (client, NULL,
+                                        (GAsyncReadyCallback) radio_capability_ready, task);
+}
+
+static void
+current_capabilities_ready (MMBroadbandModemSamsungSit *self,
+                            GAsyncResult               *res,
+                            GTask                      *task)
+{
+    g_task_return_int (task, generations_to_capabilities (&self->priv->radio_capability));
+    g_object_unref (task);
+}
+
 static void
 load_current_capabilities (MMIfaceModem        *self,
                            GAsyncReadyCallback  callback,
                            gpointer             user_data)
 {
-    GTask *task;
-
-    task = g_task_new (self, NULL, callback, user_data);
-    g_task_return_int (task, SAMSUNG_SIT_CAPABILITIES);
-    g_object_unref (task);
+    ensure_radio_capability (MM_BROADBAND_MODEM_SAMSUNG_SIT (self),
+                             (GAsyncReadyCallback) current_capabilities_ready,
+                             g_task_new (self, NULL, callback, user_data));
 }
 
 static GArray *
@@ -1310,20 +1392,29 @@ load_supported_capabilities_finish (MMIfaceModem  *self,
 }
 
 static void
+supported_capabilities_ready (MMBroadbandModemSamsungSit *self,
+                              GAsyncResult               *res,
+                              GTask                      *task)
+{
+    GArray            *capabilities;
+    MMModemCapability  capability;
+
+    capability = generations_to_capabilities (&self->priv->radio_capability);
+    capabilities = g_array_sized_new (FALSE, FALSE, sizeof (MMModemCapability), 1);
+    g_array_append_val (capabilities, capability);
+
+    g_task_return_pointer (task, capabilities, (GDestroyNotify) g_array_unref);
+    g_object_unref (task);
+}
+
+static void
 load_supported_capabilities (MMIfaceModem        *self,
                              GAsyncReadyCallback  callback,
                              gpointer             user_data)
 {
-    GArray            *capabilities;
-    MMModemCapability  capability = SAMSUNG_SIT_CAPABILITIES;
-    GTask             *task;
-
-    capabilities = g_array_sized_new (FALSE, FALSE, sizeof (MMModemCapability), 1);
-    g_array_append_val (capabilities, capability);
-
-    task = g_task_new (self, NULL, callback, user_data);
-    g_task_return_pointer (task, capabilities, (GDestroyNotify) g_array_unref);
-    g_object_unref (task);
+    ensure_radio_capability (MM_BROADBAND_MODEM_SAMSUNG_SIT (self),
+                             (GAsyncReadyCallback) supported_capabilities_ready,
+                             g_task_new (self, NULL, callback, user_data));
 }
 
 /* Identity
@@ -3530,17 +3621,27 @@ load_supported_modes_finish (MMIfaceModem *self,
  * independent. No preferred mode: the bitmap says what the CP may use, not what
  * it should favour, and nothing in the corpus expresses a preference. */
 static void
-load_supported_modes (MMIfaceModem       *self,
-                      GAsyncReadyCallback callback,
-                      gpointer            user_data)
+supported_modes_ready (MMBroadbandModemSamsungSit *self,
+                       GAsyncResult               *res,
+                       GTask                      *task)
 {
-    GArray                  *combinations;
-    MMModemModeCombination   combination;
-    MMModemMode              all;
-    GTask                   *task;
-    guint                    mask;
+    const MMSitNetworkGenerations *g = &self->priv->radio_capability;
+    GArray                        *combinations;
+    MMModemModeCombination         combination;
+    MMModemMode                    all = MM_MODEM_MODE_NONE;
+    guint                          mask;
 
-    all = MM_MODEM_MODE_2G | MM_MODEM_MODE_3G | MM_MODEM_MODE_4G | MM_MODEM_MODE_5G;
+    /* Every subset of what the modem has. 0x074f takes any of them, since the
+     * allowed bitmap masks generations independently. */
+    if (g->gsm)
+        all |= MM_MODEM_MODE_2G;
+    if (g->umts)
+        all |= MM_MODEM_MODE_3G;
+    if (g->lte)
+        all |= MM_MODEM_MODE_4G;
+    if (g->nr)
+        all |= MM_MODEM_MODE_5G;
+
     combinations = g_array_sized_new (FALSE, FALSE, sizeof (MMModemModeCombination), 15);
     for (mask = 1; mask <= (guint) all; mask++) {
         if (mask & ~((guint) all))
@@ -3550,9 +3651,18 @@ load_supported_modes (MMIfaceModem       *self,
         g_array_append_val (combinations, combination);
     }
 
-    task = g_task_new (self, NULL, callback, user_data);
     g_task_return_pointer (task, combinations, (GDestroyNotify) g_array_unref);
     g_object_unref (task);
+}
+
+static void
+load_supported_modes (MMIfaceModem       *self,
+                      GAsyncReadyCallback callback,
+                      gpointer            user_data)
+{
+    ensure_radio_capability (MM_BROADBAND_MODEM_SAMSUNG_SIT (self),
+                             (GAsyncReadyCallback) supported_modes_ready,
+                             g_task_new (self, NULL, callback, user_data));
 }
 
 static MMBearerIpFamily
