@@ -2938,6 +2938,44 @@ register_in_network_finish (MMIfaceModem3gpp  *self,
     return g_task_propagate_boolean (G_TASK (res), error);
 }
 
+static void register_in_network_ready (MMSitClient  *client,
+                                       GAsyncResult *res,
+                                       GTask        *task);
+
+/* The CP already picks a network on its own; only pin it when it says it is in
+ * manual mode. Registration itself is reported by the SERVING_NETWORK
+ * indication and the registration polls the core already runs, so returning
+ * success here without sending anything loses nothing. */
+static void
+register_selection_mode_ready (MMSitClient  *client,
+                               GAsyncResult *res,
+                               GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    MMSitNetworkSelectionMode   mode;
+    g_autoptr(GError)           error = NULL;
+
+    if (!mm_sit_client_get_network_selection_mode_finish (client, res, &mode, &error)) {
+        /* Not knowing is not a reason to fail the registration; fall back to
+         * asking, which is what this did unconditionally before. */
+        mm_obj_dbg (self, "couldn't read the network selection mode (%s); asking for automatic anyway",
+                    error->message);
+        mode = MM_SIT_NETWORK_SELECTION_MANUAL;
+    }
+
+    if (mode == MM_SIT_NETWORK_SELECTION_AUTOMATIC) {
+        mm_obj_dbg (self, "the CP is already selecting a network automatically; letting it search");
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+
+    mm_obj_dbg (self, "asking the CP to select a network automatically");
+    mm_sit_client_set_network_selection_auto (client, g_task_get_cancellable (task),
+                                              (GAsyncReadyCallback) register_in_network_ready,
+                                              task);
+}
+
 static void
 register_in_network_ready (MMSitClient  *client,
                            GAsyncResult *res,
@@ -2999,12 +3037,17 @@ register_in_network (MMIfaceModem3gpp   *self,
                                                    MM_SIT_REGISTRATION_RAT_LTE, cancellable,
                                                    (GAsyncReadyCallback) register_in_network_ready,
                                                    task);
-    } else {
-        mm_obj_dbg (self, "asking the CP to select a network automatically");
-        mm_sit_client_set_network_selection_auto (client, cancellable,
-                                                 (GAsyncReadyCallback) register_in_network_ready,
-                                                 task);
+        return;
     }
+
+    /* Ask what the CP is doing before telling it to do it. It selects
+     * automatically out of reset and starts searching the moment radio power
+     * comes up, so an automatic-selection request is usually redundant -- and
+     * it is not free: the ack lands when the search *finishes*, and the port
+     * carries nothing else until then. */
+    mm_sit_client_get_network_selection_mode (client, cancellable,
+                                              (GAsyncReadyCallback) register_selection_mode_ready,
+                                              task);
 }
 
 static GList *

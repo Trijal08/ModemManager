@@ -255,6 +255,16 @@ gboolean mm_sit_client_get_network_time_finish (MMSitClient        *self,
                                                 MMSitNitzTime      *out_time,
                                                 GError            **error);
 
+/* Reads how the CP is currently choosing a network. */
+void     mm_sit_client_get_network_selection_mode        (MMSitClient        *self,
+                                                          GCancellable       *cancellable,
+                                                          GAsyncReadyCallback callback,
+                                                          gpointer            user_data);
+gboolean mm_sit_client_get_network_selection_mode_finish (MMSitClient               *self,
+                                                          GAsyncResult              *res,
+                                                          MMSitNetworkSelectionMode *out_mode,
+                                                          GError                   **error);
+
 /* Reads the CP's own IMEI. Fails with MM_CORE_ERROR_NOT_FOUND when the CP
  * answered but the field is empty, which is what an unprovisioned board does. */
 void    mm_sit_client_get_imei        (MMSitClient        *self,

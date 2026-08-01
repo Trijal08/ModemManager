@@ -1367,6 +1367,60 @@ mm_sit_client_get_network_time_finish (MMSitClient   *self,
 }
 
 static void
+get_network_selection_mode_ready (MMSitClient  *self,
+                                  GAsyncResult *res,
+                                  GTask        *task)
+{
+    g_autoptr(MMSitMessage)    response = NULL;
+    GError                    *error = NULL;
+    MMSitNetworkSelectionMode  mode;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (!response || !mm_sit_message_parse_network_selection_mode (response, &mode, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_int (task, mode);
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_get_network_selection_mode (MMSitClient        *self,
+                                          GCancellable       *cancellable,
+                                          GAsyncReadyCallback callback,
+                                          gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_QUERY_NETWORK_SELECTION_MODE,
+                                        next_token (self));
+    mm_sit_client_command (self, request, 10, cancellable,
+                           (GAsyncReadyCallback) get_network_selection_mode_ready, task);
+}
+
+gboolean
+mm_sit_client_get_network_selection_mode_finish (MMSitClient               *self,
+                                                 GAsyncResult              *res,
+                                                 MMSitNetworkSelectionMode *out_mode,
+                                                 GError                   **error)
+{
+    GError *inner_error = NULL;
+    gssize  value;
+
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    g_return_val_if_fail (out_mode != NULL, FALSE);
+
+    value = g_task_propagate_int (G_TASK (res), &inner_error);
+    if (inner_error) {
+        g_propagate_error (error, inner_error);
+        return FALSE;
+    }
+    *out_mode = (MMSitNetworkSelectionMode) value;
+    return TRUE;
+}
+
+static void
 get_imei_ready (MMSitClient  *self,
                 GAsyncResult *res,
                 GTask        *task)
@@ -2273,6 +2327,18 @@ mm_sit_client_disconnect_data_finish (MMSitClient  *self,
  * first enabled, so without this nothing re-triggers a search and the modem
  * stays unregistered indefinitely. The ack is empty; the outcome shows up as a
  * SERVING_NETWORK indication once the CP finds a network.
+ *
+ * **Only send this when the CP is not already selecting automatically.** The ack
+ * comes back when the CP's search finishes, not when it accepts the request, so
+ * asking a CP that is already mid-search costs the whole search: 181.7 s
+ * measured on a boot where the request went out 40 s after radio-on, against
+ * 5 ms, 11 ms and 3.4 s for the three downstream sends. MMPortSerial runs one
+ * command at a time, so the port carries nothing else for the duration -- the
+ * trace shows a dead link and then every queued command flushing out the
+ * instant the deadline passes.
+ *
+ * The caller checks 0x0703 first, so by the time this is sent the CP is in
+ * manual mode and the search is one it has not started yet.
  */
 void
 mm_sit_client_set_network_selection_auto (MMSitClient        *self,
@@ -2283,7 +2349,7 @@ mm_sit_client_set_network_selection_auto (MMSitClient        *self,
     g_autoptr(GByteArray) request = NULL;
 
     request = mm_sit_request_new_set_network_selection_auto (next_token (self));
-    run_checked_command (self, request, 10, cancellable, callback, user_data);
+    run_checked_command (self, request, 30, cancellable, callback, user_data);
 }
 
 gboolean

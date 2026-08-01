@@ -977,6 +977,29 @@ mm_sit_message_parse_smsc_address (const MMSitMessage *message,
 }
 
 gboolean
+mm_sit_message_parse_network_selection_mode (const MMSitMessage        *message,
+                                             MMSitNetworkSelectionMode *out_mode,
+                                             GError                   **error)
+{
+    const guint8                    *data;
+    gsize                            len;
+    SamsungSitNetworkSelectionMode   mode;
+    SamsungSitStatus                 status;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_mode != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_network_selection_mode (data, len, &mode);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+    *out_mode = (MMSitNetworkSelectionMode) mode;
+    return TRUE;
+}
+
+gboolean
 mm_sit_message_parse_imei (const MMSitMessage  *message,
                            gchar              **out_imei,
                            GError             **error)

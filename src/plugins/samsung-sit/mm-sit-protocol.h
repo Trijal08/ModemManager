@@ -626,6 +626,16 @@ gboolean mm_sit_message_parse_smsc_address            (const MMSitMessage    *me
                                                        GError               **error);
 /* '*out_imei' is set to NULL, with no error, when the CP holds no IMEI --
  * an unprovisioned board, which is a state to report rather than a failure. */
+/* How the CP is choosing a network. It reports Automatic out of reset, so an
+ * explicit auto-select is usually asking for what is already happening. */
+typedef enum {
+    MM_SIT_NETWORK_SELECTION_AUTOMATIC = 0,
+    MM_SIT_NETWORK_SELECTION_MANUAL    = 1,
+} MMSitNetworkSelectionMode;
+
+gboolean mm_sit_message_parse_network_selection_mode  (const MMSitMessage        *message,
+                                                       MMSitNetworkSelectionMode *out_mode,
+                                                       GError                   **error);
 gboolean mm_sit_message_parse_imei                    (const MMSitMessage    *message,
                                                        gchar                **out_imei,
                                                        GError               **error);
