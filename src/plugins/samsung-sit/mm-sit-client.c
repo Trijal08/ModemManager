@@ -35,7 +35,10 @@ struct _MMSitClientPrivate {
     gsize                smsc_len;
 };
 
-G_DEFINE_TYPE (MMSitClient, mm_sit_client, G_TYPE_OBJECT)
+static void log_object_iface_init (MMLogObjectInterface *iface);
+
+G_DEFINE_TYPE_EXTENDED (MMSitClient, mm_sit_client, G_TYPE_OBJECT, 0,
+                        G_IMPLEMENT_INTERFACE (MM_TYPE_LOG_OBJECT, log_object_iface_init))
 
 static gboolean
 message_check_success (const MMSitMessage *message,
@@ -2907,6 +2910,24 @@ finalize (GObject *object)
     g_free (self->priv->device);
     g_free (self->priv->proxy_fallback_device);
     G_OBJECT_CLASS (mm_sit_client_parent_class)->finalize (object);
+}
+
+/* The client is its own log object rather than borrowing the port's. The port
+ * only exists once the client is open, so logging through it was a crash
+ * waiting for anyone who wrote the obvious mm_obj_dbg (self, ...) -- and with
+ * two logical stacks the client, not the port, is the thing worth naming. */
+static gchar *
+log_object_build_id (MMLogObject *_self)
+{
+    MMSitClient *self = MM_SIT_CLIENT (_self);
+
+    return g_strdup_printf ("%s/client", self->priv->device ?: "sit");
+}
+
+static void
+log_object_iface_init (MMLogObjectInterface *iface)
+{
+    iface->build_id = log_object_build_id;
 }
 
 static void
