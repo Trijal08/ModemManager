@@ -1653,7 +1653,12 @@ mm_base_modem_organize_ports (MMBaseModem *self,
 
         case MM_PORT_TYPE_SIT:
             g_assert (MM_IS_PORT (candidate));
-            if (!sit)
+            /* A modem can have several: this CP exposes one control port per
+             * logical stack. The ports table is a hash, so take the
+             * lowest-named rather than the first one iteration happens to
+             * yield -- the plugin picks its primary stack by the same ordering,
+             * and the port named as primary has to be the one it drives. */
+            if (!sit || port_cmp (MM_PORT (candidate), sit) < 0)
                 sit = MM_PORT (candidate);
             break;
 
