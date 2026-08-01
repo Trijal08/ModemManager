@@ -3911,7 +3911,42 @@ modem_time_load_network_timezone (MMIfaceModemTime    *iface,
  * describe: setup_in_call_audio_channel stays unimplemented and the audio
  * binding is done by the audio layer (UCM + tegu-call-audio) off the call
  * state MM publishes.
+ *
+ * Nothing subscribes to unsolicited events either. The generic enable arms
+ * +CLIP, +CRC and +CCWA on the AT port, and all three announce things this
+ * plugin already learns from CALL_STATE_CHANGED and the call list -- including
+ * a waiting call, which the list reports as RIL state 5. Arming them is
+ * therefore pure AT traffic with no reader, so the whole family is a no-op.
+ *
+ * Supplementary services are unimplemented on purpose, call waiting included.
+ * The CP has 0x050b GET_CALL_WAITING and 0x050c SET_CALL_WAITING, but a query
+ * is an interrogation that goes to the network -- downstream budgets 60 s for
+ * it -- and over AT it took 6.8 s here and dropped the CP's serving network for
+ * about ten seconds afterwards. What it buys is a settings toggle: whether the
+ * service is active is the subscription's business, and a waiting call arrives
+ * and is reported regardless. The part worth having is hold/swap
+ * (0x0500-0x0504), without which a reported waiting call cannot be taken; that
+ * is where this should be picked up again.
  */
+
+static void
+modem_voice_unsolicited_events_noop (MMIfaceModemVoice   *self,
+                                     GAsyncReadyCallback  callback,
+                                     gpointer             user_data)
+{
+    GTask *task = g_task_new (self, NULL, callback, user_data);
+
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static gboolean
+modem_voice_unsolicited_events_noop_finish (MMIfaceModemVoice  *self,
+                                            GAsyncResult       *res,
+                                            GError            **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
 
 static gboolean
 modem_voice_check_support_finish (MMIfaceModemVoice  *self,
@@ -4076,6 +4111,15 @@ iface_modem_voice_init (MMIfaceModemVoiceInterface *iface)
     iface->create_call             = modem_voice_create_call;
     iface->load_call_list          = modem_voice_load_call_list;
     iface->load_call_list_finish   = modem_voice_load_call_list_finish;
+    /* SIT owns call state; never arm the AT +CLIP/+CRC/+CCWA URCs. */
+    iface->setup_unsolicited_events           = modem_voice_unsolicited_events_noop;
+    iface->setup_unsolicited_events_finish    = modem_voice_unsolicited_events_noop_finish;
+    iface->cleanup_unsolicited_events         = modem_voice_unsolicited_events_noop;
+    iface->cleanup_unsolicited_events_finish  = modem_voice_unsolicited_events_noop_finish;
+    iface->enable_unsolicited_events          = modem_voice_unsolicited_events_noop;
+    iface->enable_unsolicited_events_finish   = modem_voice_unsolicited_events_noop_finish;
+    iface->disable_unsolicited_events         = modem_voice_unsolicited_events_noop;
+    iface->disable_unsolicited_events_finish  = modem_voice_unsolicited_events_noop_finish;
 }
 
 static void
