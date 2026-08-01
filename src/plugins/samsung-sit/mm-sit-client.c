@@ -23,6 +23,11 @@ struct _MMSitClientPrivate {
     gboolean             has_carrier_sim_info;
     MMSitCarrierSimInfo  carrier_sim_info;
     gboolean             boot_config_done;
+    /* The struct versions the CP announced when answering 0x0922, and whether
+     * it has answered yet. Every field reads "supported" until it has, so a CP
+     * that never got the question is never blocked on its answer. */
+    gboolean             struct_versions_known;
+    MMSitStructVersions  struct_versions;
     /* What we tell the CP the AP is, in 0x0922. Resolved from the running
      * system, overridable per device. */
     gchar               *device_model;
@@ -228,6 +233,7 @@ mm_sit_client_close (MMSitClient *self)
     self->priv->has_carrier_sim_info = FALSE;
     memset (&self->priv->carrier_sim_info, 0, sizeof (self->priv->carrier_sim_info));
     self->priv->boot_config_done = FALSE;
+    self->priv->struct_versions_known = FALSE;
     self->priv->radio_state_trusted = FALSE;
     if (!mm_port_serial_is_open (MM_PORT_SERIAL (self->priv->port)))
         return;
@@ -1601,6 +1607,29 @@ get_signal_ready (MMSitClient *self,
     g_object_unref (task);
 }
 
+/* A layout the CP announced and we have no parser for. Refusing the query is
+ * the point: sending it anyway buys a truncation at best, and for signal --
+ * whose version is inferred from the payload length -- a future layout that
+ * happened to be the same size would be decoded as the current one and answered
+ * with plausible nonsense. See boot_config_device_info_ready. */
+static gboolean
+struct_version_refused (MMSitClient  *self,
+                        gboolean      supported,
+                        const gchar  *what,
+                        guint8        version,
+                        GTask        *task)
+{
+    /* Before the CP has answered 0x0922 there is no claim to hold against it. */
+    if (!self->priv->struct_versions_known || supported)
+        return FALSE;
+
+    g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_UNSUPPORTED,
+                             "the CP speaks %s=%u, which this plugin cannot parse",
+                             what, version);
+    g_object_unref (task);
+    return TRUE;
+}
+
 void
 mm_sit_client_get_signal (MMSitClient        *self,
                           GCancellable       *cancellable,
@@ -1611,6 +1640,10 @@ mm_sit_client_get_signal (MMSitClient        *self,
     GTask                *task;
 
     task = g_task_new (self, cancellable, callback, user_data);
+    if (struct_version_refused (self, self->priv->struct_versions.signal_strength_supported,
+                                "SignalStrength", self->priv->struct_versions.signal_strength,
+                                task))
+        return;
     request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_SIGNAL_STRENGTH,
                                         next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
@@ -1675,6 +1708,11 @@ mm_sit_client_get_cell_info (MMSitClient        *self,
     GTask                *task;
 
     task = g_task_new (self, cancellable, callback, user_data);
+    if (struct_version_refused (self, self->priv->struct_versions.cell_info_supported,
+                                "CellInfo", self->priv->struct_versions.cell_info, task) ||
+        struct_version_refused (self, self->priv->struct_versions.cell_identity_supported,
+                                "CellIdentity", self->priv->struct_versions.cell_identity, task))
+        return;
     request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_CELL_INFO_LIST, next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_cell_info_ready, task);
@@ -1958,6 +1996,53 @@ boot_config_step_ready (MMSitClient *self,
     boot_config_step (task);
 }
 
+/* The 0x0922 reply is a version negotiation: the CP names the struct versions
+ * it speaks for cell-info, cell-identity and signal-strength -- exactly the
+ * three layouts the codec otherwise has to infer, cell-info by record size and
+ * signal by payload length. Record them so a CP speaking a layout we cannot
+ * read is refused by name here, rather than showing up much later as a
+ * truncation at the first cell-info query, or (for signal, where a future
+ * 200-byte V6 would measure as a V5) as a plausible wrong answer.
+ *
+ * A CP that does not name a layout has made no claim, so it is not held
+ * against it; only an explicitly announced version we have no parser for is. */
+static void
+boot_config_device_info_ready (MMSitClient  *self,
+                               GAsyncResult *res,
+                               GTask        *task)
+{
+    BootConfigContext       *ctx = g_task_get_task_data (task);
+    g_autoptr(MMSitMessage)  response = NULL;
+    GError                  *error = NULL;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (!response || !message_check_success (response, &error) ||
+        !mm_sit_message_parse_struct_versions (response, &self->priv->struct_versions, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    self->priv->struct_versions_known = TRUE;
+
+    mm_obj_dbg (self, "CP struct versions: CellInfo=%u, CellIdentity=%u, SignalStrength=%u",
+                self->priv->struct_versions.cell_info,
+                self->priv->struct_versions.cell_identity,
+                self->priv->struct_versions.signal_strength);
+    if (!self->priv->struct_versions.cell_info_supported ||
+        !self->priv->struct_versions.cell_identity_supported)
+        mm_obj_warn (self, "no parser for the CP's cell-info layout "
+                     "(CellInfo=%u, CellIdentity=%u); cell info will not be reported",
+                     self->priv->struct_versions.cell_info,
+                     self->priv->struct_versions.cell_identity);
+    if (!self->priv->struct_versions.signal_strength_supported)
+        mm_obj_warn (self, "no parser for the CP's signal layout (SignalStrength=%u); "
+                     "signal strength will not be reported",
+                     self->priv->struct_versions.signal_strength);
+
+    ctx->step++;
+    boot_config_step (task);
+}
+
 /* The software version 0x4605 carries is the CP's own, so a CP that will not
  * tell us has nothing for us to send back. Skip the message rather than fall
  * back on a constant -- a stale constant is the bug this replaced -- and say so,
@@ -2009,7 +2094,11 @@ boot_config_step (GTask *task)
                                                   self->priv->device_build,
                                                   self->priv->device_codename,
                                                   &error);
-        break;
+        if (!request)
+            break;
+        mm_sit_client_command (self, request, 10, g_task_get_cancellable (task),
+                               (GAsyncReadyCallback) boot_config_device_info_ready, task);
+        return;
     case BOOT_CONFIG_STEP_SOFTWARE_VERSION:
         request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_IMEISV, next_token (self));
         mm_sit_client_command (self, request, 5, g_task_get_cancellable (task),

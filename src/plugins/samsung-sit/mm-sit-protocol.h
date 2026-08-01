@@ -654,6 +654,22 @@ typedef struct {
     gchar cp_chipset[MM_SIT_MAX_VERSION_FIELD];
 } MMSitBaseBandVersion;
 
+/* The struct versions the CP announces in its SET_DEVICE_INFO reply, with the
+ * codec's verdict on each. A version of 0 means the CP did not name that
+ * layout, which counts as supported: it has made no claim to check. */
+typedef struct {
+    guint8   cell_info;
+    guint8   cell_identity;
+    guint8   signal_strength;
+    gboolean cell_info_supported;
+    gboolean cell_identity_supported;
+    gboolean signal_strength_supported;
+} MMSitStructVersions;
+
+gboolean mm_sit_message_parse_struct_versions         (const MMSitMessage    *message,
+                                                       MMSitStructVersions   *out_versions,
+                                                       GError               **error);
+
 /* The selector is mandatory: a bare query leaves it off and the CP answers a
  * partly filled block. */
 GByteArray *mm_sit_request_new_get_base_band_version  (guint16                token);

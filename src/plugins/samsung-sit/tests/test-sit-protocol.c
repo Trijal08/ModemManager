@@ -1961,13 +1961,19 @@ client_boot_config_test_peer (ClientTestContext *ctx)
         17, '4', '9', '0', '1', '5', '4', '2', '0', '3',
         '2', '3', '7', '5', '1', '8', '3', '3',
     };
+    /* The live SET_DEVICE_INFO reply: the CP's struct-version list, NUL
+     * terminated. Every version here is one the codec parses. */
+    static const guint8 versions_payload[] =
+        "CellInfo=5,CellIdentity=5,SignalStrength=5";
     guint i;
 
     for (i = 0; i < G_N_ELEMENTS (expected_ids); i++) {
         guint8  header[MM_SIT_HEADER_SIZE];
-        guint8  response[12 + sizeof (imeisv_payload)] = { 0 };
+        guint8  response[12 + sizeof (versions_payload)] = { 0 };
         gsize   response_len = 12;
         guint16 request_len;
+
+        G_STATIC_ASSERT (sizeof (versions_payload) > sizeof (imeisv_payload));
 
         g_assert_true (read_all (ctx->peer_fd, header, sizeof (header)));
         request_len = header[4] | (((guint16) header[5]) << 8);
@@ -1991,7 +1997,10 @@ client_boot_config_test_peer (ClientTestContext *ctx)
 
         if (expected_ids[i] == MM_SIT_MESSAGE_GET_IMEISV) {
             memcpy (&response[12], imeisv_payload, sizeof (imeisv_payload));
-            response_len = sizeof (response);
+            response_len = 12 + sizeof (imeisv_payload);
+        } else if (expected_ids[i] == MM_SIT_MESSAGE_DEVICE_INFO) {
+            memcpy (&response[12], versions_payload, sizeof (versions_payload));
+            response_len = 12 + sizeof (versions_payload);
         }
         response[0] = MM_SIT_MESSAGE_TYPE_RESPONSE;
         response[2] = header[2];

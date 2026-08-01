@@ -1048,6 +1048,35 @@ mm_sit_message_parse_base_band_version (const MMSitMessage    *message,
 }
 
 gboolean
+mm_sit_message_parse_struct_versions (const MMSitMessage   *message,
+                                      MMSitStructVersions  *out_versions,
+                                      GError              **error)
+{
+    const guint8              *data;
+    gsize                      len;
+    SamsungSitStructVersions   versions;
+    SamsungSitStatus           status;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_versions != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_struct_versions (data, len, &versions);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+
+    out_versions->cell_info                 = versions.cell_info;
+    out_versions->cell_identity             = versions.cell_identity;
+    out_versions->signal_strength           = versions.signal_strength;
+    out_versions->cell_info_supported       = !!versions.cell_info_supported;
+    out_versions->cell_identity_supported   = !!versions.cell_identity_supported;
+    out_versions->signal_strength_supported = !!versions.signal_strength_supported;
+    return TRUE;
+}
+
+gboolean
 mm_sit_message_parse_network_selection_mode (const MMSitMessage        *message,
                                              MMSitNetworkSelectionMode *out_mode,
                                              GError                   **error)
