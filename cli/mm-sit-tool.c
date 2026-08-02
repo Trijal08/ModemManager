@@ -849,25 +849,36 @@ print_message_ids (const gchar *filter)
     }
 }
 
+/* Also handed to GOptionContext so it shows up under --help, which used to
+ * print the options and no commands at all. */
+static const gchar *command_summary =
+    "Commands:\n"
+    "  status                        modem, SIM, registration and signal overview\n"
+    "  registration                  CS and PS registration state\n"
+    "  operator                      serving operator\n"
+    "  slots                         SIM slot status\n"
+    "  slot-map PHYSICAL_SLOT [PORT] map a logical stack onto a slot\n"
+    "  radio on|off                  set radio power\n"
+    "  connect APN                   set up a data call\n"
+    "  disconnect [CID]              tear one down\n"
+    "  initialize                    send the boot-config batch\n"
+    "  monitor                       print unsolicited indications\n"
+    "  query MESSAGE_ID              bare 12-byte query, no payload\n"
+    "  payload MESSAGE_ID [HEX]      request carrying HEX as the payload at @12\n"
+    "  raw MESSAGE_ID [HEX]          request with HEX written from @8 (expert)\n"
+    "  ids [FILTER]                  list known message ids\n"
+    "\n"
+    "Frame offsets: a request is an 8-byte header, a 4-byte reserved word at @8,\n"
+    "then the payload at @12.  Every layout in research/sit-protocol.md is quoted\n"
+    "as a frame offset, so 'payload' is almost always the one you want.  'raw'\n"
+    "writes from @8, so it puts your first four bytes in the reserved word and\n"
+    "the CP answers a request for nothing -- a plausible wrong answer, not an\n"
+    "error.  'payload 0x901 ff' and 'raw 0x901 00000000ff' are the same frame.\n";
+
 static void
 print_usage (const gchar *program)
 {
-    g_printerr ("Usage:\n"
-                "  %s [OPTIONS] status\n"
-                "  %s [OPTIONS] registration\n"
-                "  %s [OPTIONS] operator\n"
-                "  %s [OPTIONS] slots\n"
-                "  %s [OPTIONS] slot-map PHYSICAL_SLOT [PORT]\n"
-                "  %s [OPTIONS] radio on|off\n"
-                "  %s [OPTIONS] connect APN\n"
-                "  %s [OPTIONS] disconnect [CID]\n"
-                "  %s [OPTIONS] initialize\n"
-                "  %s [OPTIONS] monitor\n"
-                "  %s [OPTIONS] query MESSAGE_ID\n"
-                "  %s [OPTIONS] raw MESSAGE_ID [BODY_HEX]\n"
-                "  %s ids [FILTER]\n",
-                program, program, program, program, program, program,
-                program, program, program, program, program, program, program);
+    g_printerr ("Usage:\n  %s [OPTIONS] COMMAND\n\n%s", program, command_summary);
 }
 
 int
@@ -882,6 +893,7 @@ main (int argc,
     gboolean success = FALSE;
 
     option_context = g_option_context_new ("COMMAND - Samsung SIT diagnostic client");
+    g_option_context_set_description (option_context, command_summary);
     g_option_context_add_main_entries (option_context, entries, NULL);
     if (!g_option_context_parse (option_context, &argc, &argv, &error)) {
         g_printerr ("Option error: %s\n", error->message);
@@ -1113,15 +1125,23 @@ main (int argc,
             goto out;
         print_message (response);
         success = TRUE;
-    } else if (g_str_equal (command, "raw")) {
+    } else if (g_str_equal (command, "raw") || g_str_equal (command, "payload")) {
+        /* Both build the same frame; they differ only in where the caller's
+         * hex lands.  'raw' writes it from @8, which is where frame_header()
+         * puts a body and therefore *inside* the reserved word -- the trap that
+         * made 0x0901 look like a dead end for a day.  'payload' prepends the
+         * four zero bytes so the hex starts at @12, which is how every layout
+         * in research/sit-protocol.md is written. */
+        gboolean at_payload = g_str_equal (command, "payload");
         g_autoptr(GByteArray) body = NULL;
         g_autoptr(GByteArray) request = NULL;
         g_autoptr(MMSitMessage) response = NULL;
         guint16 id;
 
         if (argc < 3 || argc > 4) {
-            g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
-                                 "raw requires MESSAGE_ID and optional BODY_HEX");
+            g_set_error (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                         "%s requires MESSAGE_ID and optional %s", command,
+                         at_payload ? "PAYLOAD_HEX" : "BODY_HEX");
             goto out;
         }
         if (!parse_message_id (argv[2], &id, &error))
@@ -1132,6 +1152,11 @@ main (int argc,
                 goto out;
         } else
             body = g_byte_array_new ();
+        if (at_payload) {
+            static const guint8 reserved[4] = { 0, 0, 0, 0 };
+
+            g_byte_array_prepend (body, reserved, sizeof (reserved));
+        }
         request = mm_sit_request_new (id, 1, body->data, body->len, &error);
         if (!request)
             goto out;
