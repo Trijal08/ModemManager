@@ -1489,6 +1489,150 @@ mm_sit_client_get_base_band_version_finish (MMSitClient           *self,
 }
 
 static void
+get_bands_ready (MMSitClient  *self,
+                 GAsyncResult *res,
+                 GTask        *task)
+{
+    g_autoptr(MMSitMessage)  response = NULL;
+    GError                  *error = NULL;
+    MMSitBandMode           *bands;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    bands = g_new0 (MMSitBandMode, 1);
+    if (response && mm_sit_message_parse_band_mode (response, bands, &error))
+        g_task_return_pointer (task, bands, g_free);
+    else {
+        g_free (bands);
+        g_task_return_error (task, error);
+    }
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_get_bands (MMSitClient        *self,
+                         GCancellable       *cancellable,
+                         GAsyncReadyCallback callback,
+                         gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_MANUAL_BAND_MODE, next_token (self));
+    mm_sit_client_command (self, request, 10, cancellable,
+                           (GAsyncReadyCallback) get_bands_ready, task);
+}
+
+gboolean
+mm_sit_client_get_bands_finish (MMSitClient    *self,
+                                GAsyncResult   *res,
+                                MMSitBandMode  *out_bands,
+                                GError        **error)
+{
+    MMSitBandMode *bands;
+
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    g_return_val_if_fail (out_bands != NULL, FALSE);
+
+    bands = g_task_propagate_pointer (G_TASK (res), error);
+    if (!bands)
+        return FALSE;
+    *out_bands = *bands;
+    g_free (bands);
+    return TRUE;
+}
+
+/* Setting bands is read-modify-write: the request carries the CP's own
+ * supported block back, so it has to be built from a fresh read rather than
+ * from anything cached. */
+typedef struct {
+    GArray *lte;   /* guint16 3GPP LTE bands */
+    GArray *wcdma; /* guint16 3GPP UTRAN bands; both empty lifts the restriction */
+} SetBandsContext;
+
+static void
+set_bands_write_ready (MMSitClient  *self,
+                       GAsyncResult *res,
+                       GTask        *task)
+{
+    GError *error = NULL;
+
+    if (!g_task_propagate_boolean (G_TASK (res), &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+set_bands_read_ready (MMSitClient  *self,
+                      GAsyncResult *res,
+                      GTask        *task)
+{
+    SetBandsContext       *ctx = g_task_get_task_data (task);
+    g_autoptr(GByteArray)  request = NULL;
+    MMSitBandMode          mode;
+    GError                *error = NULL;
+
+    if (!mm_sit_client_get_bands_finish (self, res, &mode, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    request = mm_sit_request_new_set_band_mode (next_token (self), &mode,
+                                                (const guint16 *) ctx->lte->data, ctx->lte->len,
+                                                (const guint16 *) ctx->wcdma->data, ctx->wcdma->len,
+                                                &error);
+    if (!request) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    run_checked_command (self, request, 10, g_task_get_cancellable (task),
+                         (GAsyncReadyCallback) set_bands_write_ready, task);
+}
+
+static void
+set_bands_context_free (SetBandsContext *ctx)
+{
+    g_array_unref (ctx->lte);
+    g_array_unref (ctx->wcdma);
+    g_free (ctx);
+}
+
+/* 3GPP band numbers per RAT; both empty lifts any restriction. */
+void
+mm_sit_client_set_bands (MMSitClient        *self,
+                         GArray             *lte,
+                         GArray             *wcdma,
+                         GCancellable       *cancellable,
+                         GAsyncReadyCallback callback,
+                         gpointer            user_data)
+{
+    SetBandsContext *ctx;
+    GTask           *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    ctx = g_new0 (SetBandsContext, 1);
+    ctx->lte = g_array_ref (lte);
+    ctx->wcdma = g_array_ref (wcdma);
+    g_task_set_task_data (task, ctx, (GDestroyNotify) set_bands_context_free);
+
+    mm_sit_client_get_bands (self, cancellable,
+                             (GAsyncReadyCallback) set_bands_read_ready, task);
+}
+
+gboolean
+mm_sit_client_set_bands_finish (MMSitClient   *self,
+                                GAsyncResult  *res,
+                                GError       **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
 get_network_selection_mode_ready (MMSitClient  *self,
                                   GAsyncResult *res,
                                   GTask        *task)

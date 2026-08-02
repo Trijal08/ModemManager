@@ -3873,6 +3873,278 @@ set_current_modes (MMIfaceModem       *self,
                                             (GAsyncReadyCallback) set_current_modes_ready, task);
 }
 
+/*****************************************************************************/
+/* Bands
+ *
+ * GET_MANUAL_BAND_MODE (0x0730) is the only message in the SIT inventory that
+ * carries a real band list -- 0x0709/0x0708 are Android's coarse regional
+ * preset and 0x0746 reports the serving band. Its reply holds two blocks, what
+ * the part supports and what it is currently restricted to, plus a manual-mode
+ * flag; see research/sit-protocol.md.
+ *
+ * Only LTE and UMTS are mapped. The reply's third bitmap is GSM but its
+ * enumeration is not the 3GPP band number the other two use (two set bits on a
+ * device with four GSM bands), and the 22 bytes that are presumably NR read
+ * zero even under a lock, so neither is guessed at here.
+ */
+
+/* E-UTRAN is a straight offset in MM's enum; UTRAN is not, so it needs a
+ * table. Both are checked against MM_MODEM_BAND_* rather than open-coded. */
+static MMModemBand
+sit_lte_band_to_mm (guint16 band)
+{
+    if (band < 1 || band > 71)
+        return MM_MODEM_BAND_UNKNOWN;
+    return (MMModemBand) (MM_MODEM_BAND_EUTRAN_1 + (band - 1));
+}
+
+static MMModemBand
+sit_wcdma_band_to_mm (guint16 band)
+{
+    static const struct { guint16 sit; MMModemBand mm; } map[] = {
+        {  1, MM_MODEM_BAND_UTRAN_1  }, {  2, MM_MODEM_BAND_UTRAN_2  },
+        {  3, MM_MODEM_BAND_UTRAN_3  }, {  4, MM_MODEM_BAND_UTRAN_4  },
+        {  5, MM_MODEM_BAND_UTRAN_5  }, {  6, MM_MODEM_BAND_UTRAN_6  },
+        {  7, MM_MODEM_BAND_UTRAN_7  }, {  8, MM_MODEM_BAND_UTRAN_8  },
+        {  9, MM_MODEM_BAND_UTRAN_9  }, { 10, MM_MODEM_BAND_UTRAN_10 },
+        { 11, MM_MODEM_BAND_UTRAN_11 }, { 12, MM_MODEM_BAND_UTRAN_12 },
+        { 13, MM_MODEM_BAND_UTRAN_13 }, { 14, MM_MODEM_BAND_UTRAN_14 },
+        { 19, MM_MODEM_BAND_UTRAN_19 }, { 20, MM_MODEM_BAND_UTRAN_20 },
+        { 21, MM_MODEM_BAND_UTRAN_21 }, { 22, MM_MODEM_BAND_UTRAN_22 },
+        { 25, MM_MODEM_BAND_UTRAN_25 }, { 26, MM_MODEM_BAND_UTRAN_26 },
+        { 32, MM_MODEM_BAND_UTRAN_32 },
+    };
+    guint i;
+
+    for (i = 0; i < G_N_ELEMENTS (map); i++) {
+        if (map[i].sit == band)
+            return map[i].mm;
+    }
+    return MM_MODEM_BAND_UNKNOWN;
+}
+
+/* A band the CP names and MM has no enum for is dropped with a note rather than
+ * reported as UNKNOWN, which would show up in mmcli as a bogus entry. */
+static GArray *
+sit_bands_to_mm (MMBroadbandModemSamsungSit *self,
+                 const guint16              *lte,
+                 guint8                      n_lte,
+                 const guint16              *wcdma,
+                 guint8                      n_wcdma)
+{
+    GArray *out = g_array_sized_new (FALSE, FALSE, sizeof (MMModemBand), n_lte + n_wcdma);
+    guint   i;
+
+    for (i = 0; i < n_lte; i++) {
+        MMModemBand b = sit_lte_band_to_mm (lte[i]);
+
+        if (b == MM_MODEM_BAND_UNKNOWN)
+            mm_obj_dbg (self, "no ModemManager band for LTE B%u", lte[i]);
+        else
+            g_array_append_val (out, b);
+    }
+    for (i = 0; i < n_wcdma; i++) {
+        MMModemBand b = sit_wcdma_band_to_mm (wcdma[i]);
+
+        if (b == MM_MODEM_BAND_UNKNOWN)
+            mm_obj_dbg (self, "no ModemManager band for UTRAN B%u", wcdma[i]);
+        else
+            g_array_append_val (out, b);
+    }
+    return out;
+}
+
+static GArray *
+load_bands_finish (MMIfaceModem  *self,
+                   GAsyncResult  *res,
+                   GError       **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+static void
+load_supported_bands_ready (MMSitClient  *client,
+                            GAsyncResult *res,
+                            GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    MMSitBandMode               bands;
+    GError                     *error = NULL;
+
+    if (!mm_sit_client_get_bands_finish (client, res, &bands, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    g_task_return_pointer (task,
+                           sit_bands_to_mm (self,
+                                            bands.supported_lte, bands.supported_lte_len,
+                                            bands.supported_wcdma, bands.supported_wcdma_len),
+                           (GDestroyNotify) g_array_unref);
+    g_object_unref (task);
+}
+
+static void
+load_current_bands_ready (MMSitClient  *client,
+                          GAsyncResult *res,
+                          GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    MMSitBandMode               bands;
+    GError                     *error = NULL;
+
+    if (!mm_sit_client_get_bands_finish (client, res, &bands, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    g_task_return_pointer (task,
+                           sit_bands_to_mm (self,
+                                            bands.current_lte, bands.current_lte_len,
+                                            bands.current_wcdma, bands.current_wcdma_len),
+                           (GDestroyNotify) g_array_unref);
+    g_object_unref (task);
+}
+
+static void
+load_bands (MMIfaceModem        *iface,
+            GAsyncReadyCallback  callback,
+            gpointer             user_data,
+            gboolean             current)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_get_bands (client, NULL,
+                             current ? (GAsyncReadyCallback) load_current_bands_ready
+                                     : (GAsyncReadyCallback) load_supported_bands_ready,
+                             task);
+}
+
+static void
+load_supported_bands (MMIfaceModem       *iface,
+                      GAsyncReadyCallback callback,
+                      gpointer            user_data)
+{
+    load_bands (iface, callback, user_data, FALSE);
+}
+
+static void
+load_current_bands (MMIfaceModem       *iface,
+                    GAsyncReadyCallback callback,
+                    gpointer            user_data)
+{
+    load_bands (iface, callback, user_data, TRUE);
+}
+
+static gboolean
+set_current_bands_finish (MMIfaceModem  *self,
+                          GAsyncResult  *res,
+                          GError       **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+set_current_bands_ready (MMSitClient  *client,
+                         GAsyncResult *res,
+                         GTask        *task)
+{
+    GError *error = NULL;
+
+    if (!mm_sit_client_set_bands_finish (client, res, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+/* Reverse of sit_wcdma_band_to_mm. */
+static guint16
+mm_band_to_sit_wcdma (MMModemBand band)
+{
+    guint16 sit;
+
+    for (sit = 1; sit <= 32; sit++) {
+        if (sit_wcdma_band_to_mm (sit) == band)
+            return sit;
+    }
+    return 0;
+}
+
+/* MM's contract is "use exactly these bands", so everything not named here is
+ * cleared -- including the RATs the caller did not mention. Reporting back a
+ * superset makes the core fail the operation, which is what happened when this
+ * kept UTRAN at its supported value while restricting LTE.
+ *
+ * MM_MODEM_BAND_ANY means "stop restricting", which is the CP's manual-mode
+ * flag cleared rather than a selection of everything. */
+static void
+set_current_bands (MMIfaceModem        *iface,
+                   GArray              *bands_array,
+                   GAsyncReadyCallback  callback,
+                   gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
+    g_autoptr(GArray)           lte = NULL;
+    g_autoptr(GArray)           wcdma = NULL;
+    guint                       i;
+
+    task = g_task_new (iface, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    lte = g_array_new (FALSE, FALSE, sizeof (guint16));
+    wcdma = g_array_new (FALSE, FALSE, sizeof (guint16));
+    for (i = 0; i < bands_array->len; i++) {
+        MMModemBand b = g_array_index (bands_array, MMModemBand, i);
+        guint16     sit;
+
+        if (b == MM_MODEM_BAND_ANY) {
+            g_array_set_size (lte, 0);
+            g_array_set_size (wcdma, 0);
+            break;
+        }
+        if (b >= MM_MODEM_BAND_EUTRAN_1 && b <= MM_MODEM_BAND_EUTRAN_71) {
+            sit = (guint16) (b - MM_MODEM_BAND_EUTRAN_1 + 1);
+            g_array_append_val (lte, sit);
+            continue;
+        }
+        sit = mm_band_to_sit_wcdma (b);
+        if (sit) {
+            g_array_append_val (wcdma, sit);
+            continue;
+        }
+        /* GSM has no mapping: the CP's third bitmap does not use 3GPP band
+         * numbers (see the note above this section), so a GSM band cannot be
+         * requested without guessing. */
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_UNSUPPORTED,
+                                 "band %s cannot be selected on this modem",
+                                 mm_modem_band_get_string (b));
+        g_object_unref (task);
+        return;
+    }
+
+    mm_sit_client_set_bands (client, lte, wcdma, NULL,
+                             (GAsyncReadyCallback) set_current_bands_ready, task);
+}
+
 static void
 iface_modem_init (MMIfaceModemInterface *iface)
 {
@@ -3898,6 +4170,12 @@ iface_modem_init (MMIfaceModemInterface *iface)
     iface->load_signal_quality_finish = load_signal_quality_finish;
     iface->load_access_technologies = load_access_technologies;
     iface->load_access_technologies_finish = load_access_technologies_finish;
+    iface->load_supported_bands = load_supported_bands;
+    iface->load_supported_bands_finish = load_bands_finish;
+    iface->load_current_bands = load_current_bands;
+    iface->load_current_bands_finish = load_bands_finish;
+    iface->set_current_bands = set_current_bands;
+    iface->set_current_bands_finish = set_current_bands_finish;
     iface->get_cell_info = get_cell_info;
     iface->get_cell_info_finish = get_cell_info_finish;
     iface->modem_power_up = modem_power_up;

@@ -71,6 +71,8 @@ typedef enum {
     /* The CP pushing a NITZ as it arrives: the GET_NITZ_TIME payload with no
      * status word, so 33 bytes rather than 37. */
     MM_SIT_MESSAGE_NITZ_TIME_RECEIVED          = 0x0905,
+    MM_SIT_MESSAGE_GET_MANUAL_BAND_MODE        = 0x0730,
+    MM_SIT_MESSAGE_SET_MANUAL_BAND_MODE        = 0x0731,
     MM_SIT_MESSAGE_GET_BASE_BAND_VERSION       = 0x0901,
     MM_SIT_MESSAGE_SETUP_DATA_CALL             = 0x0600,
     MM_SIT_MESSAGE_DEACTIVATE_DATA_CALL        = 0x0601,
@@ -656,6 +658,42 @@ typedef struct {
     gchar model_id[MM_SIT_MAX_VERSION_FIELD];
     gchar cp_chipset[MM_SIT_MAX_VERSION_FIELD];
 } MMSitBaseBandVersion;
+
+/* Per-RAT band lists from GET_MANUAL_BAND_MODE (0x0730). Band numbers are 3GPP.
+ * 'payload' is the response's own bytes, kept because a SET request is built
+ * *from* a read: the supported block is the CP's report of the part, not ours
+ * to invent. 'current' is the selection when manual_mode is set and the
+ * supported set otherwise. */
+#define MM_SIT_MAX_BANDS        80
+#define MM_SIT_MAX_BAND_PAYLOAD 87
+typedef struct {
+    gboolean manual_mode;
+    guint8   supported_lte_len;
+    guint16  supported_lte[MM_SIT_MAX_BANDS];
+    guint8   supported_wcdma_len;
+    guint16  supported_wcdma[MM_SIT_MAX_BANDS];
+    guint8   current_lte_len;
+    guint16  current_lte[MM_SIT_MAX_BANDS];
+    guint8   current_wcdma_len;
+    guint16  current_wcdma[MM_SIT_MAX_BANDS];
+    guint8   payload[MM_SIT_MAX_BAND_PAYLOAD];
+    gsize    payload_len;
+} MMSitBandMode;
+
+gboolean mm_sit_message_parse_band_mode              (const MMSitMessage    *message,
+                                                      MMSitBandMode         *out_bands,
+                                                      GError               **error);
+/* Restrict the modem to exactly these bands, or lift any restriction when both
+ * lists are empty. Everything not named is cleared: this is "use exactly
+ * these", not a per-RAT overlay, which is the contract MM's set_current_bands
+ * has. 'mode' must come from a preceding parse; see MMSitBandMode. */
+GByteArray *mm_sit_request_new_set_band_mode         (guint16                token,
+                                                      const MMSitBandMode   *mode,
+                                                      const guint16         *lte,
+                                                      gsize                  n_lte,
+                                                      const guint16         *wcdma,
+                                                      gsize                  n_wcdma,
+                                                      GError               **error);
 
 /* The struct versions the CP announces in its SET_DEVICE_INFO reply, with the
  * codec's verdict on each. A version of 0 means the CP did not name that

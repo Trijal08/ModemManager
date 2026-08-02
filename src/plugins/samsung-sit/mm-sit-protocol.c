@@ -1048,6 +1048,70 @@ mm_sit_message_parse_base_band_version (const MMSitMessage    *message,
 }
 
 gboolean
+mm_sit_message_parse_band_mode (const MMSitMessage  *message,
+                                MMSitBandMode       *out_bands,
+                                GError             **error)
+{
+    const guint8               *data;
+    gsize                       len;
+    SamsungSitManualBandMode    m;
+    SamsungSitStatus            status;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_bands != NULL, FALSE);
+
+    G_STATIC_ASSERT (sizeof (m.supported_lte) == sizeof (out_bands->supported_lte));
+    G_STATIC_ASSERT (sizeof (m.payload) == sizeof (out_bands->payload));
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_manual_band_mode (data, len, &m);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+
+    out_bands->manual_mode = !!m.manual_mode;
+    out_bands->supported_lte_len = m.supported_lte_len;
+    memcpy (out_bands->supported_lte, m.supported_lte, sizeof (m.supported_lte));
+    out_bands->supported_wcdma_len = m.supported_wcdma_len;
+    memcpy (out_bands->supported_wcdma, m.supported_wcdma, sizeof (m.supported_wcdma));
+    out_bands->current_lte_len = m.current_lte_len;
+    memcpy (out_bands->current_lte, m.current_lte, sizeof (m.current_lte));
+    out_bands->current_wcdma_len = m.current_wcdma_len;
+    memcpy (out_bands->current_wcdma, m.current_wcdma, sizeof (m.current_wcdma));
+    memcpy (out_bands->payload, m.payload, sizeof (m.payload));
+    out_bands->payload_len = m.payload_len;
+    return TRUE;
+}
+
+GByteArray *
+mm_sit_request_new_set_band_mode (guint16              token,
+                                  const MMSitBandMode *mode,
+                                  const guint16       *lte,
+                                  gsize                n_lte,
+                                  const guint16       *wcdma,
+                                  gsize                n_wcdma,
+                                  GError             **error)
+{
+    guint8                   *buffer = NULL;
+    gsize                     len = 0;
+    SamsungSitManualBandMode  m = { 0 };
+    SamsungSitStatus          status;
+
+    g_return_val_if_fail (mode != NULL, NULL);
+
+    /* The codec rebuilds what it needs from the payload; only that and the
+     * flag cross the boundary. */
+    m.manual_mode = mode->manual_mode ? 1 : 0;
+    memcpy (m.payload, mode->payload, sizeof (m.payload));
+    m.payload_len = mode->payload_len;
+
+    status = samsung_sit_build_set_manual_band_mode (token, &m, lte, n_lte,
+                                                    wcdma, n_wcdma, &buffer, &len);
+    return finish_build (status, buffer, len, error);
+}
+
+gboolean
 mm_sit_message_parse_struct_versions (const MMSitMessage   *message,
                                       MMSitStructVersions  *out_versions,
                                       GError              **error)

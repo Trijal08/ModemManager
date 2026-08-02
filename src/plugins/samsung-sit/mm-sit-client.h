@@ -274,6 +274,29 @@ gboolean mm_sit_client_get_radio_capability_finish (MMSitClient             *sel
                                                     MMSitNetworkGenerations *out_generations,
                                                     GError                 **error);
 
+/* Per-RAT band lists (0x0730), and the LTE restriction setter (0x0731). Setting
+ * is read-modify-write: the request carries the CP's own supported block back,
+ * so it is always built from a fresh read. */
+void     mm_sit_client_get_bands        (MMSitClient        *self,
+                                         GCancellable       *cancellable,
+                                         GAsyncReadyCallback callback,
+                                         gpointer            user_data);
+gboolean mm_sit_client_get_bands_finish (MMSitClient        *self,
+                                         GAsyncResult       *res,
+                                         MMSitBandMode      *out_bands,
+                                         GError            **error);
+/* 3GPP band numbers per RAT, as guint16; both empty lifts any restriction.
+ * Everything not named is cleared. */
+void     mm_sit_client_set_bands        (MMSitClient        *self,
+                                         GArray             *lte,
+                                         GArray             *wcdma,
+                                         GCancellable       *cancellable,
+                                         GAsyncReadyCallback callback,
+                                         gpointer            user_data);
+gboolean mm_sit_client_set_bands_finish (MMSitClient        *self,
+                                         GAsyncResult       *res,
+                                         GError            **error);
+
 /* Reads the CP's version block: firmware build, hardware revision and the
  * baseband part. Fields the CP does not report come back empty. */
 void     mm_sit_client_get_base_band_version        (MMSitClient        *self,
