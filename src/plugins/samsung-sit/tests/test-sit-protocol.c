@@ -10,6 +10,7 @@
 #include "mm-port-serial-sit.h"
 #include "mm-sit-carrier-config.h"
 #include "mm-sit-client.h"
+#include "mm-sit-ims-config.h"
 #include "mm-sit-protocol.h"
 
 static void
@@ -2150,6 +2151,139 @@ test_client_boot_config (void)
     g_assert_true (ctx.completed);
 }
 
+/*****************************************************************************/
+/* IMS configuration */
+
+static const SamsungAimsConfigEntry *
+find_ims_entry (const SamsungAimsConfigEntry *entries,
+                gsize                         n,
+                guint16                       tag,
+                guint                        *out_count)
+{
+    const SamsungAimsConfigEntry *found = NULL;
+    guint                         count = 0;
+    gsize                         i;
+
+    for (i = 0; i < n; i++) {
+        if (entries[i].tag == tag) {
+            found = &entries[i];
+            count++;
+        }
+    }
+    if (out_count)
+        *out_count = count;
+    return found;
+}
+
+static const MMSitImsDeviceIdentity test_device = {
+    "Google",           /* manufacturer */
+    "Pixel9a",          /* model */
+    "Android",          /* os_name */
+    "17",               /* os_version */
+    "CP2A.260705.006",  /* software_version */
+};
+
+/* An unknown carrier is defaults, not a failure: a CP with sane timers and a
+ * valid User-Agent is worth trying. */
+static void
+test_ims_config_defaults (void)
+{
+    g_autoptr(MMSitImsConfig)     config = NULL;
+    const SamsungAimsConfigEntry *entries;
+    const SamsungAimsConfigEntry *e;
+    gsize                         n = 0;
+
+    config = mm_sit_ims_config_resolve (&test_device, "99999");
+    g_assert_nonnull (config);
+    g_assert_cmpstr (mm_sit_ims_config_get_carrier (config), ==, "default");
+
+    entries = mm_sit_ims_config_peek_entries (config, &n);
+    g_assert_cmpuint (n, >, 60);
+
+    e = find_ims_entry (entries, n, 1028, NULL); /* IPv4 SIP MTU */
+    g_assert_nonnull (e);
+    g_assert_cmpuint (e->int_value, ==, 1500);
+    e = find_ims_entry (entries, n, 10, NULL);   /* SIP server port */
+    g_assert_nonnull (e);
+    g_assert_cmpuint (e->int_value, ==, 5060);
+}
+
+/*
+ * The override has to replace the default, not sit after it. Two entries for
+ * one tag would still work -- the CP takes the last -- and that is exactly why
+ * it is worth asserting: it would work by accident.
+ */
+static void
+test_ims_config_carrier_overrides_replace (void)
+{
+    g_autoptr(MMSitImsConfig)     config = NULL;
+    const SamsungAimsConfigEntry *entries;
+    const SamsungAimsConfigEntry *e;
+    gsize                         n = 0;
+    guint                         count = 0;
+
+    config = mm_sit_ims_config_resolve (&test_device, "26203");
+    g_assert_cmpstr (mm_sit_ims_config_get_carrier (config), ==, "o2_de");
+    entries = mm_sit_ims_config_peek_entries (config, &n);
+
+    e = find_ims_entry (entries, n, 1028, &count);
+    g_assert_cmpuint (count, ==, 1);
+    g_assert_cmpuint (e->int_value, ==, 1300);
+
+    /* Timer F: 32 s here where AOSP says 128 s. */
+    e = find_ims_entry (entries, n, 528, &count);
+    g_assert_cmpuint (count, ==, 1);
+    g_assert_cmpuint (e->int_value, ==, 32000);
+
+    /* A string override, and a bytes one. */
+    e = find_ims_entry (entries, n, 1032, &count);
+    g_assert_cmpuint (count, ==, 1);
+    g_assert_cmpint (e->value_type, ==, SAMSUNG_AIMS_VALUE_TYPE_STR);
+    g_assert_cmpstr (e->str_value, ==, "teleconferenceuri-factory@telefonica.de");
+
+    e = find_ims_entry (entries, n, 1060, &count); /* AMR-WB description */
+    g_assert_cmpuint (count, ==, 1);
+    g_assert_cmpint (e->value_type, ==, SAMSUNG_AIMS_VALUE_TYPE_BYTES);
+    g_assert_cmpuint (e->bytes_len, ==, 4);
+    g_assert_cmpuint (e->bytes_value[0], ==, 0x68);
+
+    /* A default the carrier does not override stays. */
+    e = find_ims_entry (entries, n, 10, &count);
+    g_assert_cmpuint (count, ==, 1);
+    g_assert_cmpuint (e->int_value, ==, 5060);
+}
+
+/*
+ * The User-Agent is the one value the CP cannot invent and the one a network is
+ * most likely to reject us over, so both the assembled string and the parts it
+ * came from have to be present.
+ */
+static void
+test_ims_config_user_agent (void)
+{
+    g_autoptr(MMSitImsConfig)     config = NULL;
+    g_autoptr(MMSitImsConfig)     plain = NULL;
+    const SamsungAimsConfigEntry *entries;
+    gsize                         n = 0;
+
+    config = mm_sit_ims_config_resolve (&test_device, "26203");
+    g_assert_cmpstr (mm_sit_ims_config_get_user_agent (config), ==,
+                     "Google Pixel9a Android 17 CP2A.260705.006 EU01454");
+
+    entries = mm_sit_ims_config_peek_entries (config, &n);
+    g_assert_cmpstr (find_ims_entry (entries, n, 519, NULL)->str_value, ==,
+                     "Google Pixel9a Android 17 CP2A.260705.006 EU01454");
+    g_assert_cmpstr (find_ims_entry (entries, n, 772, NULL)->str_value, ==, "Google");
+    g_assert_cmpstr (find_ims_entry (entries, n, 773, NULL)->str_value, ==, "Pixel9a");
+    g_assert_cmpstr (find_ims_entry (entries, n, 776, NULL)->str_value, ==, "17");
+
+    /* Without a carrier there is no certification suffix to append, and no
+     * trailing space where one would have gone. */
+    plain = mm_sit_ims_config_resolve (&test_device, NULL);
+    g_assert_cmpstr (mm_sit_ims_config_get_user_agent (plain), ==,
+                     "Google Pixel9a Android 17 CP2A.260705.006");
+}
+
 int
 main (int argc,
       char **argv)
@@ -2184,6 +2318,9 @@ main (int argc,
     g_test_add_func ("/MM/sit/port/stale-response", test_port_drops_a_stale_response);
     g_test_add_func ("/MM/sit/port/queued-commands", test_port_answers_queued_commands);
     g_test_add_func ("/MM/sit/client/connect-sequence", test_client_connect_sequence);
+    g_test_add_func ("/MM/sit/ims/config-defaults", test_ims_config_defaults);
+    g_test_add_func ("/MM/sit/ims/config-carrier-overrides", test_ims_config_carrier_overrides_replace);
+    g_test_add_func ("/MM/sit/ims/config-user-agent", test_ims_config_user_agent);
     g_test_add_func ("/MM/sit/client/radio-transition", test_client_radio_transition);
     g_test_add_func ("/MM/sit/client/boot-config", test_client_boot_config);
     g_test_add_func ("/MM/sit/decode/registration-failed", test_parse_registration_failed);
