@@ -1706,6 +1706,9 @@ test_port_command_and_indication (void)
     g_assert_cmpuint (ctx.indication_count, ==, 1);
 }
 
+/* One connect attempt per round; the peer serves as many as the test drives. */
+#define CLIENT_TEST_MAX_ROUNDS 3
+
 typedef struct {
     gint          peer_fd;
     GMainLoop    *loop;
@@ -1713,6 +1716,9 @@ typedef struct {
     GError       *error;
     gboolean      completed;
     gboolean      timed_out;
+    guint         rounds;
+    /* The context id the client asked for in each round's SETUP_DATA_CALL. */
+    guint8        requested_cid[CLIENT_TEST_MAX_ROUNDS];
 } ClientTestContext;
 
 static gboolean
@@ -1745,8 +1751,10 @@ client_test_peer (ClientTestContext *ctx)
         MM_SIT_MESSAGE_SETUP_DATA_CALL,
         MM_SIT_MESSAGE_SET_FAST_DORMANCY_INFO,
     };
+    guint round;
     guint i;
 
+    for (round = 0; round < ctx->rounds; round++)
     for (i = 0; i < G_N_ELEMENTS (expected_ids); i++) {
         guint8  header[MM_SIT_HEADER_SIZE];
         guint8  response[304] = { 0 };
@@ -1763,8 +1771,11 @@ client_test_peer (ClientTestContext *ctx)
             g_assert_true (read_all (ctx->peer_fd, body, request_len - MM_SIT_HEADER_SIZE));
             /* The requested PDP type has to reach the wire: @0xda of the frame,
              * so 0xda - 8 of the body. */
-            if (expected_ids[i] == MM_SIT_MESSAGE_SETUP_DATA_CALL)
+            if (expected_ids[i] == MM_SIT_MESSAGE_SETUP_DATA_CALL) {
                 g_assert_cmpuint (body[0xda - MM_SIT_HEADER_SIZE], ==, MM_SIT_PDP_TYPE_IPV4V6);
+                /* @0x0c is the context id the host picked. */
+                ctx->requested_cid[round] = body[0x0c - MM_SIT_HEADER_SIZE];
+            }
         }
 
         if (expected_ids[i] == MM_SIT_MESSAGE_GET_DATA_REGISTRATION) {
@@ -1773,7 +1784,9 @@ client_test_peer (ClientTestContext *ctx)
             response[15] = 14;
         } else if (expected_ids[i] == MM_SIT_MESSAGE_SETUP_DATA_CALL) {
             response_len = sizeof (response);
-            response[14] = 1;
+            /* Echo the cid back, as the CP does -- the host picks it and the
+             * response carries whichever one was actually used. */
+            response[14] = ctx->requested_cid[round];
             response[15] = 1;
             /* A dual-stack grant: addr_type 3, with both families filled in
              * from the same record. IPv6 uses the documentation prefix. */
@@ -1836,9 +1849,16 @@ client_test_timeout (ClientTestContext *ctx)
 static void
 test_client_connect_sequence (void)
 {
+    /* Three attempts on one client, because the context id is what keeps
+     * concurrent PDNs apart and nothing else in ModemManager allocates it: a
+     * second APN must not land on the first one's context, and the same APN
+     * asked for twice must not burn a third. */
+    static const gchar * const apns[] = { "internet", "ims", "internet" };
+    static const guint8        want[] = { 2, 3, 2 };
     ClientTestContext          ctx = { 0 };
     gint                       sockets[2];
     guint                      timeout_id;
+    guint                      round;
     g_autoptr(GThread)         peer = NULL;
     g_autoptr(MMPortSerialSit) port = NULL;
     g_autoptr(MMSitClient)     client = NULL;
@@ -1857,23 +1877,34 @@ test_client_connect_sequence (void)
     g_assert_true (mm_sit_client_open (client, &error));
     g_assert_no_error (error);
 
+    ctx.rounds = 3;
     peer = g_thread_new ("sit-client-test-peer", (GThreadFunc) client_test_peer, &ctx);
-    mm_sit_client_connect_data (client, "internet", MM_SIT_PDP_TYPE_IPV4V6, MM_SIT_APN_TYPE_DEFAULT, NULL, NULL,
-                                (GAsyncReadyCallback) client_test_connect_ready, &ctx);
-    timeout_id = g_timeout_add_seconds (10, (GSourceFunc) client_test_timeout, &ctx);
-    g_main_loop_run (ctx.loop);
 
-    if (!ctx.timed_out)
-        g_source_remove (timeout_id);
+    for (round = 0; round < ctx.rounds; round++) {
+        ctx.completed = FALSE;
+        g_clear_error (&ctx.error);
+        mm_sit_client_connect_data (client, apns[round], MM_SIT_PDP_TYPE_IPV4V6,
+                                    MM_SIT_APN_TYPE_DEFAULT, NULL, NULL,
+                                    (GAsyncReadyCallback) client_test_connect_ready, &ctx);
+        timeout_id = g_timeout_add_seconds (10, (GSourceFunc) client_test_timeout, &ctx);
+        g_main_loop_run (ctx.loop);
+        if (!ctx.timed_out)
+            g_source_remove (timeout_id);
+
+        g_assert_false (ctx.timed_out);
+        g_assert_no_error (ctx.error);
+        g_assert_true (ctx.completed);
+        /* Asked for on the wire, and echoed back into the decoded call. */
+        g_assert_cmpuint (ctx.requested_cid[round], ==, want[round]);
+        g_assert_cmpuint (ctx.call.cid, ==, want[round]);
+    }
+
     g_thread_join (g_steal_pointer (&peer));
     mm_sit_client_close (client);
     close (ctx.peer_fd);
     g_main_loop_unref (ctx.loop);
 
-    g_assert_false (ctx.timed_out);
-    g_assert_no_error (ctx.error);
-    g_assert_true (ctx.completed);
-    g_assert_cmpuint (ctx.call.cid, ==, 1);
+    /* The last round's grant, decoded in full. */
     g_assert_true (ctx.call.has_ipv4);
     g_assert_cmpstr (ctx.call.ipv4, ==, "10.20.30.40");
     g_assert_cmpstr (ctx.call.dns1, ==, "1.1.1.1");

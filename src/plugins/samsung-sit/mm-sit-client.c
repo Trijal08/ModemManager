@@ -43,6 +43,8 @@ struct _MMSitClientPrivate {
      * empty response. */
     guint8               smsc[MM_SIT_MAX_SMSC_LEN];
     gsize                smsc_len;
+    /* Context ids handed out to data calls, cid -> APN. See "Context ids". */
+    GHashTable          *cids;
 };
 
 static void log_object_iface_init (MMLogObjectInterface *iface);
@@ -2319,8 +2321,120 @@ typedef enum {
     CONNECT_STEP_LAST,
 } ConnectStep;
 
+/*
+ * Context ids
+ *
+ * The cid at SETUP_DATA_CALL @0x0c is the host's to pick and the CP echoes it
+ * back; it is what keeps two concurrent contexts apart. Nothing in
+ * ModemManager allocates one for us: the automatic allocator lives in
+ * MMBroadbandBearer (select_profile_3gpp -> the profile manager), and our
+ * bearer -- like MMBearerQmi -- derives from MMBaseBearer. QMI gets away with
+ * that because a QMI modem allocates its own contexts from the settings passed
+ * inline to WDS Start Network; this CP does not, so the allocation is ours.
+ *
+ * Hence this, rather than MMIfaceModem3gppProfileManager: the interface would
+ * give us core's find_empty, but nothing would call it for our bearer class, so
+ * we would be invoking it from here anyway -- and nothing consumes the D-Bus
+ * profile list it adds (NetworkManager does not read profiles). See
+ * research/decisions/0005-ims-architecture.md.
+ *
+ * Allocation starts at 2 because SET_INITIAL_ATTACH_APN puts the attach context
+ * on 1, and reuses per APN so that reconnecting the same APN does not burn a
+ * context. Downstream uses 2 and 3 for ordinary calls on the first stack, which
+ * is what this reproduces.
+ *
+ * Known gap: the table starts empty, so contexts left up by a previous
+ * ModemManager are invisible to it. Closing that means seeding from
+ * GET_DATA_CALL_LIST (0x0602) at enable; until then the failure mode is the one
+ * we have always had -- SETUP_DATA_CALL hands back the existing context.
+ */
+#define CID_FIRST 2
+/* Downstream was seen using 16 and 17, which look like the second stack's
+ * range; staying below them costs nothing while one modem owns one stack.
+ * TRACE NEEDED: the CP's real upper bound. The AT view says 1-11, but that
+ * surface is a veneer that does not reflect SIT state, so it does not decide
+ * this. */
+#define CID_LAST 15
+
+static guint8
+cid_acquire (MMSitClient  *self,
+             const gchar  *apn,
+             GError      **error)
+{
+    guint cid;
+
+    if (!self->priv->cids)
+        self->priv->cids = g_hash_table_new_full (g_direct_hash, g_direct_equal,
+                                                  NULL, g_free);
+
+    /* Reuse rather than duplicate: the same APN asked for twice is the same
+     * context, which is also what core's find_best does on the AT path. */
+    for (cid = CID_FIRST; cid <= CID_LAST; cid++) {
+        const gchar *held = g_hash_table_lookup (self->priv->cids,
+                                                 GUINT_TO_POINTER (cid));
+        if (held && g_str_equal (held, apn)) {
+            mm_obj_dbg (self->priv->port, "reusing context id %u for APN '%s'", cid, apn);
+            return (guint8) cid;
+        }
+    }
+
+    for (cid = CID_FIRST; cid <= CID_LAST; cid++) {
+        if (!g_hash_table_contains (self->priv->cids, GUINT_TO_POINTER (cid))) {
+            g_hash_table_insert (self->priv->cids, GUINT_TO_POINTER (cid),
+                                 g_strdup (apn));
+            mm_obj_dbg (self->priv->port, "context id %u allocated for APN '%s'", cid, apn);
+            return (guint8) cid;
+        }
+    }
+
+    g_set_error (error, MM_CORE_ERROR, MM_CORE_ERROR_TOO_MANY,
+                 "No free context id between %u and %u", CID_FIRST, CID_LAST);
+    return 0;
+}
+
+static void
+cid_release (MMSitClient *self,
+             guint8       cid)
+{
+    if (self->priv->cids &&
+        g_hash_table_remove (self->priv->cids, GUINT_TO_POINTER ((guint) cid)))
+        mm_obj_dbg (self->priv->port, "context id %u released", cid);
+}
+
+/*
+ * The cid we asked for is a request; the CP's response carries the one it
+ * actually used. They have always matched, but a reservation that tracks the
+ * request rather than the answer would be quietly wrong the first time they
+ * differ -- and the whole point of the table is that it agrees with the CP.
+ */
+static void
+cid_confirm (MMSitClient *self,
+             guint8       requested,
+             guint8       assigned)
+{
+    g_autofree gchar *apn = NULL;
+
+    if (requested == assigned || !self->priv->cids)
+        return;
+
+    apn = g_strdup (g_hash_table_lookup (self->priv->cids,
+                                         GUINT_TO_POINTER ((guint) requested)));
+    if (!apn)
+        return;
+
+    mm_obj_dbg (self->priv->port, "CP assigned context id %u, not the %u asked for",
+                assigned, requested);
+    g_hash_table_remove (self->priv->cids, GUINT_TO_POINTER ((guint) requested));
+    g_hash_table_insert (self->priv->cids, GUINT_TO_POINTER ((guint) assigned),
+                         g_steal_pointer (&apn));
+}
+
 typedef struct {
     ConnectStep    step;
+    /* Reserved for the whole attempt, retries included, and released again if
+     * the attempt does not end with a context up. */
+    guint8         cid;
+    gboolean       cid_kept;
     gchar         *apn;
     MMSitPdpType   pdp;
     /* Credentials, owned: the properties they came from need not outlive the
@@ -2343,6 +2457,12 @@ static void connect_step (GTask *task);
 static void
 connect_context_free (ConnectContext *ctx)
 {
+    /* Every failure path lands here -- cancelled, refused, timed out, retries
+     * exhausted -- so releasing the reservation here is the one place that
+     * cannot be forgotten. A context that did come up keeps its cid until the
+     * bearer disconnects it. */
+    if (!ctx->cid_kept)
+        cid_release (ctx->client, ctx->cid);
     if (ctx->retry_id)
         g_source_remove (ctx->retry_id);
     if (ctx->indication_handler_id)
@@ -2536,7 +2656,7 @@ connect_build_request (MMSitClient   *self,
     case CONNECT_STEP_CONFIG_0107:
         return mm_sit_request_new (0x0107, next_token (self), body_0107, sizeof (body_0107), error);
     case CONNECT_STEP_SETUP:
-        return mm_sit_request_new_setup_data_call (next_token (self), MM_SIT_DATA_CALL_CID_DEFAULT,
+        return mm_sit_request_new_setup_data_call (next_token (self), ctx->cid,
                                                    ctx->apn, ctx->pdp, ctx->apn_types, &ctx->auth, error);
     case CONNECT_STEP_FAST_DORMANCY:
         return mm_sit_request_new_set_fast_dormancy_info (next_token (self));
@@ -2564,6 +2684,8 @@ connect_step (GTask *task)
     if (ctx->step == CONNECT_STEP_LAST) {
         MMSitDataCall *result = g_new (MMSitDataCall, 1);
 
+        cid_confirm (self, ctx->cid, ctx->call.cid);
+        ctx->cid_kept = TRUE;
         *result = ctx->call;
         g_task_return_pointer (task, result, g_free);
         g_object_unref (task);
@@ -2605,6 +2727,8 @@ mm_sit_client_connect_data (MMSitClient        *self,
 {
     ConnectContext *ctx;
     GTask          *task;
+    GError         *error = NULL;
+    guint8          cid;
 
     g_return_if_fail (MM_IS_SIT_CLIENT (self));
 
@@ -2617,7 +2741,15 @@ mm_sit_client_connect_data (MMSitClient        *self,
         return;
     }
 
+    cid = cid_acquire (self, apn, &error);
+    if (!cid) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
     ctx = g_new0 (ConnectContext, 1);
+    ctx->cid = cid;
     ctx->apn = g_strdup (apn);
     ctx->pdp = pdp;
     ctx->apn_types = apn_types;
@@ -2667,8 +2799,10 @@ disconnect_reset_ready (MMSitClient  *self,
     response = mm_sit_client_command_finish (self, res, &error);
     if (!response || !message_check_success (response, &error))
         g_task_return_error (task, error);
-    else
+    else {
+        cid_release (self, (guint8) GPOINTER_TO_UINT (g_task_get_task_data (task)));
         g_task_return_boolean (task, TRUE);
+    }
     g_object_unref (task);
 }
 
@@ -2684,6 +2818,10 @@ disconnect_normal_ready (MMSitClient  *self,
 
     response = mm_sit_client_command_finish (self, res, &error);
     if (response && message_check_success (response, &error)) {
+        /* Only once the CP agrees the context is gone: handing the cid out
+         * again while it is still up would collide, and a context the CP
+         * refuses to drop is exactly the case the retry below exists for. */
+        cid_release (self, (guint8) GPOINTER_TO_UINT (g_task_get_task_data (task)));
         g_task_return_boolean (task, TRUE);
         g_object_unref (task);
         return;
@@ -3216,6 +3354,7 @@ finalize (GObject *object)
     g_free (self->priv->device_model);
     g_free (self->priv->device_build);
     g_free (self->priv->device_codename);
+    g_clear_pointer (&self->priv->cids, g_hash_table_unref);
     G_OBJECT_CLASS (mm_sit_client_parent_class)->finalize (object);
 }
 
