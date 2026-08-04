@@ -60,6 +60,10 @@ struct _MMSitImsPrivate {
     gchar       *os_version;
     gchar       *software_version;
     gchar       *operator_code;
+    /* Remembered so learning the operator, or the data connection coming up,
+     * can start what the RAT alone could not. */
+    MMModemAccessTechnology last_act;
+    gboolean                data_connected;
 
     /* The context the CP granted, kept because every later step describes it --
      * a retry that had forgotten it would hand the stack an empty PDN. */
@@ -523,11 +527,32 @@ mm_sit_ims_update_access_tech (MMSitIms                *self,
     g_return_if_fail (MM_IS_SIT_IMS (self));
 
     possible = act_supports_ims (act);
+    self->priv->last_act = act;
 
     if (possible && self->priv->state == IMS_STATE_STOPPED) {
         ensure_device_identity (self);
         if (!self->priv->have_identity) {
             mm_obj_dbg (self, "not starting IMS: no device identity for the User-Agent");
+            return;
+        }
+        /*
+         * The carrier's configuration is selected by MCCMNC, and the CP is
+         * provisioned once. Starting before the serving network is known would
+         * push defaults -- wrong timers, wrong MTU, no certification suffix --
+         * and nothing would revisit them. A RAT without an operator lasts a
+         * moment; the next indication carries both.
+         */
+        if (!self->priv->operator_code) {
+            mm_obj_dbg (self, "not starting IMS yet: no serving network to configure for");
+            return;
+        }
+        /*
+         * See mm_sit_ims_set_data_connected(): the enable path power-cycles the
+         * radio to apply the attach APN, and that drops every context. Starting
+         * before then means provisioning a stack whose PDN is about to vanish.
+         */
+        if (!self->priv->data_connected) {
+            mm_obj_dbg (self, "not starting IMS yet: waiting for the default context");
             return;
         }
         mm_obj_dbg (self, "packet-switched RAT available; starting IMS");
@@ -545,6 +570,26 @@ mm_sit_ims_update_access_tech (MMSitIms                *self,
 }
 
 void
+mm_sit_ims_set_data_connected (MMSitIms *self,
+                               gboolean  connected)
+{
+    g_return_if_fail (MM_IS_SIT_IMS (self));
+
+    if (self->priv->data_connected == !!connected)
+        return;
+    self->priv->data_connected = !!connected;
+
+    if (!connected) {
+        /* The context that carried IMS went with it. */
+        self->priv->pdn_up = FALSE;
+        mm_sit_ims_stop (self);
+        return;
+    }
+    if (self->priv->last_act != MM_MODEM_ACCESS_TECHNOLOGY_UNKNOWN)
+        mm_sit_ims_update_access_tech (self, self->priv->last_act);
+}
+
+void
 mm_sit_ims_set_operator_code (MMSitIms    *self,
                               const gchar *mccmnc)
 {
@@ -554,6 +599,16 @@ mm_sit_ims_set_operator_code (MMSitIms    *self,
         return;
     g_free (self->priv->operator_code);
     self->priv->operator_code = g_strdup (mccmnc);
+
+    /*
+     * Learning the network is what unblocks a start that was waiting for it.
+     * A change of network is not handled here: the CP is provisioned per
+     * registration and re-provisioning a running stack is a separate question,
+     * so this only ever starts what has not started.
+     */
+    if (mccmnc && self->priv->data_connected &&
+        self->priv->last_act != MM_MODEM_ACCESS_TECHNOLOGY_UNKNOWN)
+        mm_sit_ims_update_access_tech (self, self->priv->last_act);
 }
 
 void

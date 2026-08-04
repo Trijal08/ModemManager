@@ -1035,6 +1035,19 @@ sit_indication (MMSitClient              *client,
     }
 }
 
+/* Follow the modem's own state rather than a bearer: it is the one signal that
+ * is already correct for every way a connection can come and go. */
+static void
+modem_state_changed_for_ims (MMBroadbandModemSamsungSit *self)
+{
+    MMModemState state = MM_MODEM_STATE_UNKNOWN;
+
+    if (!self->priv->ims)
+        return;
+    g_object_get (self, MM_IFACE_MODEM_STATE, &state, NULL);
+    mm_sit_ims_set_data_connected (self->priv->ims, state == MM_MODEM_STATE_CONNECTED);
+}
+
 static gchar *
 variant_to_hex (GVariant *value)
 {
@@ -1311,6 +1324,11 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
     self->priv->client = g_ptr_array_index (self->priv->clients, 0);
     g_signal_connect (self->priv->client, "indication", G_CALLBACK (sit_indication), self);
     self->priv->ims = mm_sit_ims_new (self->priv->client, 0);
+    /* IMS waits for the default context: the enable path power-cycles the radio
+     * to apply the attach APN and that drops every PDN, so a stack provisioned
+     * before then loses the one it was given. */
+    g_signal_connect (self, "notify::" MM_IFACE_MODEM_STATE,
+                      G_CALLBACK (modem_state_changed_for_ims), NULL);
     return self->priv->client;
 }
 

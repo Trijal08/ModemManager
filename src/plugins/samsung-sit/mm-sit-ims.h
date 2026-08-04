@@ -55,6 +55,18 @@ void mm_sit_ims_set_device_identity (MMSitIms                     *self,
 void mm_sit_ims_update_access_tech (MMSitIms                   *self,
                                     MMModemAccessTechnology     act);
 
+/*
+ * Whether the default data connection is up.
+ *
+ * IMS waits for it. Not because IMS needs mobile data, but because the enable
+ * path power-cycles the radio to apply the attach APN
+ * (SetInitialEpsBearerSettings is a power-down/set/restore in MM core) and that
+ * drops every context -- so anything brought up before it is lost. Downstream
+ * orders it the same way: the default PDN first, the ims PDN a second later.
+ */
+void mm_sit_ims_set_data_connected (MMSitIms *self,
+                                    gboolean  connected);
+
 /* The serving network's MCCMNC, which selects the carrier configuration. */
 void mm_sit_ims_set_operator_code (MMSitIms    *self,
                                    const gchar *mccmnc);

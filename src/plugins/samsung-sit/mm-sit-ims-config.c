@@ -402,14 +402,30 @@ mm_sit_ims_config_resolve (const MMSitImsDeviceIdentity *device,
     set_string (self, TAG_UA_PRODUCT_LINE, "SH000000");
     set_string (self, TAG_UA_OS_VERSION, device->os_version);
 
-    self->user_agent = g_strdup_printf ("%s %s %s %s %s%s%s",
-                                        device->manufacturer ?: "",
-                                        device->model ?: "",
-                                        device->os_name ?: "",
-                                        device->os_version ?: "",
-                                        device->software_version ?: "",
-                                        (carrier && carrier->ua_suffix) ? " " : "",
-                                        (carrier && carrier->ua_suffix) ? carrier->ua_suffix : "");
+    /*
+     * "<manufacturer> <model> <os> <version> <build> [suffix]", the shape the
+     * vendor template expands to. The device tree names the model with its
+     * vendor already in it ("Google Pixel 9a") while the template wants them
+     * separately, so a repeated vendor is dropped rather than emitted twice.
+     */
+    {
+        const gchar *model = device->model ?: "";
+        const gchar *vendor = device->manufacturer ?: "";
+        gsize        vendor_len = strlen (vendor);
+
+        if (vendor_len && g_ascii_strncasecmp (model, vendor, vendor_len) == 0 &&
+            model[vendor_len] == ' ')
+            model += vendor_len + 1;
+
+        self->user_agent = g_strdup_printf ("%s %s %s %s %s%s%s",
+                                            vendor,
+                                            model,
+                                            device->os_name ?: "",
+                                            device->os_version ?: "",
+                                            device->software_version ?: "",
+                                            (carrier && carrier->ua_suffix) ? " " : "",
+                                            (carrier && carrier->ua_suffix) ? carrier->ua_suffix : "");
+    }
     set_string (self, TAG_USER_AGENT, self->user_agent);
 
     return self;
