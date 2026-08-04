@@ -62,16 +62,25 @@ build_ip_config (const gchar *address,
  * That mapping is read out of the vendor stack rather than guessed.
  * GetDataCallFromDataCallList_v11 (research/re/sitprot/datacall.c:1396) stores
  * the response item's byte 2 -- the cid, per research/sit-protocol.md -- at +0x10
- * of its parsed record, and libsitril formats the interface name from exactly
- * that field as "rmnet%d" with the value minus one (two call sites, 0x1e5ca0 and
- * 0x1e7d74). Two independent observations agree: Android's first setupDataCall
- * takes cid 1 and is handed rmnet0, and its second stack -- which the RIL names
- * from rmnet15 up -- was seen using cids 16 and 17.
+ * of its parsed record, and libsitril names the interface from that same field:
+ * `if (TextUtils::IsEmpty(supplied_name)) snprintf(dst, "%s%d", "rmnet", cid-1);
+ * else strncpy(dst, supplied_name)`, at 0x1e5ca0 and 0x1e7d74 (the two RIL HAL
+ * struct generations, each reached from both SetDataCall entry points).
  *
- * So this is not a heuristic that has to hold across contexts; it is the same
- * arithmetic the vendor RIL does. It also means rmnet0 belongs to the initial
- * attach context (cid 1, set by SET_INITIAL_ATTACH_APN), which is why ordinary
- * contexts allocate from 2 and land on rmnet1 up.
+ * The synthesis is therefore the fallback, not the only rule -- but the other
+ * arm only copies through a name the caller supplied, and whatever it says still
+ * has to name an interface cpif created, which is only ever rmnet<i> on channel
+ * base+i. So there is no competing formula, and this is the same arithmetic the
+ * vendor RIL does rather than one that happens to fit.
+ *
+ * Two independent observations agree: Android's first setupDataCall takes cid 1
+ * and is handed rmnet0, and its second stack -- which the RIL names from rmnet15
+ * up -- was seen using cids 16 and 17. Only cid 1 is directly observed, though;
+ * for cid >= 2 the CP-side fact is inferred from the vendor stack being right.
+ *
+ * It also means rmnet0 is the initial attach context's (cid 1, set by
+ * SET_INITIAL_ATTACH_APN), which is why ordinary contexts allocate from 2 and
+ * land on rmnet1 up.
  */
 static MMPort *
 get_context_data_port (MMBaseModem  *modem,
@@ -104,6 +113,45 @@ get_context_data_port (MMBaseModem  *modem,
 }
 
 static void
+orphan_dropped (MMSitClient  *client,
+                GAsyncResult *res,
+                gpointer      user_data)
+{
+    MMBearerSamsungSit *self = user_data;
+    g_autoptr(GError)   error = NULL;
+
+    if (!mm_sit_client_disconnect_data_finish (client, res, &error))
+        mm_obj_warn (self, "Could not drop orphaned SIT data call: %s", error->message);
+    g_object_unref (self);
+}
+
+/*
+ * Fail a connect that has already been granted. Reporting the error is not
+ * enough once the CP has the context up: MMBaseBearer only disconnects on a
+ * cancelled connect, priv->cid is not recorded until the connect succeeds so the
+ * bearer's own disconnect() would be a no-op, and cid_acquire() hands the same
+ * cid back for the same APN -- so the context would stay up unreachable and
+ * every retry would fail on it identically until ModemManager restarted.
+ * Deactivating it here also releases the cid, which the deactivate path does
+ * only once the CP agrees the context is gone.
+ */
+static void
+connect_failed_after_call (GTask       *task,
+                           MMSitClient *client,
+                           guint8       cid,
+                           GError      *error)
+{
+    MMBearerSamsungSit *self = g_task_get_source_object (task);
+
+    mm_obj_dbg (self, "dropping granted SIT data call %u: %s", cid, error->message);
+    mm_sit_client_disconnect_data (client, cid, NULL,
+                                   (GAsyncReadyCallback) orphan_dropped,
+                                   g_object_ref (self));
+    g_task_return_error (task, error);
+    g_object_unref (task);
+}
+
+static void
 connect_ready (MMSitClient *client,
                GAsyncResult *res,
                GTask *task)
@@ -124,8 +172,7 @@ connect_ready (MMSitClient *client,
     data = get_context_data_port (MM_BASE_MODEM (g_task_get_task_data (task)),
                                   call.cid, &error);
     if (!data) {
-        g_task_return_error (task, error);
-        g_object_unref (task);
+        connect_failed_after_call (task, client, call.cid, error);
         return;
     }
 
@@ -156,9 +203,10 @@ connect_ready (MMSitClient *client,
     }
 
     if (!ipv4 && !ipv6) {
-        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
-                                 "SIT data call %u carries no address", call.cid);
-        g_object_unref (task);
+        connect_failed_after_call (task, client, call.cid,
+                                   g_error_new (MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                                "SIT data call %u carries no address",
+                                                call.cid));
         return;
     }
 
