@@ -47,9 +47,27 @@ gboolean mm_sit_client_open    (MMSitClient  *self,
                                 GError      **error);
 void     mm_sit_client_close   (MMSitClient  *self);
 gboolean mm_sit_client_is_open (MMSitClient  *self);
+/*
+ * What this device is, as resolved from the device tree and os-release for
+ * SET_DEVICE_INFO. The SIP User-Agent wants the same facts, so it reads them
+ * here rather than resolving them a second time. Any field may be NULL until
+ * the boot configuration has run. Owned by the client.
+ */
+void     mm_sit_client_get_device_identity (MMSitClient  *self,
+                                            const gchar **out_manufacturer,
+                                            const gchar **out_model,
+                                            const gchar **out_os_name,
+                                            const gchar **out_os_version,
+                                            const gchar **out_software_version);
+
 gboolean mm_sit_client_get_carrier_sim_info (MMSitClient         *self,
                                              MMSitCarrierSimInfo *out_info);
 gboolean mm_sit_client_radio_state_trusted  (MMSitClient         *self);
+
+/* The next request token. Public because AIMS frames are built outside this
+ * client -- by a different codec -- but must share its token sequence, since
+ * the CP matches responses on it across the whole port. */
+guint16       mm_sit_client_next_token     (MMSitClient        *self);
 
 void          mm_sit_client_command        (MMSitClient        *self,
                                             GByteArray         *request,
@@ -448,6 +466,27 @@ gboolean mm_sit_client_connect_data_finish (MMSitClient        *self,
                                             GAsyncResult       *res,
                                             MMSitDataCall      *out_call,
                                             GError            **error);
+
+/*
+ * Activate one context and nothing else.
+ *
+ * mm_sit_client_connect_data() is the *bearer* path: it also selects the data
+ * modem, writes profiles and pushes the attach APN, all of which belong to the
+ * default context and none of which a second one wants repeated. The IMS PDN is
+ * that second context, so it gets the bare request -- with a context id from
+ * the same allocator, which is the part that must not be bypassed.
+ */
+void     mm_sit_client_setup_data_call        (MMSitClient        *self,
+                                               const gchar        *apn,
+                                               MMSitPdpType        pdp,
+                                               guint32             apn_types,
+                                               GCancellable       *cancellable,
+                                               GAsyncReadyCallback callback,
+                                               gpointer            user_data);
+gboolean mm_sit_client_setup_data_call_finish (MMSitClient        *self,
+                                               GAsyncResult       *res,
+                                               MMSitDataCall      *out_call,
+                                               GError            **error);
 
 void     mm_sit_client_disconnect_data        (MMSitClient        *self,
                                                guint8              cid,

@@ -2271,11 +2271,26 @@ test_ims_config_user_agent (void)
                      "Google Pixel9a Android 17 CP2A.260705.006 EU01454");
 
     entries = mm_sit_ims_config_peek_entries (config, &n);
-    g_assert_cmpstr (find_ims_entry (entries, n, 519, NULL)->str_value, ==,
-                     "Google Pixel9a Android 17 CP2A.260705.006 EU01454");
-    g_assert_cmpstr (find_ims_entry (entries, n, 772, NULL)->str_value, ==, "Google");
-    g_assert_cmpstr (find_ims_entry (entries, n, 773, NULL)->str_value, ==, "Pixel9a");
-    g_assert_cmpstr (find_ims_entry (entries, n, 776, NULL)->str_value, ==, "17");
+    {
+        static const struct {
+            guint16      tag;
+            const gchar *value;
+        } expected[] = {
+            { 519, "Google Pixel9a Android 17 CP2A.260705.006 EU01454" },
+            { 772, "Google" },
+            { 773, "Pixel9a" },
+            { 776, "17" },
+        };
+        guint i;
+
+        for (i = 0; i < G_N_ELEMENTS (expected); i++) {
+            const SamsungAimsConfigEntry *e;
+
+            e = find_ims_entry (entries, n, expected[i].tag, NULL);
+            g_assert_nonnull (e);
+            g_assert_cmpstr (e->str_value, ==, expected[i].value);
+        }
+    }
 
     /* Without a carrier there is no certification suffix to append, and no
      * trailing space where one would have gone. */

@@ -33,6 +33,11 @@ struct _MMSitClientPrivate {
     gchar               *device_model;
     gchar               *device_build;
     gchar               *device_codename;
+    /* Resolved alongside the above, for the SIP User-Agent rather than for
+     * SET_DEVICE_INFO -- same facts, second consumer. */
+    gchar               *device_manufacturer;
+    gchar               *device_os_name;
+    gchar               *device_os_version;
     gboolean             radio_state_trusted;
     /* AID of the subscription application, cached from the last SIM status so
      * file reads can address it the way the downstream RIL does. */
@@ -254,6 +259,28 @@ mm_sit_client_is_open (MMSitClient *self)
     return mm_port_serial_is_open (MM_PORT_SERIAL (self->priv->port));
 }
 
+void
+mm_sit_client_get_device_identity (MMSitClient  *self,
+                                   const gchar **out_manufacturer,
+                                   const gchar **out_model,
+                                   const gchar **out_os_name,
+                                   const gchar **out_os_version,
+                                   const gchar **out_software_version)
+{
+    g_return_if_fail (MM_IS_SIT_CLIENT (self));
+
+    if (out_manufacturer)
+        *out_manufacturer = self->priv->device_manufacturer;
+    if (out_model)
+        *out_model = self->priv->device_model;
+    if (out_os_name)
+        *out_os_name = self->priv->device_os_name;
+    if (out_os_version)
+        *out_os_version = self->priv->device_os_version;
+    if (out_software_version)
+        *out_software_version = self->priv->device_build;
+}
+
 gboolean
 mm_sit_client_get_carrier_sim_info (MMSitClient         *self,
                                     MMSitCarrierSimInfo *out_info)
@@ -320,8 +347,8 @@ mm_sit_client_command_finish (MMSitClient   *self,
     return g_task_propagate_pointer (G_TASK (res), error);
 }
 
-static guint16
-next_token (MMSitClient *self)
+guint16
+mm_sit_client_next_token (MMSitClient *self)
 {
     return mm_port_serial_sit_next_token (self->priv->port);
 }
@@ -355,7 +382,7 @@ mm_sit_client_get_radio_state (MMSitClient        *self,
 
     task = g_task_new (self, cancellable, callback, user_data);
     request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_RADIO_POWER,
-                                        next_token (self));
+                                        mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_radio_ready, task);
 }
@@ -519,7 +546,7 @@ mm_sit_client_set_radio_state (MMSitClient        *self,
      * state: a freshly booted CP claims the radio is on while it is parked
      * (never searching), and only an explicit SET_RADIO_POWER starts the
      * PLMN search (HW-verified; the downstream RIL sends it too). */
-    request = mm_sit_request_new_set_radio_power (next_token (self), state);
+    request = mm_sit_request_new_set_radio_power (mm_sit_client_next_token (self), state);
     run_checked_command (self, request, 30, cancellable,
                          (GAsyncReadyCallback) set_radio_request_ready, task);
 }
@@ -569,7 +596,7 @@ mm_sit_client_get_sim_status (MMSitClient        *self,
 
     task = g_task_new (self, cancellable, callback, user_data);
     request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_SIM_STATUS,
-                                        next_token (self));
+                                        mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_sim_ready, task);
 }
@@ -671,7 +698,7 @@ send_sms_step (GTask *task)
     gsize                 tpdu_len = 0;
 
     if (!ctx->smsc_len && !self->priv->smsc_len) {
-        request = mm_sit_request_new_get_smsc_address (next_token (self));
+        request = mm_sit_request_new_get_smsc_address (mm_sit_client_next_token (self));
         if (request) {
             mm_sit_client_command (self, request, 10, g_task_get_cancellable (task),
                                    (GAsyncReadyCallback) send_sms_smsc_ready, task);
@@ -685,7 +712,7 @@ send_sms_step (GTask *task)
     }
 
     tpdu = g_bytes_get_data (ctx->tpdu, &tpdu_len);
-    request = mm_sit_request_new_send_sms (next_token (self),
+    request = mm_sit_request_new_send_sms (mm_sit_client_next_token (self),
                                            ctx->smsc, ctx->smsc_len,
                                            tpdu, tpdu_len,
                                            ctx->expect_more, ctx->over_ims,
@@ -777,7 +804,7 @@ mm_sit_client_ack_sms (MMSitClient        *self,
     GTask                *task;
 
     task = g_task_new (self, cancellable, callback, user_data);
-    request = mm_sit_request_new_sms_ack (next_token (self), over_ims);
+    request = mm_sit_request_new_sms_ack (mm_sit_client_next_token (self), over_ims);
     if (!request) {
         g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
                                  "couldn't build the SMS acknowledgement");
@@ -973,7 +1000,7 @@ read_ef_step (GTask *task)
     }
 
     ctx->passes++;
-    request = mm_sit_request_new_sim_io (next_token (self), &sim_io,
+    request = mm_sit_request_new_sim_io (mm_sit_client_next_token (self), &sim_io,
                                          self->priv->sim_aid, self->priv->sim_aid_len,
                                          &error);
     if (!request) {
@@ -1061,7 +1088,7 @@ mm_sit_client_get_sim_slot_status (MMSitClient        *self,
 
     task = g_task_new (self, cancellable, callback, user_data);
     request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS,
-                                        next_token (self));
+                                        mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_sim_slot_status_ready, task);
 }
@@ -1096,7 +1123,7 @@ mm_sit_client_set_logical_slot_mapping (MMSitClient                  *self,
     g_autoptr(GByteArray) request = NULL;
     g_autoptr(GError)     error = NULL;
 
-    request = mm_sit_request_new_set_logical_slot_mapping (next_token (self),
+    request = mm_sit_request_new_set_logical_slot_mapping (mm_sit_client_next_token (self),
                                                             mappings,
                                                             mapping_count,
                                                             &error);
@@ -1195,7 +1222,7 @@ get_registration_ready (MMSitClient *self,
 
     g_task_set_task_data (task, registration, g_free);
     request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_OPERATOR,
-                                        next_token (self));
+                                        mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 5, g_task_get_cancellable (task),
                            (GAsyncReadyCallback) get_registration_operator_ready,
                            task);
@@ -1212,7 +1239,7 @@ mm_sit_client_get_registration (MMSitClient        *self,
 
     task = g_task_new (self, cancellable, callback, user_data);
     request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_DATA_REGISTRATION,
-                                        next_token (self));
+                                        mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_registration_ready, task);
 }
@@ -1253,7 +1280,7 @@ mm_sit_client_get_voice_registration (MMSitClient        *self,
 
     task = g_task_new (self, cancellable, callback, user_data);
     request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_VOICE_REGISTRATION,
-                                        next_token (self));
+                                        mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_registration_ready, task);
 }
@@ -1298,7 +1325,7 @@ mm_sit_client_get_operator (MMSitClient        *self,
 
     task = g_task_new (self, cancellable, callback, user_data);
     request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_OPERATOR,
-                                        next_token (self));
+                                        mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_operator_ready, task);
 }
@@ -1358,7 +1385,7 @@ mm_sit_client_get_network_time (MMSitClient        *self,
     GTask                *task;
 
     task = g_task_new (self, cancellable, callback, user_data);
-    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_NITZ_TIME, next_token (self));
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_NITZ_TIME, mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_network_time_ready, task);
 }
@@ -1412,7 +1439,7 @@ mm_sit_client_get_radio_capability (MMSitClient        *self,
     GTask                *task;
 
     task = g_task_new (self, cancellable, callback, user_data);
-    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_RADIO_CAPABILITY, next_token (self));
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_RADIO_CAPABILITY, mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_radio_capability_ready, task);
 }
@@ -1466,7 +1493,7 @@ mm_sit_client_get_base_band_version (MMSitClient        *self,
     GTask                *task;
 
     task = g_task_new (self, cancellable, callback, user_data);
-    request = mm_sit_request_new_get_base_band_version (next_token (self));
+    request = mm_sit_request_new_get_base_band_version (mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_base_band_version_ready, task);
 }
@@ -1520,7 +1547,7 @@ mm_sit_client_get_bands (MMSitClient        *self,
     GTask                *task;
 
     task = g_task_new (self, cancellable, callback, user_data);
-    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_MANUAL_BAND_MODE, next_token (self));
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_MANUAL_BAND_MODE, mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 10, cancellable,
                            (GAsyncReadyCallback) get_bands_ready, task);
 }
@@ -1582,7 +1609,7 @@ set_bands_read_ready (MMSitClient  *self,
         return;
     }
 
-    request = mm_sit_request_new_set_band_mode (next_token (self), &mode,
+    request = mm_sit_request_new_set_band_mode (mm_sit_client_next_token (self), &mode,
                                                 (const guint16 *) ctx->lte->data, ctx->lte->len,
                                                 (const guint16 *) ctx->wcdma->data, ctx->wcdma->len,
                                                 &error);
@@ -1662,7 +1689,7 @@ mm_sit_client_get_network_selection_mode (MMSitClient        *self,
 
     task = g_task_new (self, cancellable, callback, user_data);
     request = mm_sit_request_new_query (MM_SIT_MESSAGE_QUERY_NETWORK_SELECTION_MODE,
-                                        next_token (self));
+                                        mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 10, cancellable,
                            (GAsyncReadyCallback) get_network_selection_mode_ready, task);
 }
@@ -1718,7 +1745,7 @@ mm_sit_client_get_imei (MMSitClient        *self,
     GTask                *task;
 
     task = g_task_new (self, cancellable, callback, user_data);
-    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_IMEI, next_token (self));
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_IMEI, mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_imei_ready, task);
 }
@@ -1791,7 +1818,7 @@ mm_sit_client_get_signal (MMSitClient        *self,
                                 task))
         return;
     request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_SIGNAL_STRENGTH,
-                                        next_token (self));
+                                        mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_signal_ready, task);
 }
@@ -1859,7 +1886,7 @@ mm_sit_client_get_cell_info (MMSitClient        *self,
         struct_version_refused (self, self->priv->struct_versions.cell_identity_supported,
                                 "CellIdentity", self->priv->struct_versions.cell_identity, task))
         return;
-    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_CELL_INFO_LIST, next_token (self));
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_CELL_INFO_LIST, mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_cell_info_ready, task);
 }
@@ -1910,7 +1937,7 @@ mm_sit_client_get_call_list (MMSitClient        *self,
     GTask                *task;
 
     task = g_task_new (self, cancellable, callback, user_data);
-    request = mm_sit_request_new_get_call_list (next_token (self));
+    request = mm_sit_request_new_get_call_list (mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_call_list_ready, task);
 }
@@ -1934,7 +1961,7 @@ mm_sit_client_dial (MMSitClient        *self,
     g_autoptr(GByteArray) request = NULL;
     GError               *error = NULL;
 
-    request = mm_sit_request_new_dial (next_token (self), number, &error);
+    request = mm_sit_request_new_dial (mm_sit_client_next_token (self), number, &error);
     if (!request) {
         GTask *task;
 
@@ -1966,7 +1993,7 @@ mm_sit_client_answer (MMSitClient        *self,
 {
     g_autoptr(GByteArray) request = NULL;
 
-    request = mm_sit_request_new_answer (next_token (self));
+    request = mm_sit_request_new_answer (mm_sit_client_next_token (self));
     run_checked_command (self, request, 30, cancellable, callback, user_data);
 }
 
@@ -1988,7 +2015,7 @@ mm_sit_client_hangup (MMSitClient        *self,
 {
     g_autoptr(GByteArray) request = NULL;
 
-    request = mm_sit_request_new_hangup (next_token (self), call_id);
+    request = mm_sit_request_new_hangup (mm_sit_client_next_token (self), call_id);
     run_checked_command (self, request, 30, cancellable, callback, user_data);
 }
 
@@ -2010,7 +2037,7 @@ mm_sit_client_set_indication_filter (MMSitClient        *self,
 {
     g_autoptr(GByteArray) request = NULL;
 
-    request = mm_sit_request_new_set_indication_filter (next_token (self), filter);
+    request = mm_sit_request_new_set_indication_filter (mm_sit_client_next_token (self), filter);
     run_checked_command (self, request, 5, cancellable, callback, user_data);
 }
 
@@ -2032,7 +2059,7 @@ mm_sit_client_set_screen_state (MMSitClient        *self,
 {
     g_autoptr(GByteArray) request = NULL;
 
-    request = mm_sit_request_new_set_screen_state (next_token (self), screen_on);
+    request = mm_sit_request_new_set_screen_state (mm_sit_client_next_token (self), screen_on);
     run_checked_command (self, request, 5, cancellable, callback, user_data);
 }
 
@@ -2056,7 +2083,7 @@ mm_sit_client_set_carrier_manifest (MMSitClient         *self,
     g_autoptr(GByteArray) request = NULL;
     GError               *error = NULL;
 
-    request = mm_sit_request_new_carrier_manifest (next_token (self), directory, sha1, &error);
+    request = mm_sit_request_new_carrier_manifest (mm_sit_client_next_token (self), directory, sha1, &error);
     if (!request) {
         g_task_report_error (self, callback, user_data,
                              mm_sit_client_set_carrier_manifest, error);
@@ -2229,13 +2256,13 @@ boot_config_step (GTask *task)
     case BOOT_CONFIG_STEP_AP_TIME: {
         g_autoptr(GDateTime) now = g_date_time_new_now_local ();
 
-        request = mm_sit_request_new_set_ap_system_time (next_token (self), now, &error);
+        request = mm_sit_request_new_set_ap_system_time (mm_sit_client_next_token (self), now, &error);
         break;
     }
     case BOOT_CONFIG_STEP_DEVICE_INFO:
         if (!self->priv->device_model)
             set_device_info (self, NULL, NULL, NULL);
-        request = mm_sit_request_new_device_info (next_token (self),
+        request = mm_sit_request_new_device_info (mm_sit_client_next_token (self),
                                                   self->priv->device_model,
                                                   self->priv->device_build,
                                                   self->priv->device_codename,
@@ -2246,7 +2273,7 @@ boot_config_step (GTask *task)
                                (GAsyncReadyCallback) boot_config_device_info_ready, task);
         return;
     case BOOT_CONFIG_STEP_SOFTWARE_VERSION:
-        request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_IMEISV, next_token (self));
+        request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_IMEISV, mm_sit_client_next_token (self));
         mm_sit_client_command (self, request, 5, g_task_get_cancellable (task),
                                (GAsyncReadyCallback) boot_config_software_version_ready, task);
         return;
@@ -2256,10 +2283,10 @@ boot_config_step (GTask *task)
             boot_config_step (task);
             return;
         }
-        request = mm_sit_request_new_oem_config (next_token (self), ctx->software_version, &error);
+        request = mm_sit_request_new_oem_config (mm_sit_client_next_token (self), ctx->software_version, &error);
         break;
     case BOOT_CONFIG_STEP_MODEM_CONFIG:
-        request = mm_sit_request_new_set_modem_config (next_token (self));
+        request = mm_sit_request_new_set_modem_config (mm_sit_client_next_token (self));
         break;
     case BOOT_CONFIG_STEP_LAST:
         self->priv->boot_config_done = TRUE;
@@ -2638,13 +2665,13 @@ connect_build_request (MMSitClient   *self,
 
     switch (ctx->step) {
     case CONNECT_STEP_PREFERRED_MODEM:
-        return mm_sit_request_new_set_preferred_modem (next_token (self), 0);
+        return mm_sit_request_new_set_preferred_modem (mm_sit_client_next_token (self), 0);
     case CONNECT_STEP_DATA_PROFILE:
-        return mm_sit_request_new_set_data_profile (next_token (self), ctx->apn, ctx->pdp, ctx->apn_types, &ctx->auth, error);
+        return mm_sit_request_new_set_data_profile (mm_sit_client_next_token (self), ctx->apn, ctx->pdp, ctx->apn_types, &ctx->auth, error);
     case CONNECT_STEP_ATTACH_APN:
-        return mm_sit_request_new_set_initial_attach_apn (next_token (self), ctx->apn, ctx->pdp, &ctx->auth, error);
+        return mm_sit_request_new_set_initial_attach_apn (mm_sit_client_next_token (self), ctx->apn, ctx->pdp, &ctx->auth, error);
     case CONNECT_STEP_CONFIG_0900:
-        return mm_sit_request_new (0x0900, next_token (self), reserved, sizeof (reserved), error);
+        return mm_sit_request_new (0x0900, mm_sit_client_next_token (self), reserved, sizeof (reserved), error);
     case CONNECT_STEP_CONFIG_0106:
         body_0106[4] = 0x01;
         body_0106[6] = 0x11;
@@ -2652,14 +2679,14 @@ connect_build_request (MMSitClient   *self,
         body_0106[8] = 0x11;
         body_0106[10] = 0xff;
         body_0106[11] = 0x01;
-        return mm_sit_request_new (0x0106, next_token (self), body_0106, sizeof (body_0106), error);
+        return mm_sit_request_new (0x0106, mm_sit_client_next_token (self), body_0106, sizeof (body_0106), error);
     case CONNECT_STEP_CONFIG_0107:
-        return mm_sit_request_new (0x0107, next_token (self), body_0107, sizeof (body_0107), error);
+        return mm_sit_request_new (0x0107, mm_sit_client_next_token (self), body_0107, sizeof (body_0107), error);
     case CONNECT_STEP_SETUP:
-        return mm_sit_request_new_setup_data_call (next_token (self), ctx->cid,
+        return mm_sit_request_new_setup_data_call (mm_sit_client_next_token (self), ctx->cid,
                                                    ctx->apn, ctx->pdp, ctx->apn_types, &ctx->auth, error);
     case CONNECT_STEP_FAST_DORMANCY:
-        return mm_sit_request_new_set_fast_dormancy_info (next_token (self));
+        return mm_sit_request_new_set_fast_dormancy_info (mm_sit_client_next_token (self));
     case CONNECT_STEP_REGISTRATION:
     case CONNECT_STEP_LAST:
     default:
@@ -2841,10 +2868,121 @@ disconnect_normal_ready (MMSitClient  *self,
                 "data call %u refused a normal deactivate (%s); retrying as PDP reset",
                 cid, error->message);
 
-    retry = mm_sit_request_new_deactivate_data_call (next_token (self), cid,
+    retry = mm_sit_request_new_deactivate_data_call (mm_sit_client_next_token (self), cid,
                                                      MM_SIT_DEACT_REASON_PDP_RESET);
     mm_sit_client_command (self, retry, 10, g_task_get_cancellable (task),
                            (GAsyncReadyCallback) disconnect_reset_ready, task);
+}
+
+typedef struct {
+    guint8        cid;
+    gboolean      cid_kept;
+    MMSitDataCall call;
+} SetupContext;
+
+static void
+setup_context_free (SetupContext *ctx)
+{
+    g_free (ctx);
+}
+
+static void
+setup_data_call_ready (MMSitClient  *self,
+                       GAsyncResult *res,
+                       GTask        *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    SetupContext           *ctx = g_task_get_task_data (task);
+    GError                 *error = NULL;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (!response || !message_check_success (response, &error)) {
+        cid_release (self, ctx->cid);
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    if (!mm_sit_message_parse_data_call (response, &ctx->call, &error)) {
+        cid_release (self, ctx->cid);
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    if (ctx->call.cause) {
+        cid_release (self, ctx->cid);
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "data call refused: cause %u", ctx->call.cause);
+        g_object_unref (task);
+        return;
+    }
+
+    cid_confirm (self, ctx->cid, ctx->call.cid);
+    ctx->cid_kept = TRUE;
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_setup_data_call (MMSitClient        *self,
+                               const gchar        *apn,
+                               MMSitPdpType        pdp,
+                               guint32             apn_types,
+                               GCancellable       *cancellable,
+                               GAsyncReadyCallback callback,
+                               gpointer            user_data)
+{
+    g_autoptr(GByteArray)  request = NULL;
+    SetupContext          *ctx;
+    GTask                 *task;
+    GError                *error = NULL;
+    guint8                 cid;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+
+    cid = cid_acquire (self, apn, &error);
+    if (!cid) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    ctx = g_new0 (SetupContext, 1);
+    ctx->cid = cid;
+    g_task_set_task_data (task, ctx, (GDestroyNotify) setup_context_free);
+
+    request = mm_sit_request_new_setup_data_call (mm_sit_client_next_token (self), cid, apn, pdp,
+                                                  apn_types, NULL, &error);
+    if (!request) {
+        cid_release (self, cid);
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    /* The CP takes its time on a fresh context -- the captured ims activation
+     * ran to about 600 ms and a retry ladder belongs to the caller, not here. */
+    mm_sit_client_command (self, request, 30, cancellable,
+                           (GAsyncReadyCallback) setup_data_call_ready, task);
+}
+
+gboolean
+mm_sit_client_setup_data_call_finish (MMSitClient   *self,
+                                      GAsyncResult  *res,
+                                      MMSitDataCall *out_call,
+                                      GError       **error)
+{
+    SetupContext *ctx;
+
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    g_return_val_if_fail (out_call != NULL, FALSE);
+
+    if (!g_task_propagate_boolean (G_TASK (res), error))
+        return FALSE;
+    ctx = g_task_get_task_data (G_TASK (res));
+    *out_call = ctx->call;
+    return TRUE;
 }
 
 void
@@ -2859,7 +2997,7 @@ mm_sit_client_disconnect_data (MMSitClient        *self,
 
     task = g_task_new (self, cancellable, callback, user_data);
     g_task_set_task_data (task, GUINT_TO_POINTER ((guint) cid), NULL);
-    request = mm_sit_request_new_deactivate_data_call (next_token (self), cid,
+    request = mm_sit_request_new_deactivate_data_call (mm_sit_client_next_token (self), cid,
                                                        MM_SIT_DEACT_REASON_NORMAL);
     mm_sit_client_command (self, request, 10, cancellable,
                            (GAsyncReadyCallback) disconnect_normal_ready, task);
@@ -2901,7 +3039,7 @@ mm_sit_client_set_network_selection_auto (MMSitClient        *self,
 {
     g_autoptr(GByteArray) request = NULL;
 
-    request = mm_sit_request_new_set_network_selection_auto (next_token (self));
+    request = mm_sit_request_new_set_network_selection_auto (mm_sit_client_next_token (self));
     run_checked_command (self, request, 30, cancellable, callback, user_data);
 }
 
@@ -2958,7 +3096,7 @@ mm_sit_client_set_network_selection_manual (MMSitClient        *self,
     GTask                *task;
 
     task = g_task_new (self, cancellable, callback, user_data);
-    request = mm_sit_request_new_set_network_selection_manual (next_token (self), plmn,
+    request = mm_sit_request_new_set_network_selection_manual (mm_sit_client_next_token (self), plmn,
                                                               rat, &error);
     if (!request) {
         g_task_return_error (task, g_steal_pointer (&error));
@@ -3011,7 +3149,7 @@ mm_sit_client_get_facility_lock (MMSitClient        *self,
     GTask                *task;
 
     task = g_task_new (self, cancellable, callback, user_data);
-    request = mm_sit_request_new_get_facility_lock (next_token (self), facility);
+    request = mm_sit_request_new_get_facility_lock (mm_sit_client_next_token (self), facility);
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_facility_lock_ready, task);
 }
@@ -3075,7 +3213,7 @@ mm_sit_client_get_allowed_network_types (MMSitClient        *self,
     GTask                *task;
 
     task = g_task_new (self, cancellable, callback, user_data);
-    request = mm_sit_request_new_get_allowed_network_types (next_token (self));
+    request = mm_sit_request_new_get_allowed_network_types (mm_sit_client_next_token (self));
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_allowed_network_types_ready, task);
 }
@@ -3111,7 +3249,7 @@ mm_sit_client_set_initial_attach_apn (MMSitClient        *self,
     g_autoptr(GByteArray) request = NULL;
     g_autoptr(GError)     error = NULL;
 
-    request = mm_sit_request_new_set_initial_attach_apn (next_token (self), apn, pdp, auth, &error);
+    request = mm_sit_request_new_set_initial_attach_apn (mm_sit_client_next_token (self), apn, pdp, auth, &error);
     if (!request) {
         GTask *task = g_task_new (self, cancellable, callback, user_data);
 
@@ -3141,7 +3279,7 @@ mm_sit_client_set_allowed_network_types (MMSitClient                   *self,
     g_autoptr(GByteArray) request = NULL;
     g_autoptr(GError)     error = NULL;
 
-    request = mm_sit_request_new_set_allowed_network_types (next_token (self), generations, &error);
+    request = mm_sit_request_new_set_allowed_network_types (mm_sit_client_next_token (self), generations, &error);
     if (!request) {
         GTask *task = g_task_new (self, cancellable, callback, user_data);
 
@@ -3224,7 +3362,7 @@ scan_complete (GTask *task)
         ctx->deadline_id = 0;
     }
 
-    request = mm_sit_request_new_stop_network_scan (next_token (self));
+    request = mm_sit_request_new_stop_network_scan (mm_sit_client_next_token (self));
     run_checked_command (self, request, 10, NULL,
                          (GAsyncReadyCallback) scan_stop_ready, NULL);
 
@@ -3320,7 +3458,7 @@ mm_sit_client_scan_networks (MMSitClient        *self,
     task = g_task_new (self, cancellable, callback, user_data);
     g_task_set_task_data (task, g_new0 (ScanContext, 1), (GDestroyNotify) scan_context_free);
 
-    request = mm_sit_request_new_start_network_scan (next_token (self));
+    request = mm_sit_request_new_start_network_scan (mm_sit_client_next_token (self));
     run_checked_command (self, request, 10, cancellable,
                          (GAsyncReadyCallback) scan_start_ready, task);
 }
@@ -3354,6 +3492,9 @@ finalize (GObject *object)
     g_free (self->priv->device_model);
     g_free (self->priv->device_build);
     g_free (self->priv->device_codename);
+    g_free (self->priv->device_manufacturer);
+    g_free (self->priv->device_os_name);
+    g_free (self->priv->device_os_version);
     g_clear_pointer (&self->priv->cids, g_hash_table_unref);
     G_OBJECT_CLASS (mm_sit_client_parent_class)->finalize (object);
 }
@@ -3403,6 +3544,39 @@ os_release_value (GKeyFile    *keyfile,
         return NULL;
     unquoted = g_shell_unquote (raw, NULL);
     return unquoted ?: g_strdup (raw);
+}
+
+/* The vendor part of the first device-tree compatible: "google,zumapro-tegu"
+ * -> "google". The SIP User-Agent leads with it. */
+static gchar *
+read_vendor (void)
+{
+    g_autofree gchar *compatible = NULL;
+    const gchar      *comma;
+
+    compatible = read_first_line ("/proc/device-tree/compatible");
+    if (!compatible)
+        return NULL;
+    comma = strchr (compatible, ',');
+    return comma ? g_strndup (compatible, comma - compatible) : NULL;
+}
+
+/* One os-release field, or NULL. */
+static gchar *
+read_os_field (const gchar *key)
+{
+    g_autoptr(GError)   error = NULL;
+    g_autoptr(GKeyFile) keyfile = NULL;
+    g_autofree gchar   *contents = NULL;
+    g_autofree gchar   *wrapped = NULL;
+
+    if (!g_file_get_contents ("/etc/os-release", &contents, NULL, NULL))
+        return NULL;
+    keyfile = g_key_file_new ();
+    wrapped = g_strconcat ("[os]\n", contents, NULL);
+    if (!g_key_file_load_from_data (keyfile, wrapped, -1, G_KEY_FILE_NONE, &error))
+        return NULL;
+    return os_release_value (keyfile, key);
 }
 
 static gchar *
@@ -3456,6 +3630,13 @@ set_device_info (MMSitClient *self,
         self->priv->device_build = g_strdup (BOOT_CONFIG_DEVICE_BUILD_FALLBACK);
     if (!self->priv->device_codename)
         self->priv->device_codename = g_strdup ("");
+
+    g_free (self->priv->device_manufacturer);
+    g_free (self->priv->device_os_name);
+    g_free (self->priv->device_os_version);
+    self->priv->device_manufacturer = read_vendor ();
+    self->priv->device_os_name = read_os_field ("NAME");
+    self->priv->device_os_version = read_os_field ("VERSION_ID");
 
     /* 31 characters plus a NUL each; the builder refuses anything longer. */
     self->priv->device_model[MIN (strlen (self->priv->device_model), MM_SIT_MAX_DEVICE_INFO_FIELD - 1)] = '\0';

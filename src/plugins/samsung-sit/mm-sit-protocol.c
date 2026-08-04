@@ -274,12 +274,16 @@ format_ipv6 (gchar        destination[MM_SIT_IPV6_STRLEN],
         destination[0] = '\0';
 }
 
+G_STATIC_ASSERT (MM_SIT_MAX_PCSCF == SAMSUNG_SIT_PCSCF_MAX);
+
 /* Reshape one codec data call into the plugin's. Both families come from the
  * same record: the CP fills the v4 slots, the v6 slots, or both. */
 static void
 fill_data_call (MMSitDataCall            *out,
                 const SamsungSitDataCall *dc)
 {
+    guint i;
+
     memset (out, 0, sizeof (*out));
     out->cause  = dc->cause;
     out->cid    = dc->cid;
@@ -303,7 +307,15 @@ fill_data_call (MMSitDataCall            *out,
         format_ipv6 (out->dns1_v6, dc->dns[0].v6);
     if (dc->dns[1].has_v6)
         format_ipv6 (out->dns2_v6, dc->dns[1].v6);
+
+    out->pcscf_v4_count = MIN (dc->pcscf_v4_count, MM_SIT_MAX_PCSCF);
+    for (i = 0; i < out->pcscf_v4_count; i++)
+        format_ipv4 (out->pcscf_v4[i], dc->pcscf_v4[i]);
+    out->pcscf_v6_count = MIN (dc->pcscf_v6_count, MM_SIT_MAX_PCSCF);
+    for (i = 0; i < out->pcscf_v6_count; i++)
+        format_ipv6 (out->pcscf_v6[i], dc->pcscf_v6[i]);
 }
+
 
 /*****************************************************************************/
 /* Request builders                                                          */
@@ -1631,8 +1643,6 @@ mm_sit_message_parse_data_call (const MMSitMessage *message,
         return FALSE;
     }
 
-    /* dc.gateway is decoded but unused: the CP leaves it zero on this network
-     * and a raw-IP bearer needs no next hop. */
     fill_data_call (out_call, &dc);
     return TRUE;
 }

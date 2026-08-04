@@ -48,6 +48,10 @@ typedef enum {
     /* Empty poke: the CP never pushes call state, it just tells the AP to
      * re-read GET_CALL_LIST. */
     MM_SIT_MESSAGE_CALL_STATE_CHANGED         = 0x0009,
+    /* AIMS -- a different protocol sharing this id space; see samsung-aims. */
+    MM_SIT_MESSAGE_AIMS_CALL_RING             = 0x0d01,
+    MM_SIT_MESSAGE_AIMS_CALL_STATUS           = 0x0d04,
+    MM_SIT_MESSAGE_AIMS_REGISTRATION          = 0x0d05,
     /* SMS. Which group carries a message depends on whether IMS is up: the
      * AIMS one while registered, the classic one otherwise. */
     MM_SIT_MESSAGE_SEND_SMS                   = 0x0100,
@@ -440,6 +444,11 @@ typedef struct {
     gint32   timing_advance;
 } MMSitCellInfoLte;
 
+/* P-CSCF slots a data-call record carries, per family. Kept in step with the
+ * codec's own by a static assert in mm-sit-protocol.c rather than by including
+ * the FFI header here, which nearly every file would then pull in. */
+#define MM_SIT_MAX_PCSCF 3
+
 /* A data call as the CP reports it. Every address slot on the wire has room for
  * both families and the CP fills whichever the network granted, so a dual-stack
  * call arrives as one call carrying both -- not as two. An address string is
@@ -457,6 +466,13 @@ typedef struct {
     gchar    dns1_v6[MM_SIT_IPV6_STRLEN];
     gchar    dns2_v6[MM_SIT_IPV6_STRLEN];
     guint16  mtu;
+    /* SIP proxies the network sent in the PCO. Empty on an ordinary APN; an ims
+     * context comes back with the set the CP must register through, and it does
+     * not read them back for itself -- the AP hands them over in ADD_PDN_INFO. */
+    guint8   pcscf_v4_count;
+    gchar    pcscf_v4[MM_SIT_MAX_PCSCF][MM_SIT_IPV4_STRLEN];
+    guint8   pcscf_v6_count;
+    gchar    pcscf_v6[MM_SIT_MAX_PCSCF][MM_SIT_IPV6_STRLEN];
 } MMSitDataCall;
 
 /* One entry of a GET_CALL_LIST response. 'state' is the raw RIL_CallState

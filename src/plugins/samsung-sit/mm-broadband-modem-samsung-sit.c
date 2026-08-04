@@ -21,6 +21,7 @@
 #include "mm-sms-part-3gpp.h"
 #include "mm-sms-samsung-sit.h"
 #include "mm-sit-carrier-config.h"
+#include "mm-sit-ims.h"
 #include "mm-utils.h"
 
 static void iface_modem_init      (MMIfaceModemInterface     *iface);
@@ -33,6 +34,9 @@ static void iface_modem_voice_init (MMIfaceModemVoiceInterface *iface);
 struct _MMBroadbandModemSamsungSitPrivate {
     GPtrArray   *clients;
     MMSitClient *client; /* borrowed primary logical-stack client */
+    /* The CP's IMS stack, on the primary client's port. One per stack: the port
+     * a frame goes out on is what selects the stack, so this cannot be shared. */
+    MMSitIms    *ims;
     gchar       *operator_code;
     gchar       *operator_name;
     gboolean     carrier_config_ready;
@@ -368,6 +372,8 @@ update_operator (MMBroadbandModemSamsungSit *self,
                                   operator_info->plmn[0] ? operator_info->plmn : NULL) != 0;
     g_free (self->priv->operator_code);
     self->priv->operator_code = operator_info->plmn[0] ? g_strdup (operator_info->plmn) : NULL;
+    if (self->priv->ims)
+        mm_sit_ims_set_operator_code (self->priv->ims, self->priv->operator_code);
     if (!operator_info->plmn[0] || operator_changed)
         g_clear_pointer (&self->priv->operator_name, g_free);
 
@@ -1003,10 +1009,11 @@ sit_indication (MMSitClient              *client,
         handle_nitz_time (self, message);
 
     if (message->id == MM_SIT_MESSAGE_SIGNAL_STRENGTH_CHANGED) {
-        MMSitSignal        signal;
-        g_autoptr(MMSignal) lte = NULL;
-        g_autoptr(MMSignal) nr5g = NULL;
-        guint              quality;
+        MMSitSignal             signal;
+        g_autoptr(MMSignal)     lte = NULL;
+        g_autoptr(MMSignal)     nr5g = NULL;
+        MMModemAccessTechnology act;
+        guint                   quality;
 
         if (!mm_sit_message_parse_signal (message, &signal, NULL))
             return;
@@ -1020,9 +1027,11 @@ sit_indication (MMSitClient              *client,
                                           NULL, NULL, NULL, NULL, lte, nr5g);
         if (sit_signal_get_quality (&signal, &quality))
             mm_iface_modem_update_signal_quality (MM_IFACE_MODEM (self), quality);
+        act = sit_rat_mask_to_access_technology (signal.rat_mask);
         mm_iface_modem_update_access_technologies (
-            MM_IFACE_MODEM (self), sit_rat_mask_to_access_technology (signal.rat_mask),
-            MM_MODEM_ACCESS_TECHNOLOGY_ANY);
+            MM_IFACE_MODEM (self), act, MM_MODEM_ACCESS_TECHNOLOGY_ANY);
+        if (self->priv->ims)
+            mm_sit_ims_update_access_tech (self->priv->ims, act);
     }
 }
 
@@ -1301,6 +1310,7 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
 
     self->priv->client = g_ptr_array_index (self->priv->clients, 0);
     g_signal_connect (self->priv->client, "indication", G_CALLBACK (sit_indication), self);
+    self->priv->ims = mm_sit_ims_new (self->priv->client, 0);
     return self->priv->client;
 }
 
@@ -4949,6 +4959,7 @@ dispose (GObject *object)
         self->priv->reject_retry_id = 0;
     }
     g_clear_object (&self->priv->initial_eps_bearer_settings);
+    g_clear_object (&self->priv->ims);
     self->priv->client = NULL;
     g_clear_pointer (&self->priv->clients, g_ptr_array_unref);
     G_OBJECT_CLASS (mm_broadband_modem_samsung_sit_parent_class)->dispose (object);
