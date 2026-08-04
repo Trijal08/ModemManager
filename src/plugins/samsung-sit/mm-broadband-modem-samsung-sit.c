@@ -1035,6 +1035,14 @@ sit_indication (MMSitClient              *client,
     }
 }
 
+/* An IMS call changing is the same event as the CS group's empty poke: re-read
+ * the list and let the voice interface diff it against its call objects. */
+static void
+ims_calls_changed (MMBroadbandModemSamsungSit *self)
+{
+    mm_iface_modem_voice_reload_all_calls (MM_IFACE_MODEM_VOICE (self), NULL, NULL);
+}
+
 /* Follow the modem's own state rather than a bearer: it is the one signal that
  * is already correct for every way a connection can come and go. */
 static void
@@ -1324,12 +1332,21 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
     self->priv->client = g_ptr_array_index (self->priv->clients, 0);
     g_signal_connect (self->priv->client, "indication", G_CALLBACK (sit_indication), self);
     self->priv->ims = mm_sit_ims_new (self->priv->client, 0);
+    g_signal_connect_swapped (self->priv->ims, MM_SIT_IMS_SIGNAL_CALLS_CHANGED,
+                              G_CALLBACK (ims_calls_changed), self);
     /* IMS waits for the default context: the enable path power-cycles the radio
      * to apply the attach APN and that drops every PDN, so a stack provisioned
      * before then loses the one it was given. */
     g_signal_connect (self, "notify::" MM_IFACE_MODEM_STATE,
                       G_CALLBACK (modem_state_changed_for_ims), NULL);
     return self->priv->client;
+}
+
+MMSitIms *
+mm_broadband_modem_samsung_sit_peek_ims (MMBroadbandModemSamsungSit *self)
+{
+    g_return_val_if_fail (MM_IS_BROADBAND_MODEM_SAMSUNG_SIT (self), NULL);
+    return self->priv->ims;
 }
 
 /*****************************************************************************/
@@ -4676,6 +4693,15 @@ get_call_list_ready (MMSitClient  *client,
         g_object_unref (task);
         return;
     }
+
+    /*
+     * One list, whichever stack carries the call. The CS group is polled --
+     * GET_CALL_LIST is the only way to read it -- while AIMS has no list at all
+     * and is tracked from its indications, so the two halves are gathered
+     * differently and joined here. A dialer should not have to know which.
+     */
+    if (self->priv->ims)
+        call_info_list = mm_sit_ims_get_call_list (self->priv->ims);
 
     for (i = 0; i < calls->len; i++) {
         const MMSitCall *call;

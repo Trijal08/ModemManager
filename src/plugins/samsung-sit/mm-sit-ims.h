@@ -75,8 +75,49 @@ void mm_sit_ims_set_operator_code (MMSitIms    *self,
  * IMS rather than CS. */
 gboolean mm_sit_ims_is_registered (MMSitIms *self);
 
+/*
+ * IMS calls, as MMCallInfo, for merging into the Voice interface's list.
+ *
+ * AIMS has no equivalent of GET_CALL_LIST: the CP pushes CALL_RING and
+ * CALL_STATUS and expects the AP to keep the state itself. So the CS half of
+ * the list is polled and this half is tracked, and the interface sees one list
+ * either way. Caller owns the returned list.
+ */
+GList *mm_sit_ims_get_call_list (MMSitIms *self);
+
+/* Emitted when a tracked call changed, so the Voice interface re-reads the
+ * list -- the same shape as the CS group's empty CALL_STATE_CHANGED poke. */
+#define MM_SIT_IMS_SIGNAL_CALLS_CHANGED "calls-changed"
+
 /* The P-Associated-URI list from the last successful registration, or NULL. */
 const gchar *mm_sit_ims_get_associated_uris (MMSitIms *self);
+
+/*
+ * Call control. Separate from the CS group's because AIMS is a separate
+ * protocol: different requests, different ids, its own call numbering. The
+ * Voice interface picks between them on [`mm_sit_ims_is_registered`].
+ */
+void     mm_sit_ims_dial          (MMSitIms            *self,
+                                   const gchar         *number,
+                                   GCancellable        *cancellable,
+                                   GAsyncReadyCallback  callback,
+                                   gpointer             user_data);
+gboolean mm_sit_ims_dial_finish   (MMSitIms            *self,
+                                   GAsyncResult        *res,
+                                   GError             **error);
+void     mm_sit_ims_answer        (MMSitIms            *self,
+                                   GAsyncReadyCallback  callback,
+                                   gpointer             user_data);
+gboolean mm_sit_ims_answer_finish (MMSitIms            *self,
+                                   GAsyncResult        *res,
+                                   GError             **error);
+void     mm_sit_ims_hangup        (MMSitIms            *self,
+                                   guint8               call_id,
+                                   GAsyncReadyCallback  callback,
+                                   gpointer             user_data);
+gboolean mm_sit_ims_hangup_finish (MMSitIms            *self,
+                                   GAsyncResult        *res,
+                                   GError             **error);
 
 /* Stop the stack and drop the PDN; used on radio-off and at dispose. */
 void mm_sit_ims_stop (MMSitIms *self);

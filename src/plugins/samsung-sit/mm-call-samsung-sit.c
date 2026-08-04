@@ -27,6 +27,7 @@
 #include "mm-call-samsung-sit.h"
 #include "mm-log-object.h"
 #include "mm-sit-client.h"
+#include "mm-sit-ims.h"
 
 G_DEFINE_TYPE (MMCallSamsungSit, mm_call_samsung_sit, MM_TYPE_BASE_CALL)
 
@@ -41,6 +42,26 @@ struct _MMCallSamsungSitPrivate {
  * operations are one client call apiece.  Progress is *not* in the response --
  * the CP pokes CALL_STATE_CHANGED and the modem re-polls GET_CALL_LIST -- so
  * these only report that the request itself was accepted. */
+
+/*
+ * Whether this call goes over IMS.
+ *
+ * Decided per call rather than once, and from the CP's own registration state
+ * rather than from the RAT: the two stacks are separate protocols with separate
+ * requests, and which one can carry a call is exactly what the CP last told us.
+ * A call already under way keeps the answer it started with, since its id
+ * belongs to that stack.
+ */
+static gboolean
+call_is_ims (MMCallSamsungSit *self)
+{
+    MMSitIms *ims;
+
+    if (!self->priv->modem)
+        return FALSE;
+    ims = mm_broadband_modem_samsung_sit_peek_ims (MM_BROADBAND_MODEM_SAMSUNG_SIT (self->priv->modem));
+    return ims && mm_sit_ims_is_registered (ims);
+}
 
 static MMSitClient *
 peek_client (MMCallSamsungSit  *self,
@@ -85,6 +106,36 @@ dial_ready (MMSitClient  *client,
 }
 
 static void
+ims_dial_ready (MMSitIms     *ims,
+                GAsyncResult *res,
+                GTask        *task)
+{
+    GError *error = NULL;
+
+    if (!mm_sit_ims_dial_finish (ims, res, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+/* Answer and hang up report only that the CP took the request; the call's own
+ * state arrives as a CALL_STATUS indication, exactly as on the CS side. */
+static void
+ims_simple_ready (MMSitIms     *ims,
+                  GAsyncResult *res,
+                  GTask        *task)
+{
+    GError *error = NULL;
+
+    if (!g_task_propagate_boolean (G_TASK (res), &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
 call_start (MMBaseCall          *_self,
             GCancellable        *cancellable,
             GAsyncReadyCallback  callback,
@@ -108,7 +159,17 @@ call_start (MMBaseCall          *_self,
      * response carries no id.  The index arrives with the first
      * GET_CALL_LIST poll, which the voice interface matches to this object
      * by number. */
-    mm_obj_dbg (self, "starting call");
+    if (call_is_ims (self)) {
+        mm_obj_dbg (self, "starting IMS call");
+        mm_sit_ims_dial (mm_broadband_modem_samsung_sit_peek_ims (MM_BROADBAND_MODEM_SAMSUNG_SIT (self->priv->modem)),
+                         mm_gdbus_call_get_number (MM_GDBUS_CALL (self)),
+                         cancellable,
+                         (GAsyncReadyCallback) ims_dial_ready,
+                         task);
+        return;
+    }
+
+    mm_obj_dbg (self, "starting CS call");
     mm_sit_client_dial (client,
                         mm_gdbus_call_get_number (MM_GDBUS_CALL (self)),
                         cancellable,
@@ -160,9 +221,18 @@ call_accept (MMBaseCall          *_self,
         return;
     }
 
+    if (call_is_ims (self)) {
+        /* AIMS ANSWER names the media it accepts but not the call: like CS, it
+         * takes the one that is ringing. */
+        mm_obj_dbg (self, "accepting IMS call");
+        mm_sit_ims_answer (mm_broadband_modem_samsung_sit_peek_ims (MM_BROADBAND_MODEM_SAMSUNG_SIT (self->priv->modem)),
+                           (GAsyncReadyCallback) ims_simple_ready, task);
+        return;
+    }
+
     /* ANSWER is header-only: it accepts *the* incoming call, with no id, so
      * there is nothing to select here. */
-    mm_obj_dbg (self, "accepting call");
+    mm_obj_dbg (self, "accepting CS call");
     mm_sit_client_answer (client, NULL, (GAsyncReadyCallback) answer_ready, task);
 }
 
@@ -220,7 +290,15 @@ call_hangup (MMBaseCall          *_self,
     index = mm_base_call_get_index (_self);
     call_id = index ? index - 1 : 0;
 
-    mm_obj_dbg (self, "hanging up call %u (MM index %u)", call_id, index);
+    if (call_is_ims (self)) {
+        mm_obj_dbg (self, "hanging up IMS call %u (MM index %u)", call_id, index);
+        mm_sit_ims_hangup (mm_broadband_modem_samsung_sit_peek_ims (MM_BROADBAND_MODEM_SAMSUNG_SIT (self->priv->modem)),
+                           (guint8) call_id,
+                           (GAsyncReadyCallback) ims_simple_ready, task);
+        return;
+    }
+
+    mm_obj_dbg (self, "hanging up CS call %u (MM index %u)", call_id, index);
     mm_sit_client_hangup (client, call_id, NULL,
                           (GAsyncReadyCallback) hangup_ready, task);
 }

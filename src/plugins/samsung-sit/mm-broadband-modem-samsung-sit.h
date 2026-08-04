@@ -6,6 +6,7 @@
 
 #include "mm-broadband-modem.h"
 #include "mm-sit-client.h"
+#include "mm-sit-ims.h"
 
 #define MM_SIT_DEFAULT_CARRIER_CONFIG_DIRECTORY "/vendor/firmware/carrierconfig"
 
@@ -40,6 +41,9 @@ MMBroadbandModemSamsungSit *mm_broadband_modem_samsung_sit_new (const gchar  *de
 
 MMSitClient *mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
                                                           GError                     **error);
+
+/* The CP's IMS stack, or NULL before a control port is up. Borrowed. */
+MMSitIms *mm_broadband_modem_samsung_sit_peek_ims (MMBroadbandModemSamsungSit *self);
 
 void     mm_broadband_modem_samsung_sit_ensure_carrier_config        (MMBroadbandModemSamsungSit *self,
                                                                       GAsyncReadyCallback          callback,

@@ -74,9 +74,35 @@ struct _MMSitImsPrivate {
     gboolean     registered;
     gchar       *associated_uris;
 
+    /* Calls the CP has reported, keyed by its own call id. */
+    GPtrArray   *calls;
+
     GCancellable *cancellable;
     guint         retry_id;
 };
+
+enum {
+    SIGNAL_CALLS_CHANGED,
+    SIGNAL_LAST,
+};
+
+static guint signals[SIGNAL_LAST];
+
+/* One call the CP has told us about. AIMS numbers calls from zero and
+ * ModemManager reserves zero for "no index", so the index is the id plus one --
+ * the same shift the CS side uses. */
+typedef struct {
+    guint8      call_id;
+    gchar      *number;
+    MMCallState state;
+} ImsCall;
+
+static void
+ims_call_free (ImsCall *call)
+{
+    g_free (call->number);
+    g_free (call);
+}
 
 static void log_object_iface_init (MMLogObjectInterface *iface);
 
@@ -509,13 +535,287 @@ handle_registration (MMSitIms           *self,
         mm_obj_info (self, "IMS deregistered (SIP status %u)", reg.status_code);
 }
 
+static ImsCall *
+find_call (MMSitIms *self,
+           guint8    call_id)
+{
+    guint i;
+
+    for (i = 0; i < self->priv->calls->len; i++) {
+        ImsCall *call = g_ptr_array_index (self->priv->calls, i);
+
+        if (call->call_id == call_id)
+            return call;
+    }
+    return NULL;
+}
+
+/* The CP's own call states; the first six coincide with RIL's, which is what
+ * the CS group reports, so both halves of the list agree by construction. */
+static MMCallState
+aims_call_state_to_mm (guint8 state)
+{
+    switch (state) {
+    case 0: return MM_CALL_STATE_ACTIVE;
+    case 1: return MM_CALL_STATE_HELD;
+    case 2: return MM_CALL_STATE_DIALING;
+    case 3: return MM_CALL_STATE_RINGING_OUT;
+    case 4: return MM_CALL_STATE_RINGING_IN;
+    case 5: return MM_CALL_STATE_WAITING;
+    case 6: return MM_CALL_STATE_TERMINATED;
+    /* Held by the local or the remote party; both are held as far as the
+     * interface is concerned. */
+    case 7:
+    case 8: return MM_CALL_STATE_HELD;
+    default: return MM_CALL_STATE_UNKNOWN;
+    }
+}
+
+static void
+handle_call_ring (MMSitIms           *self,
+                  const MMSitMessage *message)
+{
+    SamsungAimsCallRing ring;
+    const guint8       *data;
+    gsize               len;
+    ImsCall            *call;
+    SamsungSitStatus    status;
+
+    data = mm_sit_message_get_data (message, &len);
+    if (!data)
+        return;
+
+    status = samsung_aims_parse_call_ring (data, len, &ring);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        mm_obj_dbg (self, "undecodable IMS ring: %s", samsung_sit_status_name (status));
+        return;
+    }
+
+    /* The ring repeats while the call is offered, so this is find-or-add. */
+    call = find_call (self, ring.call_id);
+    if (!call) {
+        call = g_new0 (ImsCall, 1);
+        call->call_id = ring.call_id;
+        g_ptr_array_add (self->priv->calls, call);
+    }
+    g_free (call->number);
+    call->number = g_strdup (ring.number);
+    call->state = MM_CALL_STATE_RINGING_IN;
+
+    mm_obj_info (self, "incoming IMS call from %s",
+                 ring.number[0] ? ring.number : "(withheld)");
+    g_signal_emit (self, signals[SIGNAL_CALLS_CHANGED], 0);
+}
+
+static void
+handle_call_status (MMSitIms           *self,
+                    const MMSitMessage *message)
+{
+    SamsungAimsCallStatus st;
+    const guint8         *data;
+    gsize                 len;
+    ImsCall              *call;
+    MMCallState           state;
+    SamsungSitStatus      status;
+
+    data = mm_sit_message_get_data (message, &len);
+    if (!data)
+        return;
+
+    status = samsung_aims_parse_call_status (data, len, &st);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        mm_obj_dbg (self, "undecodable IMS call status: %s", samsung_sit_status_name (status));
+        return;
+    }
+
+    state = aims_call_state_to_mm (st.state);
+    call = find_call (self, st.call_id);
+
+    if (state == MM_CALL_STATE_TERMINATED) {
+        /* Report the release once and forget it: a call the interface can no
+         * longer act on has no business staying in the list. */
+        if (call) {
+            mm_obj_dbg (self, "IMS call %u released (cause %u)", st.call_id, st.end_cause);
+            g_ptr_array_remove_fast (self->priv->calls, call);
+            g_signal_emit (self, signals[SIGNAL_CALLS_CHANGED], 0);
+        }
+        return;
+    }
+
+    if (state == MM_CALL_STATE_UNKNOWN) {
+        mm_obj_dbg (self, "ignoring IMS call %u in unmodelled state %u", st.call_id, st.state);
+        return;
+    }
+
+    if (!call) {
+        /* An outgoing call first appears here rather than in a ring. */
+        call = g_new0 (ImsCall, 1);
+        call->call_id = st.call_id;
+        g_ptr_array_add (self->priv->calls, call);
+    }
+    if (st.connected_number[0]) {
+        g_free (call->number);
+        call->number = g_strdup (st.connected_number);
+    }
+    if (call->state == state)
+        return;
+    call->state = state;
+    mm_obj_dbg (self, "IMS call %u is now %s", st.call_id, mm_call_state_get_string (state));
+    g_signal_emit (self, signals[SIGNAL_CALLS_CHANGED], 0);
+}
+
+/* One AIMS request, built by the FFI and sent through the client. The three
+ * call operations differ only in which builder they call. */
+static void
+send_simple (MMSitIms            *self,
+             guint8              *frame,
+             gsize                len,
+             SamsungSitStatus     status,
+             const gchar         *what,
+             GCancellable        *cancellable,
+             GAsyncReadyCallback  callback,
+             gpointer             user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "could not build IMS %s: %s", what,
+                                 samsung_sit_status_name (status));
+        g_object_unref (task);
+        return;
+    }
+    request = g_byte_array_sized_new (len);
+    g_byte_array_append (request, frame, len);
+    samsung_sit_buf_free (frame, len);
+
+    mm_obj_dbg (self, "IMS %s", what);
+    mm_sit_client_command (self->priv->client, request, 30, cancellable,
+                           (GAsyncReadyCallback) send_ready, task);
+}
+
+void
+mm_sit_ims_dial (MMSitIms            *self,
+                 const gchar         *number,
+                 GCancellable        *cancellable,
+                 GAsyncReadyCallback  callback,
+                 gpointer             user_data)
+{
+    guint8          *frame = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    g_return_if_fail (MM_IS_SIT_IMS (self));
+
+    status = samsung_aims_build_dial (mm_sit_client_next_token (self->priv->client),
+                                      number, 0 /* network default CLIR */,
+                                      &frame, &len);
+    send_simple (self, frame, len, status, "dial", cancellable, callback, user_data);
+}
+
+gboolean
+mm_sit_ims_dial_finish (MMSitIms      *self,
+                        GAsyncResult  *res,
+                        GError       **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+void
+mm_sit_ims_answer (MMSitIms            *self,
+                   GAsyncReadyCallback  callback,
+                   gpointer             user_data)
+{
+    guint8          *frame = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    g_return_if_fail (MM_IS_SIT_IMS (self));
+
+    status = samsung_aims_build_answer (mm_sit_client_next_token (self->priv->client),
+                                        &frame, &len);
+    send_simple (self, frame, len, status, "answer", NULL, callback, user_data);
+}
+
+gboolean
+mm_sit_ims_answer_finish (MMSitIms      *self,
+                          GAsyncResult  *res,
+                          GError       **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+void
+mm_sit_ims_hangup (MMSitIms            *self,
+                   guint8               call_id,
+                   GAsyncReadyCallback  callback,
+                   gpointer             user_data)
+{
+    guint8          *frame = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    g_return_if_fail (MM_IS_SIT_IMS (self));
+
+    /* Reason 0 is an ordinary local hang-up; the capture uses 2 for declining a
+     * call that is still ringing, which the interface does not distinguish. */
+    status = samsung_aims_build_hangup (mm_sit_client_next_token (self->priv->client),
+                                        call_id, 0, &frame, &len);
+    send_simple (self, frame, len, status, "hangup", NULL, callback, user_data);
+}
+
+gboolean
+mm_sit_ims_hangup_finish (MMSitIms      *self,
+                          GAsyncResult  *res,
+                          GError       **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+GList *
+mm_sit_ims_get_call_list (MMSitIms *self)
+{
+    GList *out = NULL;
+    guint  i;
+
+    g_return_val_if_fail (MM_IS_SIT_IMS (self), NULL);
+
+    for (i = 0; i < self->priv->calls->len; i++) {
+        ImsCall    *call = g_ptr_array_index (self->priv->calls, i);
+        MMCallInfo *info;
+
+        info = g_slice_new0 (MMCallInfo);
+        info->index = call->call_id + 1;
+        info->state = call->state;
+        info->direction = (call->state == MM_CALL_STATE_RINGING_IN ||
+                           call->state == MM_CALL_STATE_WAITING)
+            ? MM_CALL_DIRECTION_INCOMING : MM_CALL_DIRECTION_OUTGOING;
+        info->number = g_strdup (call->number);
+        out = g_list_append (out, info);
+    }
+    return out;
+}
+
 static void
 indication_cb (MMSitClient        *client,
                const MMSitMessage *message,
                MMSitIms           *self)
 {
-    if (message->id == MM_SIT_MESSAGE_AIMS_REGISTRATION)
+    switch (message->id) {
+    case MM_SIT_MESSAGE_AIMS_REGISTRATION:
         handle_registration (self, message);
+        break;
+    case MM_SIT_MESSAGE_AIMS_CALL_RING:
+        handle_call_ring (self, message);
+        break;
+    case MM_SIT_MESSAGE_AIMS_CALL_STATUS:
+        handle_call_status (self, message);
+        break;
+    default:
+        break;
+    }
 }
 
 void
@@ -724,6 +1024,7 @@ mm_sit_ims_init (MMSitIms *self)
 {
     self->priv = G_TYPE_INSTANCE_GET_PRIVATE (self, MM_TYPE_SIT_IMS, MMSitImsPrivate);
     self->priv->state = IMS_STATE_STOPPED;
+    self->priv->calls = g_ptr_array_new_with_free_func ((GDestroyNotify) ims_call_free);
 }
 
 static void
@@ -756,6 +1057,7 @@ finalize (GObject *object)
     g_free (self->priv->software_version);
     g_free (self->priv->operator_code);
     g_free (self->priv->associated_uris);
+    g_clear_pointer (&self->priv->calls, g_ptr_array_unref);
     G_OBJECT_CLASS (mm_sit_ims_parent_class)->finalize (object);
 }
 
@@ -767,4 +1069,10 @@ mm_sit_ims_class_init (MMSitImsClass *klass)
     g_type_class_add_private (object_class, sizeof (MMSitImsPrivate));
     object_class->dispose = dispose;
     object_class->finalize = finalize;
+
+    signals[SIGNAL_CALLS_CHANGED] =
+        g_signal_new (MM_SIT_IMS_SIGNAL_CALLS_CHANGED,
+                      G_OBJECT_CLASS_TYPE (object_class),
+                      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+                      G_TYPE_NONE, 0);
 }
