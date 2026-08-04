@@ -549,7 +549,14 @@ GByteArray *mm_sit_request_new_set_initial_attach_apn (guint16                to
                                                        MMSitPdpType           pdp,
                                                        const MMSitApnAuth    *auth,
                                                        GError               **error);
+/* The context id a data call occupies. The CP echoes it back, and it is what
+ * keeps two concurrent PDNs apart -- so once there is more than one bearer it
+ * has to come from the profile manager rather than a constant. Until then every
+ * call takes the same slot, which is what the plugin did implicitly before the
+ * cid was a parameter at all. */
+#define MM_SIT_DATA_CALL_CID_DEFAULT 1
 GByteArray *mm_sit_request_new_setup_data_call        (guint16                token,
+                                                       guint8                 cid,
                                                        const gchar           *apn,
                                                        MMSitPdpType           pdp,
                                                        guint32                apn_types,

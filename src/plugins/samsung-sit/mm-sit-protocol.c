@@ -554,6 +554,7 @@ mm_sit_request_new_set_initial_attach_apn (guint16      token,
 
 GByteArray *
 mm_sit_request_new_setup_data_call (guint16      token,
+                                    guint8       cid,
                                     const gchar *apn,
                                     MMSitPdpType pdp,
                                     guint32      apn_types,
@@ -565,7 +566,7 @@ mm_sit_request_new_setup_data_call (guint16      token,
     SamsungSitApnAuth ffi;
     SamsungSitStatus status;
 
-    status = samsung_sit_build_setup_data_call (token, apn, (SamsungSitPdpType) pdp, apn_types, ffi_auth (auth, &ffi), &buffer, &len);
+    status = samsung_sit_build_setup_data_call (token, cid, apn, (SamsungSitPdpType) pdp, apn_types, ffi_auth (auth, &ffi), &buffer, &len);
     return finish_build (status, buffer, len, error);
 }
 

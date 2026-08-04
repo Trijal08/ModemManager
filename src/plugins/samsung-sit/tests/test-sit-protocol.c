@@ -242,7 +242,7 @@ test_apn_auth_on_the_wire (void)
 
     profile = mm_sit_request_new_set_data_profile (1, "internet", MM_SIT_PDP_TYPE_IPV4V6, MM_SIT_APN_TYPE_DEFAULT, &auth, &error);
     attach = mm_sit_request_new_set_initial_attach_apn (2, "internet", MM_SIT_PDP_TYPE_IPV4V6, &auth, &error);
-    setup = mm_sit_request_new_setup_data_call (3, "internet", MM_SIT_PDP_TYPE_IPV4V6, MM_SIT_APN_TYPE_DEFAULT, &auth, &error);
+    setup = mm_sit_request_new_setup_data_call (3, MM_SIT_DATA_CALL_CID_DEFAULT, "internet", MM_SIT_PDP_TYPE_IPV4V6, MM_SIT_APN_TYPE_DEFAULT, &auth, &error);
     g_assert_no_error (error);
 
     g_assert_cmpuint (profile->data[0x77], ==, MM_SIT_AUTH_TYPE_CHAP);
@@ -286,7 +286,7 @@ test_build_data_requests (void)
     g_assert_cmpuint (attach->data[0xda], ==, 1);
     g_assert_cmpuint (attach->data[0xf8], ==, 1);
 
-    setup = mm_sit_request_new_setup_data_call (3, "internet", MM_SIT_PDP_TYPE_IPV4, MM_SIT_APN_TYPE_DEFAULT, NULL, &error);
+    setup = mm_sit_request_new_setup_data_call (3, MM_SIT_DATA_CALL_CID_DEFAULT, "internet", MM_SIT_PDP_TYPE_IPV4, MM_SIT_APN_TYPE_DEFAULT, NULL, &error);
     g_assert_no_error (error);
     g_assert_cmpuint (setup->len, ==, 983);
     g_assert_cmpmem (&setup->data[16], 8, "internet", 8);
@@ -303,7 +303,7 @@ test_build_data_requests (void)
     g_clear_pointer (&setup, g_byte_array_unref);
     profile = mm_sit_request_new_set_data_profile (1, "internet", MM_SIT_PDP_TYPE_IPV4V6, MM_SIT_APN_TYPE_DEFAULT, NULL, &error);
     attach = mm_sit_request_new_set_initial_attach_apn (2, "internet", MM_SIT_PDP_TYPE_IPV4V6, NULL, &error);
-    setup = mm_sit_request_new_setup_data_call (3, "internet", MM_SIT_PDP_TYPE_IPV6, MM_SIT_APN_TYPE_DEFAULT, NULL, &error);
+    setup = mm_sit_request_new_setup_data_call (3, MM_SIT_DATA_CALL_CID_DEFAULT, "internet", MM_SIT_PDP_TYPE_IPV6, MM_SIT_APN_TYPE_DEFAULT, NULL, &error);
     g_assert_no_error (error);
     g_assert_cmpuint (profile->data[0x75], ==, 3);
     g_assert_cmpuint (profile->data[0x76], ==, 3);

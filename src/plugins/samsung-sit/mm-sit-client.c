@@ -2536,7 +2536,8 @@ connect_build_request (MMSitClient   *self,
     case CONNECT_STEP_CONFIG_0107:
         return mm_sit_request_new (0x0107, next_token (self), body_0107, sizeof (body_0107), error);
     case CONNECT_STEP_SETUP:
-        return mm_sit_request_new_setup_data_call (next_token (self), ctx->apn, ctx->pdp, ctx->apn_types, &ctx->auth, error);
+        return mm_sit_request_new_setup_data_call (next_token (self), MM_SIT_DATA_CALL_CID_DEFAULT,
+                                                   ctx->apn, ctx->pdp, ctx->apn_types, &ctx->auth, error);
     case CONNECT_STEP_FAST_DORMANCY:
         return mm_sit_request_new_set_fast_dormancy_info (next_token (self));
     case CONNECT_STEP_REGISTRATION:
