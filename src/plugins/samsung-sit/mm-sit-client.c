@@ -2,6 +2,7 @@
 /* Copyright (C) 2026 The ModemManager authors */
 
 #include <string.h>
+#include <sys/utsname.h>
 
 #include "mm-log-object.h"
 #include "mm-sit-client.h"
@@ -3547,19 +3548,27 @@ os_release_value (GKeyFile    *keyfile,
 }
 
 /* The vendor part of the first device-tree compatible: "google,zumapro-tegu"
- * -> "google". The SIP User-Agent leads with it. */
+ * -> "Google". The SIP User-Agent leads with it, and the vendor writes it
+ * capitalised where the device tree does not. */
 static gchar *
 read_vendor (void)
 {
     g_autofree gchar *compatible = NULL;
+    gchar            *vendor;
     const gchar      *comma;
 
     compatible = read_first_line ("/proc/device-tree/compatible");
     if (!compatible)
         return NULL;
     comma = strchr (compatible, ',');
-    return comma ? g_strndup (compatible, comma - compatible) : NULL;
+    if (!comma)
+        return NULL;
+    vendor = g_strndup (compatible, comma - compatible);
+    if (vendor[0])
+        vendor[0] = g_ascii_toupper (vendor[0]);
+    return vendor;
 }
+
 
 /* One os-release field, or NULL. */
 static gchar *
@@ -3577,6 +3586,27 @@ read_os_field (const gchar *key)
     if (!g_key_file_load_from_data (keyfile, wrapped, -1, G_KEY_FILE_NONE, &error))
         return NULL;
     return os_release_value (keyfile, key);
+}
+
+/*
+ * The OS version for the User-Agent. Android puts its platform version here --
+ * the vendor's template calls it #AV# -- so it is a number on every device this
+ * CP has been provisioned by. A rolling release has none: postmarketOS reports
+ * VERSION_ID="edge". Fall back to the kernel release, which is the closest true
+ * number this system has.
+ */
+static gchar *
+read_os_version_number (void)
+{
+    g_autofree gchar *version = NULL;
+    struct utsname    u;
+
+    version = read_os_field ("VERSION_ID");
+    if (version && g_ascii_isdigit (version[0]))
+        return g_steal_pointer (&version);
+    if (uname (&u) == 0 && u.release[0])
+        return g_strdup (u.release);
+    return g_steal_pointer (&version);
 }
 
 static gchar *
@@ -3636,7 +3666,7 @@ set_device_info (MMSitClient *self,
     g_free (self->priv->device_os_version);
     self->priv->device_manufacturer = read_vendor ();
     self->priv->device_os_name = read_os_field ("NAME");
-    self->priv->device_os_version = read_os_field ("VERSION_ID");
+    self->priv->device_os_version = read_os_version_number ();
 
     /* 31 characters plus a NUL each; the builder refuses anything longer. */
     self->priv->device_model[MIN (strlen (self->priv->device_model), MM_SIT_MAX_DEVICE_INFO_FIELD - 1)] = '\0';

@@ -338,6 +338,25 @@ set_bytes (MMSitImsConfig *self,
     set_entry (self, &e);
 }
 
+/*
+ * One User-Agent field.
+ *
+ * Space is the field separator, so a value containing one silently becomes two
+ * fields and the string stops matching the shape the CP was built for -- which
+ * is what kept it from registering at all. Every value the vendor sends is a
+ * single token ("Pixel9a", "CP2A.260705.006"), so ours become one too, joined
+ * rather than run together.
+ */
+static gchar *
+ua_token (const gchar *value)
+{
+    GString *out;
+
+    out = g_string_new (value ?: "");
+    g_string_replace (out, " ", "-", 0);
+    return g_string_free (out, FALSE);
+}
+
 static const CarrierOverride *
 find_carrier (const gchar *mccmnc)
 {
@@ -409,20 +428,27 @@ mm_sit_ims_config_resolve (const MMSitImsDeviceIdentity *device,
      * separately, so a repeated vendor is dropped rather than emitted twice.
      */
     {
-        const gchar *model = device->model ?: "";
-        const gchar *vendor = device->manufacturer ?: "";
-        gsize        vendor_len = strlen (vendor);
+        const gchar      *model = device->model ?: "";
+        const gchar      *vendor = device->manufacturer ?: "";
+        gsize             vendor_len = strlen (vendor);
+        g_autofree gchar *model_token = NULL;
+        g_autofree gchar *os_token = NULL;
+        g_autofree gchar *build_token = NULL;
 
         if (vendor_len && g_ascii_strncasecmp (model, vendor, vendor_len) == 0 &&
             model[vendor_len] == ' ')
             model += vendor_len + 1;
 
+        model_token = ua_token (model);
+        os_token = ua_token (device->os_name);
+        build_token = ua_token (device->software_version);
+
         self->user_agent = g_strdup_printf ("%s %s %s %s %s%s%s",
                                             vendor,
-                                            model,
-                                            device->os_name ?: "",
+                                            model_token,
+                                            os_token,
                                             device->os_version ?: "",
-                                            device->software_version ?: "",
+                                            build_token,
                                             (carrier && carrier->ua_suffix) ? " " : "",
                                             (carrier && carrier->ua_suffix) ? carrier->ua_suffix : "");
     }
