@@ -2371,6 +2371,15 @@ typedef enum {
  * context. Downstream uses 2 and 3 for ordinary calls on the first stack, which
  * is what this reproduces.
  *
+ * The cid is no longer only an identifier: it picks the network interface. The
+ * CP carries context n on PDP channel 180 + n, which the kernel exposes as
+ * rmnet(n-1), so cid 1 owns rmnet0 and ordinary contexts land on rmnet1 up (see
+ * get_context_data_port() in mm-bearer-samsung-sit.c for where that mapping is
+ * read out of the vendor stack). Starting at 2 therefore stays right for a
+ * second reason: rmnet0 belongs to the attach context. Note the *response* cid
+ * is what selects the interface, so a CP that ever declined the cid we asked
+ * for would still get the right netdev.
+ *
  * Known gap: the table starts empty, so contexts left up by a previous
  * ModemManager are invisible to it. Closing that means seeding from
  * GET_DATA_CALL_LIST (0x0602) at enable; until then the failure mode is the one

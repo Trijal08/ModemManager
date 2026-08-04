@@ -54,6 +54,55 @@ build_ip_config (const gchar *address,
     return config;
 }
 
+/*
+ * A context's network interface follows from its context id, and nothing in the
+ * response says so: the CP carries context n on PDP channel 180 + n, which the
+ * kernel exposes as rmnet(n-1) -- rmnet0..rmnet29 over channels 181..210.
+ *
+ * That mapping is read out of the vendor stack rather than guessed.
+ * GetDataCallFromDataCallList_v11 (research/re/sitprot/datacall.c:1396) stores
+ * the response item's byte 2 -- the cid, per research/sit-protocol.md -- at +0x10
+ * of its parsed record, and libsitril formats the interface name from exactly
+ * that field as "rmnet%d" with the value minus one (two call sites, 0x1e5ca0 and
+ * 0x1e7d74). Two independent observations agree: Android's first setupDataCall
+ * takes cid 1 and is handed rmnet0, and its second stack -- which the RIL names
+ * from rmnet15 up -- was seen using cids 16 and 17.
+ *
+ * So this is not a heuristic that has to hold across contexts; it is the same
+ * arithmetic the vendor RIL does. It also means rmnet0 belongs to the initial
+ * attach context (cid 1, set by SET_INITIAL_ATTACH_APN), which is why ordinary
+ * contexts allocate from 2 and land on rmnet1 up.
+ */
+static MMPort *
+get_context_data_port (MMBaseModem  *modem,
+                       guint8        cid,
+                       GError      **error)
+{
+    g_autofree gchar *name = NULL;
+    MMPort           *port;
+
+    if (!cid) {
+        g_set_error_literal (error, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                             "SIT data call reported no context id");
+        return NULL;
+    }
+
+    name = g_strdup_printf ("rmnet%u", (guint) cid - 1);
+    port = mm_base_modem_peek_port (modem, name);
+    if (!port) {
+        g_set_error (error, MM_CORE_ERROR, MM_CORE_ERROR_NOT_FOUND,
+                     "No network port '%s' for SIT context %u", name, cid);
+        return NULL;
+    }
+    if (mm_port_get_port_type (port) != MM_PORT_TYPE_NET) {
+        g_set_error (error, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                     "Port '%s' for SIT context %u is not a network port",
+                     name, cid);
+        return NULL;
+    }
+    return g_object_ref (port);
+}
+
 static void
 connect_ready (MMSitClient *client,
                GAsyncResult *res,
@@ -72,11 +121,10 @@ connect_ready (MMSitClient *client,
         return;
     }
 
-    data = mm_base_modem_get_best_data_port (
-        MM_BASE_MODEM (g_task_get_task_data (task)), MM_PORT_TYPE_NET);
+    data = get_context_data_port (MM_BASE_MODEM (g_task_get_task_data (task)),
+                                  call.cid, &error);
     if (!data) {
-        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_NOT_FOUND,
-                                 "No Samsung SIT network data port available");
+        g_task_return_error (task, error);
         g_object_unref (task);
         return;
     }
@@ -116,7 +164,8 @@ connect_ready (MMSitClient *client,
 
     self->priv->cid = call.cid;
     self->priv->connected = TRUE;
-    mm_obj_info (self, "SIT data call %u connected with %s configuration", call.cid,
+    mm_obj_info (self, "SIT data call %u connected on %s with %s configuration",
+                 call.cid, mm_port_get_device (data),
                  (ipv4 && ipv6) ? "IPv4 and IPv6" : (ipv4 ? "IPv4" : "IPv6"));
     g_task_return_pointer (task,
                            mm_bearer_connect_result_new (data, ipv4, ipv6),
