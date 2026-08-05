@@ -999,6 +999,21 @@ sit_indication (MMSitClient              *client,
          * core does not re-query without a registration transition. */
         if (update_operator (self, &operator_info))
             mm_iface_modem_3gpp_reload_current_registration_info (MM_IFACE_MODEM_3GPP (self), NULL, NULL);
+        /*
+         * And re-read the registration *state*, which the line above does not:
+         * it reloads who we are registered to, not whether we are. The CP has
+         * no indication for the state itself, so this is the only edge that
+         * says "something changed, go and look".
+         *
+         * Without it an attach that completes after enabling is invisible.
+         * That is the ordinary case rather than a corner one: the attach lands
+         * a second or so after the attach APN is set, by which time the
+         * enabling sequence has already run its checks and seen nothing, and
+         * nothing would ever run them again -- the modem stays `enabled` with a
+         * correct operator and a stale `idle`, and IMS waits for a registration
+         * that already happened.
+         */
+        mm_iface_modem_3gpp_run_registration_checks (MM_IFACE_MODEM_3GPP (self), NULL, NULL);
     }
 
     if (message->id == MM_SIT_MESSAGE_NITZ_TIME_RECEIVED)
