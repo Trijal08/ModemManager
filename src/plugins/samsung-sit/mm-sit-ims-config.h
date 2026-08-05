@@ -6,18 +6,21 @@
 
 #include <glib.h>
 
+#include "mm-sit-carrier-config.h"
+
 #include <samsung_sit_ffi.h>
 
 /*
  * The configuration the CP's IMS stack needs before it can register, resolved
- * for one carrier.
+ * for one carrier out of `ims.db`.
  *
- * This is the seam the converted ims.db plugs into. Today the values are
- * compiled in -- AOSP defaults plus the overrides decoded from the captured
- * o2_de frames -- which is right for exactly one carrier and honest about it.
- * The real source is Android's per-carrier CarrierSettings protobuf; see
- * research/decisions/0005-ims-architecture.md. Nothing outside this file knows
- * where the values came from, so replacing them does not reach the lifecycle.
+ * That database is built offline from Android's per-carrier CarrierSettings
+ * data, merged with AOSP's framework defaults and put through the vendor's own
+ * value transforms. Every value it stores is therefore already the value the CP
+ * is handed, so this file does one flat SELECT and no merging of its own.
+ *
+ * Seven tags are *not* in the database because the vendor does not read them
+ * from carrier configuration either; they are compiled in here.
  */
 typedef struct _MMSitImsConfig MMSitImsConfig;
 
@@ -41,13 +44,22 @@ typedef struct {
 } MMSitImsDeviceIdentity;
 
 /*
- * Resolve the configuration for `mccmnc` (NULL or unknown yields the defaults),
- * with `device` substituted into the User-Agent. Never fails: an unknown
- * carrier is a set of defaults, not an error, because a CP with default timers
- * and a valid User-Agent is worth trying.
+ * Resolve the configuration for `identity` out of `database_path`, with
+ * `device` substituted into the carrier's User-Agent template.
+ *
+ * `identity` is the SIM's, not the serving network's, and the discriminators in
+ * it matter: several carriers share an MCCMNC and are told apart only by SPN,
+ * GID or an IMSI prefix.
+ *
+ * An unknown or absent identity is not an error: the database carries the same
+ * carrier-neutral layer every per-carrier record is built on, and a CP with
+ * those settings is worth trying. A missing or unreadable database is an error,
+ * because the alternative is registering with another carrier's timers.
  */
-MMSitImsConfig *mm_sit_ims_config_resolve (const MMSitImsDeviceIdentity *device,
-                                           const gchar                  *mccmnc);
+MMSitImsConfig *mm_sit_ims_config_resolve (const gchar                  *database_path,
+                                           const MMSitImsDeviceIdentity *device,
+                                           const MMSitCarrierIdentity   *identity,
+                                           GError                      **error);
 
 void mm_sit_ims_config_free (MMSitImsConfig *self);
 

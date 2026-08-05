@@ -50,6 +50,15 @@ struct _MMSitImsPrivate {
     MMSitClient *client; /* borrowed: the modem owns it and outlives us */
     guint        port_index;
     gulong       indication_id;
+    /* Where the per-carrier IMS configuration is read from, and which
+     * subscription to read out of it. */
+    gchar       *ims_database;
+    gchar       *sim_mccmnc;
+    gchar       *sim_spn;
+    gchar       *sim_imsi;
+    gchar       *sim_gid1;
+    gchar       *sim_gid2;
+    gchar       *sim_iccid;
 
     ImsState     state;
     gboolean     have_identity;
@@ -465,12 +474,37 @@ start_sequence (MMSitIms *self)
     gsize            n_entries = 0;
     const SamsungAimsConfigEntry *entries;
     SamsungSitStatus status;
+    g_autoptr(GError) config_error = NULL;
 
     clear_retry (self);
 
     ctx = g_new0 (SequenceContext, 1);
-    ctx->config = mm_sit_ims_config_resolve (&self->priv->device,
-                                             self->priv->operator_code);
+    {
+        /* The SIM's identity when it is known; the serving network only as a
+         * last resort, because they disagree for exactly the carriers that
+         * share an MCCMNC with a predecessor network. */
+        MMSitCarrierIdentity identity = {
+            .imsi = self->priv->sim_imsi,
+            .iccid = self->priv->sim_iccid,
+            .mccmnc = self->priv->sim_mccmnc ?: self->priv->operator_code,
+            .spn = self->priv->sim_spn,
+            .gid1 = self->priv->sim_gid1,
+            .gid2 = self->priv->sim_gid2,
+        };
+
+        ctx->config = mm_sit_ims_config_resolve (self->priv->ims_database,
+                                                 &self->priv->device,
+                                                 &identity,
+                                                 &config_error);
+    }
+    if (!ctx->config) {
+        /* Without it the CP has no User-Agent and cannot register at all, so
+         * there is nothing to fall back to and no point retrying: this is a
+         * packaging fault, not a transient one. */
+        mm_obj_warn (self, "no IMS configuration: %s", config_error->message);
+        sequence_context_free (ctx);
+        return;
+    }
     entries = mm_sit_ims_config_peek_entries (ctx->config, &n_entries);
 
     status = samsung_aims_build_hidden_menu (mm_sit_client_next_token (self->priv->client),
@@ -838,17 +872,6 @@ mm_sit_ims_update_access_tech (MMSitIms                *self,
             return;
         }
         /*
-         * The carrier's configuration is selected by MCCMNC, and the CP is
-         * provisioned once. Starting before the serving network is known would
-         * push defaults -- wrong timers, wrong MTU, no certification suffix --
-         * and nothing would revisit them. A RAT without an operator lasts a
-         * moment; the next indication carries both.
-         */
-        if (!self->priv->operator_code) {
-            mm_obj_dbg (self, "not starting IMS yet: no serving network to configure for");
-            return;
-        }
-        /*
          * See mm_sit_ims_set_registered(): applying the attach APN power-cycles
          * the radio, and that drops every context. Starting while the radio is
          * down means provisioning a stack whose PDN is about to vanish -- but
@@ -896,6 +919,27 @@ mm_sit_ims_set_registered (MMSitIms *self,
     }
     if (self->priv->last_act != MM_MODEM_ACCESS_TECHNOLOGY_UNKNOWN)
         mm_sit_ims_update_access_tech (self, self->priv->last_act);
+}
+
+void
+mm_sit_ims_set_carrier_identity (MMSitIms                   *self,
+                                 const MMSitCarrierIdentity *identity)
+{
+    g_return_if_fail (MM_IS_SIT_IMS (self));
+    g_return_if_fail (identity != NULL);
+
+    g_free (self->priv->sim_mccmnc);
+    g_free (self->priv->sim_spn);
+    g_free (self->priv->sim_imsi);
+    g_free (self->priv->sim_gid1);
+    g_free (self->priv->sim_gid2);
+    g_free (self->priv->sim_iccid);
+    self->priv->sim_mccmnc = g_strdup (identity->mccmnc);
+    self->priv->sim_spn = g_strdup (identity->spn);
+    self->priv->sim_imsi = g_strdup (identity->imsi);
+    self->priv->sim_gid1 = g_strdup (identity->gid1);
+    self->priv->sim_gid2 = g_strdup (identity->gid2);
+    self->priv->sim_iccid = g_strdup (identity->iccid);
 }
 
 void
@@ -1014,7 +1058,8 @@ mm_sit_ims_stop (MMSitIms *self)
 
 MMSitIms *
 mm_sit_ims_new (MMSitClient *client,
-                guint        port_index)
+                guint        port_index,
+                const gchar *ims_database)
 {
     MMSitIms *self;
 
@@ -1023,6 +1068,7 @@ mm_sit_ims_new (MMSitClient *client,
     self = g_object_new (MM_TYPE_SIT_IMS, NULL);
     self->priv->client = client;
     self->priv->port_index = port_index;
+    self->priv->ims_database = g_strdup (ims_database);
     self->priv->indication_id = g_signal_connect (client, "indication",
                                                   G_CALLBACK (indication_cb), self);
     return self;
@@ -1065,6 +1111,13 @@ finalize (GObject *object)
     g_free (self->priv->os_version);
     g_free (self->priv->software_version);
     g_free (self->priv->operator_code);
+    g_free (self->priv->ims_database);
+    g_free (self->priv->sim_mccmnc);
+    g_free (self->priv->sim_spn);
+    g_free (self->priv->sim_imsi);
+    g_free (self->priv->sim_gid1);
+    g_free (self->priv->sim_gid2);
+    g_free (self->priv->sim_iccid);
     g_free (self->priv->associated_uris);
     g_clear_pointer (&self->priv->calls, g_ptr_array_unref);
     G_OBJECT_CLASS (mm_sit_ims_parent_class)->finalize (object);

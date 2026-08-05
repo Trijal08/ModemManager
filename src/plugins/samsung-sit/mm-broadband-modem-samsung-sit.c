@@ -1173,6 +1173,12 @@ setup_carrier_config (MMIfaceModem        *iface,
         g_str_equal (sit_info.imsi, imsi) && !identity.iccid)
         identity.iccid = sit_info.iccid;
 
+    /* The IMS configuration is chosen by the same identity, and for the same
+     * reason: it belongs to the subscription, not to the network we happen to
+     * be camped on. */
+    if (self->priv->ims)
+        mm_sit_ims_set_carrier_identity (self->priv->ims, &identity);
+
     if (!mm_sit_carrier_config_resolve (carrier_config_database, &identity, &config, &error)) {
         invalidate_carrier_config (self);
         g_task_return_error (task, error);
@@ -1337,7 +1343,22 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
 
     self->priv->client = g_ptr_array_index (self->priv->clients, 0);
     g_signal_connect (self->priv->client, "indication", G_CALLBACK (sit_indication), self);
-    self->priv->ims = mm_sit_ims_new (self->priv->client, 0);
+    {
+        /* ims.db sits beside the carrier-config database rather than being
+         * configured separately: both are per-carrier data for the same modem,
+         * found through the same directory, so packaging them together keeps
+         * one knob instead of two that can disagree. */
+        g_autofree gchar *mapping = NULL;
+        g_autofree gchar *directory = NULL;
+        g_autofree gchar *ims_database = NULL;
+
+        g_object_get (self, MM_IFACE_MODEM_CARRIER_CONFIG_MAPPING, &mapping, NULL);
+        if (mapping) {
+            directory = g_path_get_dirname (mapping);
+            ims_database = g_build_filename (directory, "ims.db", NULL);
+        }
+        self->priv->ims = mm_sit_ims_new (self->priv->client, 0, ims_database);
+    }
     g_signal_connect_swapped (self->priv->ims, MM_SIT_IMS_SIGNAL_CALLS_CHANGED,
                               G_CALLBACK (ims_calls_changed), self);
     /* IMS waits for the default context: the enable path power-cycles the radio

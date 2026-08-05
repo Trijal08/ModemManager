@@ -8,6 +8,7 @@
 #include <ModemManager.h>
 
 #include "mm-sit-client.h"
+#include "mm-sit-carrier-config.h"
 #include "mm-sit-ims-config.h"
 
 #define MM_TYPE_SIT_IMS            (mm_sit_ims_get_type ())
@@ -39,7 +40,8 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (MMSitIms, g_object_unref)
  * no in-band selector, so one of these belongs to one port.
  */
 MMSitIms *mm_sit_ims_new (MMSitClient *client,
-                          guint        port_index);
+                          guint        port_index,
+                          const gchar *ims_database);
 
 /* What to substitute into the SIP User-Agent. Must be set before IMS can start;
  * the CP will not register without one. */
@@ -73,6 +75,17 @@ void mm_sit_ims_set_registered (MMSitIms *self,
                                 gboolean  registered);
 
 /* The serving network's MCCMNC, which selects the carrier configuration. */
+/*
+ * Which subscription's configuration to use. This is the SIM's identity, not
+ * the serving network's: an o2 SIM (26207) camps on 26203, which is a different
+ * record in Google's carrier list -- E-Plus, from before the two networks
+ * merged -- so keying on where we are camped picks the wrong carrier in exactly
+ * the case that matters. The modem builds this identity once and both the
+ * carrier configuration and this share it.
+ */
+void mm_sit_ims_set_carrier_identity (MMSitIms                   *self,
+                                      const MMSitCarrierIdentity *identity);
+
 void mm_sit_ims_set_operator_code (MMSitIms    *self,
                                    const gchar *mccmnc);
 

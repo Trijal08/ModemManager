@@ -2183,8 +2183,63 @@ static const MMSitImsDeviceIdentity test_device = {
     "CP2A.260705.006",  /* software_version */
 };
 
-/* An unknown carrier is defaults, not a failure: a CP with sane timers and a
- * valid User-Agent is worth trying. */
+/*
+ * A stand-in for the generated ims.db, small enough to read but the same shape:
+ * a `default` carrier every unknown SIM falls back to, one real carrier
+ * selected by MCCMNC, and one row of each stored type. Built here rather than
+ * checked in as a fixture so that what each assertion below depends on is
+ * visible next to the assertion.
+ */
+static gchar *
+build_test_ims_db (void)
+{
+    static const gchar *const sql[] = {
+        "CREATE TABLE carrier (id INTEGER PRIMARY KEY, canonical_name TEXT NOT NULL UNIQUE,"
+        " version INTEGER)",
+        "CREATE TABLE carrier_id (carrier INTEGER NOT NULL, mccmnc TEXT, spn TEXT, imsi TEXT,"
+        " gid1 TEXT, gid2 TEXT, iccid TEXT)",
+        "CREATE TABLE setting (carrier INTEGER NOT NULL, tag INTEGER NOT NULL, kind TEXT NOT NULL,"
+        " int_value INTEGER, text_value TEXT, blob_value BLOB, key TEXT, PRIMARY KEY (carrier, tag))",
+        "INSERT INTO carrier (id, canonical_name) VALUES (1, 'default'), (2, 'o2_de'), (3, 'mvno_de')",
+        /* Two records on one MCCMNC, told apart only by GID1 -- the shape that
+         * makes the match rule matter rather than a formality. */
+        "INSERT INTO carrier_id (carrier, mccmnc, gid1) VALUES (2, '26203', NULL), (3, '26203', 'AB')",
+        "INSERT INTO setting (carrier, tag, kind, int_value) VALUES (3, 1028, 'int', 1400)",
+        /* The defaults, including a User-Agent template with no suffix. */
+        "INSERT INTO setting (carrier, tag, kind, int_value, text_value) VALUES"
+        " (1,   10, 'int', 5060, NULL),"
+        " (1,  528, 'int', 128000, NULL),"
+        " (1, 1028, 'int', 1500, NULL),"
+        " (1, 1029, 'int', 1500, NULL),"
+        " (1,  519, 'str', NULL, '#MANUFACTURE# #MODEL# Android #AV# #BUILD#')",
+        /* o2, which overrides some of them and adds a certification suffix. */
+        "INSERT INTO setting (carrier, tag, kind, int_value, text_value) VALUES"
+        " (2,   10, 'int', 5060, NULL),"
+        " (2,  528, 'int', 32000, NULL),"
+        " (2, 1028, 'int', 1300, NULL),"
+        " (2, 1032, 'str', NULL, 'teleconferenceuri-factory@telefonica.de'),"
+        " (2,  519, 'str', NULL, '#MANUFACTURE# #MODEL# Android #AV# #BUILD# EU01454')",
+        "INSERT INTO setting (carrier, tag, kind, blob_value) VALUES"
+        " (2, 1060, 'bytes', x'68' || x'01' || x'ff' || x'00')",
+        NULL,
+    };
+    g_autofree gchar *dir = NULL;
+    gchar            *path;
+    sqlite3          *db = NULL;
+    guint             i;
+
+    dir = g_dir_make_tmp ("mm-sit-ims-XXXXXX", NULL);
+    g_assert_nonnull (dir);
+    path = g_build_filename (dir, "ims.db", NULL);
+    g_assert_cmpint (sqlite3_open (path, &db), ==, SQLITE_OK);
+    for (i = 0; sql[i]; i++)
+        g_assert_cmpint (sqlite3_exec (db, sql[i], NULL, NULL, NULL), ==, SQLITE_OK);
+    sqlite3_close (db);
+    return path;
+}
+
+/* An unknown carrier is the defaults, not a failure: a CP with sane timers and
+ * a valid User-Agent is worth trying. */
 static void
 test_ims_config_defaults (void)
 {
@@ -2193,12 +2248,13 @@ test_ims_config_defaults (void)
     const SamsungAimsConfigEntry *e;
     gsize                         n = 0;
 
-    config = mm_sit_ims_config_resolve (&test_device, "99999");
+    g_autofree gchar *path = build_test_ims_db ();
+
+    config = mm_sit_ims_config_resolve (path, &test_device, &(MMSitCarrierIdentity){ .mccmnc = "99999" }, NULL);
     g_assert_nonnull (config);
     g_assert_cmpstr (mm_sit_ims_config_get_carrier (config), ==, "default");
 
     entries = mm_sit_ims_config_peek_entries (config, &n);
-    g_assert_cmpuint (n, >, 60);
 
     e = find_ims_entry (entries, n, 1028, NULL); /* IPv4 SIP MTU */
     g_assert_nonnull (e);
@@ -2206,6 +2262,43 @@ test_ims_config_defaults (void)
     e = find_ims_entry (entries, n, 10, NULL);   /* SIP server port */
     g_assert_nonnull (e);
     g_assert_cmpuint (e->int_value, ==, 5060);
+
+    /*
+     * The seven tags that are in no database because the vendor does not read
+     * them from carrier configuration either. They have to be sent whatever the
+     * database says, so a carrier that never mentions them is the case worth
+     * asserting.
+     */
+    {
+        static const struct {
+            guint16 tag;
+            guint32 value;
+        } constants[] = {
+            { 523, 30 }, { 527, 30 }, { 529, 30 }, { 531, 30 }, { 533, 30 },
+            { 1044, 1 }, { 1045, 0 },
+        };
+        guint i;
+
+        for (i = 0; i < G_N_ELEMENTS (constants); i++) {
+            e = find_ims_entry (entries, n, constants[i].tag, NULL);
+            g_assert_nonnull (e);
+            g_assert_cmpuint (e->int_value, ==, constants[i].value);
+        }
+    }
+}
+
+/* A database that is not there is a packaging fault, and reporting it as one
+ * beats registering with whatever another carrier's timers happen to be. */
+static void
+test_ims_config_missing_database (void)
+{
+    g_autoptr(MMSitImsConfig) config = NULL;
+    g_autoptr(GError)         error = NULL;
+
+    config = mm_sit_ims_config_resolve ("/nonexistent/ims.db", &test_device,
+                                        &(MMSitCarrierIdentity){ .mccmnc = "26203" }, &error);
+    g_assert_null (config);
+    g_assert_nonnull (error);
 }
 
 /*
@@ -2222,7 +2315,9 @@ test_ims_config_carrier_overrides_replace (void)
     gsize                         n = 0;
     guint                         count = 0;
 
-    config = mm_sit_ims_config_resolve (&test_device, "26203");
+    g_autofree gchar *path = build_test_ims_db ();
+
+    config = mm_sit_ims_config_resolve (path, &test_device, &(MMSitCarrierIdentity){ .mccmnc = "26203" }, NULL);
     g_assert_cmpstr (mm_sit_ims_config_get_carrier (config), ==, "o2_de");
     entries = mm_sit_ims_config_peek_entries (config, &n);
 
@@ -2254,6 +2349,29 @@ test_ims_config_carrier_overrides_replace (void)
 }
 
 /*
+ * Several carriers share an MCCMNC and are told apart only by SPN, GID or an
+ * IMSI prefix. Every field a record specifies has to agree with the SIM, and
+ * the most specific surviving record wins -- so a record asking for nothing
+ * beyond the MCCMNC is the fallback for it, not a competitor.
+ */
+static void
+test_ims_config_identity_discriminators (void)
+{
+    g_autofree gchar         *path = build_test_ims_db ();
+    g_autoptr(MMSitImsConfig) generic = NULL;
+    g_autoptr(MMSitImsConfig) specific = NULL;
+
+    generic = mm_sit_ims_config_resolve (
+        path, &test_device, &(MMSitCarrierIdentity){ .mccmnc = "26203" }, NULL);
+    g_assert_cmpstr (mm_sit_ims_config_get_carrier (generic), ==, "o2_de");
+
+    specific = mm_sit_ims_config_resolve (
+        path, &test_device,
+        &(MMSitCarrierIdentity){ .mccmnc = "26203", .gid1 = "ABCD" }, NULL);
+    g_assert_cmpstr (mm_sit_ims_config_get_carrier (specific), ==, "mvno_de");
+}
+
+/*
  * The User-Agent is the one value the CP cannot invent and the one a network is
  * most likely to reject us over, so both the assembled string and the parts it
  * came from have to be present.
@@ -2266,7 +2384,9 @@ test_ims_config_user_agent (void)
     const SamsungAimsConfigEntry *entries;
     gsize                         n = 0;
 
-    config = mm_sit_ims_config_resolve (&test_device, "26203");
+    g_autofree gchar *path = build_test_ims_db ();
+
+    config = mm_sit_ims_config_resolve (path, &test_device, &(MMSitCarrierIdentity){ .mccmnc = "26203" }, NULL);
     g_assert_cmpstr (mm_sit_ims_config_get_user_agent (config), ==,
                      "Google Pixel9a Android 17 CP2A.260705.006 EU01454");
 
@@ -2294,7 +2414,7 @@ test_ims_config_user_agent (void)
 
     /* Without a carrier there is no certification suffix to append, and no
      * trailing space where one would have gone. */
-    plain = mm_sit_ims_config_resolve (&test_device, NULL);
+    plain = mm_sit_ims_config_resolve (path, &test_device, NULL, NULL);
     g_assert_cmpstr (mm_sit_ims_config_get_user_agent (plain), ==,
                      "Google Pixel9a Android 17 CP2A.260705.006");
 }
@@ -2334,6 +2454,8 @@ main (int argc,
     g_test_add_func ("/MM/sit/port/queued-commands", test_port_answers_queued_commands);
     g_test_add_func ("/MM/sit/client/connect-sequence", test_client_connect_sequence);
     g_test_add_func ("/MM/sit/ims/config-defaults", test_ims_config_defaults);
+    g_test_add_func ("/MM/sit/ims/config-missing-database", test_ims_config_missing_database);
+    g_test_add_func ("/MM/sit/ims/config-identity", test_ims_config_identity_discriminators);
     g_test_add_func ("/MM/sit/ims/config-carrier-overrides", test_ims_config_carrier_overrides_replace);
     g_test_add_func ("/MM/sit/ims/config-user-agent", test_ims_config_user_agent);
     g_test_add_func ("/MM/sit/client/radio-transition", test_client_radio_transition);
