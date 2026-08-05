@@ -751,13 +751,9 @@ set_initial_eps_bearer_settings (MMIfaceModem3gpp    *_self,
         return;
     }
 
-    apn = mm_bearer_properties_get_apn (properties);
-    if (!apn || !apn[0]) {
-        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_INVALID_ARGS,
-                                 "The initial EPS bearer needs an APN");
-        g_object_unref (task);
-        return;
-    }
+    /* An empty APN is a request, not an omission: it asks the network for the
+     * subscribed default. The CP takes it and attaches. */
+    apn = mm_bearer_properties_get_apn (properties) ?: "";
 
     if (!mm_sit_apn_auth_from_properties (properties, &auth, &inner_error)) {
         g_task_return_error (task, g_steal_pointer (&inner_error));
@@ -2463,6 +2459,22 @@ modem_set_power_finish (MMIfaceModem  *self,
     return g_task_propagate_boolean (G_TASK (res), error);
 }
 
+static void power_up_radio (GTask *task);
+
+static void
+default_attach_apn_ready (MMSitClient  *client,
+                          GAsyncResult *res,
+                          GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self;
+    g_autoptr(GError)           error = NULL;
+
+    self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
+    if (!mm_sit_client_set_initial_attach_apn_finish (client, res, &error))
+        mm_obj_warn (self, "couldn't set a default initial attach APN: %s", error->message);
+    power_up_radio (task);
+}
+
 static void
 modem_set_power_ready (MMSitClient *client,
                        GAsyncResult *res,
@@ -2506,6 +2518,26 @@ power_up_carrier_config_ready (MMBroadbandModemSamsungSit *self,
     if (!mm_broadband_modem_samsung_sit_ensure_carrier_config_finish (self, res, &error))
         mm_obj_warn (self, "couldn't provision carrier configuration before radio-on: %s",
                      error->message);
+
+    /*
+     * The CP needs *an* attach APN or it never attaches, and it will not ask the
+     * network for one itself. Empty is a real answer rather than a placeholder:
+     * an ATTACH REQUEST naming no APN asks for the subscribed default from the
+     * HSS. SetInitialEpsBearerSettings replaces this, so it is a floor and not a
+     * policy.
+     */
+    if (!self->priv->initial_eps_bearer_settings) {
+        MMSitApnAuth  auth = { 0 };
+        MMSitClient  *client = mm_broadband_modem_samsung_sit_peek_client (self, NULL);
+
+        if (client) {
+            mm_obj_dbg (self, "no initial attach APN configured; letting the network choose");
+            mm_sit_client_set_initial_attach_apn (client, "", MM_SIT_PDP_TYPE_IPV4V6, &auth, NULL,
+                                                  (GAsyncReadyCallback) default_attach_apn_ready,
+                                                  task);
+            return;
+        }
+    }
     power_up_radio (task);
 }
 
