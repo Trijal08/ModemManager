@@ -56,16 +56,21 @@ void mm_sit_ims_update_access_tech (MMSitIms                   *self,
                                     MMModemAccessTechnology     act);
 
 /*
- * Whether the default data connection is up.
+ * Whether the modem is registered, i.e. whether the radio is up and settled.
  *
- * IMS waits for it. Not because IMS needs mobile data, but because the enable
- * path power-cycles the radio to apply the attach APN
- * (SetInitialEpsBearerSettings is a power-down/set/restore in MM core) and that
- * drops every context -- so anything brought up before it is lost. Downstream
- * orders it the same way: the default PDN first, the ims PDN a second later.
+ * IMS does not wait for mobile data. It carries its own context on its own APN,
+ * the way Android keeps VoLTE working with mobile data switched off -- gating on
+ * the default connection meant IMS never registered without it.
+ *
+ * What it does wait for is the radio, because applying the attach APN
+ * power-cycles it (SetInitialEpsBearerSettings is a power-down/set/restore in
+ * MM core) and that drops every context, this one included. Registration is the
+ * signal for both halves of that: it goes away while the radio is down, which
+ * invalidates a stack whose PDN has just been pulled, and it comes back
+ * afterwards, which starts a fresh one.
  */
-void mm_sit_ims_set_data_connected (MMSitIms *self,
-                                    gboolean  connected);
+void mm_sit_ims_set_registered (MMSitIms *self,
+                                gboolean  registered);
 
 /* The serving network's MCCMNC, which selects the carrier configuration. */
 void mm_sit_ims_set_operator_code (MMSitIms    *self,

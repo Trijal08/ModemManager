@@ -60,10 +60,12 @@ struct _MMSitImsPrivate {
     gchar       *os_version;
     gchar       *software_version;
     gchar       *operator_code;
-    /* Remembered so learning the operator, or the data connection coming up,
-     * can start what the RAT alone could not. */
+    /* Remembered so learning the operator, or the radio registering, can start
+     * what the RAT alone could not. */
     MMModemAccessTechnology last_act;
-    gboolean                data_connected;
+    /* The modem's own registration -- the radio being up and settled. Distinct
+     * from `registered` below, which is the CP's IMS/SIP registration. */
+    gboolean                net_registered;
 
     /* The context the CP granted, kept because every later step describes it --
      * a retry that had forgotten it would hand the stack an empty PDN. */
@@ -847,12 +849,14 @@ mm_sit_ims_update_access_tech (MMSitIms                *self,
             return;
         }
         /*
-         * See mm_sit_ims_set_data_connected(): the enable path power-cycles the
-         * radio to apply the attach APN, and that drops every context. Starting
-         * before then means provisioning a stack whose PDN is about to vanish.
+         * See mm_sit_ims_set_registered(): applying the attach APN power-cycles
+         * the radio, and that drops every context. Starting while the radio is
+         * down means provisioning a stack whose PDN is about to vanish -- but
+         * the wait is for the radio, not for mobile data, which IMS does not
+         * need and does not use.
          */
-        if (!self->priv->data_connected) {
-            mm_obj_dbg (self, "not starting IMS yet: waiting for the default context");
+        if (!self->priv->net_registered) {
+            mm_obj_dbg (self, "not starting IMS yet: waiting for the radio to register");
             return;
         }
         mm_obj_dbg (self, "packet-switched RAT available; starting IMS");
@@ -870,17 +874,22 @@ mm_sit_ims_update_access_tech (MMSitIms                *self,
 }
 
 void
-mm_sit_ims_set_data_connected (MMSitIms *self,
-                               gboolean  connected)
+mm_sit_ims_set_registered (MMSitIms *self,
+                           gboolean  registered)
 {
     g_return_if_fail (MM_IS_SIT_IMS (self));
 
-    if (self->priv->data_connected == !!connected)
+    if (self->priv->net_registered == !!registered)
         return;
-    self->priv->data_connected = !!connected;
+    self->priv->net_registered = !!registered;
 
-    if (!connected) {
-        /* The context that carried IMS went with it. */
+    if (!registered) {
+        /*
+         * The radio went down, so the context that carried IMS went with it.
+         * Forget the PDN rather than retrying onto a dead one: the restart
+         * below re-runs SETUP_DATA_CALL from the top, which is what makes the
+         * attach-APN power-cycle survivable instead of fatal.
+         */
         self->priv->pdn_up = FALSE;
         mm_sit_ims_stop (self);
         return;
@@ -906,7 +915,7 @@ mm_sit_ims_set_operator_code (MMSitIms    *self,
      * registration and re-provisioning a running stack is a separate question,
      * so this only ever starts what has not started.
      */
-    if (mccmnc && self->priv->data_connected &&
+    if (mccmnc && self->priv->net_registered &&
         self->priv->last_act != MM_MODEM_ACCESS_TECHNOLOGY_UNKNOWN)
         mm_sit_ims_update_access_tech (self, self->priv->last_act);
 }

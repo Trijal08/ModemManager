@@ -1044,7 +1044,13 @@ ims_calls_changed (MMBroadbandModemSamsungSit *self)
 }
 
 /* Follow the modem's own state rather than a bearer: it is the one signal that
- * is already correct for every way a connection can come and go. */
+ * is already correct for every way the radio can come and go -- including the
+ * power-down/set/restore MM core does around the attach APN, which drops every
+ * context and passes through DISABLED on the way.
+ *
+ * REGISTERED and not CONNECTED: IMS carries its own context on its own APN and
+ * does not need mobile data, so gating it on a default bearer kept VoLTE down
+ * whenever data was off. Android keeps VoLTE working in exactly that state. */
 static void
 modem_state_changed_for_ims (MMBroadbandModemSamsungSit *self)
 {
@@ -1053,7 +1059,7 @@ modem_state_changed_for_ims (MMBroadbandModemSamsungSit *self)
     if (!self->priv->ims)
         return;
     g_object_get (self, MM_IFACE_MODEM_STATE, &state, NULL);
-    mm_sit_ims_set_data_connected (self->priv->ims, state == MM_MODEM_STATE_CONNECTED);
+    mm_sit_ims_set_registered (self->priv->ims, state >= MM_MODEM_STATE_REGISTERED);
 }
 
 static gchar *
