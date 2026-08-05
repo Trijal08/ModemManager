@@ -98,12 +98,22 @@ test_message_id_names (void)
     g_assert_cmpstr (mm_sit_message_id_get_string (0x0000), ==, "GET_CALL_LIST");
     g_assert_cmpstr (mm_sit_message_id_get_string (0x020b), ==,
                      "GET_SIM_AUTHENTICATE / SIM_GET_ISIM_AUTH / SIM_GET_SIM_AUTH");
+    /* Where the two tables that used to hold this disagreed, the codec's own
+     * name wins -- it is the one the code uses, so a log line greps to
+     * something. The alias the other table carried is in the protocol notes. */
     g_assert_cmpstr (mm_sit_message_id_get_string (MM_SIT_MESSAGE_GET_DATA_REGISTRATION), ==,
-                     "GET_DATA_REGISTRATION_STATE / GET_DATA_REGISTRATION");
+                     "GET_DATA_REGISTRATION");
     g_assert_cmpstr (mm_sit_message_id_get_string (MM_SIT_MESSAGE_SET_AP_SYSTEM_TIME), ==,
                      "SET_AP_SYSTEM_TIME");
-    g_assert_cmpstr (mm_sit_message_id_get_string (0x4605), ==, "SV_NUMBER / OEM_CONFIG");
+    g_assert_cmpstr (mm_sit_message_id_get_string (0x4605), ==, "OEM_CONFIG");
     g_assert_cmpstr (mm_sit_message_id_get_string (0xffff), ==, "UNKNOWN");
+    /* AIMS ids share the number space and used to log as UNKNOWN, because the
+     * table that knew them was in a crate this plugin never asked. */
+    g_assert_cmpstr (mm_sit_message_id_get_string (0x0d07), ==, "AIMS_HIDDEN_MENU");
+    /* And an indication no consumer had needed to name until it turned up
+     * twenty-six times in one boot. */
+    g_assert_cmpstr (mm_sit_message_id_get_string (0x0742), ==,
+                     "SIT_IND_PHYSICAL_CHANNEL_CONFIG");
 }
 
 static void
@@ -497,7 +507,7 @@ test_parse_nitz_time_indication (void)
     g_autofree gchar       *iso8601 = NULL;
     MMSitNitzTime           time;
 
-    g_assert_cmpstr (mm_sit_message_id_get_string (0x0905), ==, "NITZ_TIME_RECEIVED_IND");
+    g_assert_cmpstr (mm_sit_message_id_get_string (0x0905), ==, "NITZ_TIME_RECEIVED");
 
     message = mm_sit_message_parse (indication, sizeof (indication), &error);
     g_assert_no_error (error);

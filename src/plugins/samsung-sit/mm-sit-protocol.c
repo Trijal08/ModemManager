@@ -22,15 +22,6 @@
 
 #include <samsung_sit_ffi.h>
 
-typedef struct {
-    guint16      id;
-    const gchar *name;
-} MMSitMessageIdInfo;
-
-static const MMSitMessageIdInfo message_id_info[] = {
-#include "mm-sit-message-ids.inc"
-};
-
 static guint16
 read_le16 (const guint8 *data)
 {
@@ -148,21 +139,13 @@ mm_sit_message_get_payload (const MMSitMessage *self,
 const gchar *
 mm_sit_message_id_get_string (guint16 id)
 {
-    guint lower = 0;
-    guint upper = G_N_ELEMENTS (message_id_info);
+    /* The table lives in the codec, not here: SIT and AIMS ids share one
+     * number space, sit-proxy and mm-sit-tool need the same names, and the
+     * three separate tables that used to exist disagreed on 22 ids while two
+     * of them were unreachable from the tools whose traces most needed them. */
+    const gchar *name = samsung_sit_message_name (id);
 
-    while (lower < upper) {
-        guint middle = lower + (upper - lower) / 2;
-
-        if (message_id_info[middle].id < id)
-            lower = middle + 1;
-        else
-            upper = middle;
-    }
-
-    if (lower < G_N_ELEMENTS (message_id_info) && message_id_info[lower].id == id)
-        return message_id_info[lower].name;
-    return "UNKNOWN";
+    return name ?: "UNKNOWN";
 }
 
 
