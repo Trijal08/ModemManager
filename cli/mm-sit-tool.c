@@ -869,7 +869,7 @@ static const gchar *command_summary =
     "  ids [FILTER]                  list known message ids\n"
     "\n"
     "Frame offsets: a request is an 8-byte header, a 4-byte reserved word at @8,\n"
-    "then the payload at @12.  Every layout in research/sit-protocol.md is quoted\n"
+    "then the payload at @12.  Every layout in docs/subsystems/modem/reference/sit-protocol.md is quoted\n"
     "as a frame offset, so 'payload' is almost always the one you want.  'raw'\n"
     "writes from @8, so it puts your first four bytes in the reserved word and\n"
     "the CP answers a request for nothing -- a plausible wrong answer, not an\n"
@@ -1131,7 +1131,7 @@ main (int argc,
          * puts a body and therefore *inside* the reserved word -- the trap that
          * made 0x0901 look like a dead end for a day.  'payload' prepends the
          * four zero bytes so the hex starts at @12, which is how every layout
-         * in research/sit-protocol.md is written. */
+         * in docs/subsystems/modem/reference/sit-protocol.md is written. */
         gboolean at_payload = g_str_equal (command, "payload");
         g_autoptr(GByteArray) body = NULL;
         g_autoptr(GByteArray) request = NULL;

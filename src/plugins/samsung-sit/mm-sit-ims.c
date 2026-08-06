@@ -12,7 +12,7 @@
  *   ADD_PDN_INFO (0x0d08)  the granted address and the proxies to register at
  *
  * and then it reports REGISTRATION (0x0d05) about a second later. That sequence
- * and its timing are HW-validated; see research/ims.md.
+ * and its timing are HW-validated; see docs/subsystems/modem/reference/ims.md.
  *
  * RAT is the trigger, registration is the gate. A packet-switched RAT is what
  * makes IMS possible, so it starts the sequence and its loss ends it -- but

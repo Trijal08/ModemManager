@@ -61,7 +61,7 @@ build_ip_config (const gchar *address,
  *
  * That mapping is read out of the vendor stack rather than guessed.
  * GetDataCallFromDataCallList_v11 (research/re/sitprot/datacall.c:1396) stores
- * the response item's byte 2 -- the cid, per research/sit-protocol.md -- at +0x10
+ * the response item's byte 2 -- the cid, per docs/subsystems/modem/reference/sit-protocol.md -- at +0x10
  * of its parsed record, and libsitril names the interface from that same field:
  * `if (TextUtils::IsEmpty(supplied_name)) snprintf(dst, "%s%d", "rmnet", cid-1);
  * else strncpy(dst, supplied_name)`, at 0x1e5ca0 and 0x1e7d74 (the two RIL HAL

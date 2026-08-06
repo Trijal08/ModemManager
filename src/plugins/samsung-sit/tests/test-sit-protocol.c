@@ -1043,7 +1043,7 @@ test_parse_data_call (void)
 static void
 test_build_call_requests (void)
 {
-    /* Byte-pinned against a live MO call capture (research/ims.md): DIAL is
+    /* Byte-pinned against a live MO call capture (docs/subsystems/modem/reference/ims.md): DIAL is
      * 104 B with the number in a fixed 82-byte slot, ANSWER is header-only,
      * HANGUP carries {u32 call_id, u32 = 1}. */
     g_autoptr(GByteArray) dial = NULL;

@@ -2364,7 +2364,7 @@ typedef enum {
  * give us core's find_empty, but nothing would call it for our bearer class, so
  * we would be invoking it from here anyway -- and nothing consumes the D-Bus
  * profile list it adds (NetworkManager does not read profiles). See
- * research/decisions/0005-ims-architecture.md.
+ * docs/decisions/0005-ims-architecture.md.
  *
  * Allocation starts at 2 because SET_INITIAL_ATTACH_APN puts the attach context
  * on 1, and reuses per APN so that reconnecting the same APN does not burn a

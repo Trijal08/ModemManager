@@ -3999,7 +3999,7 @@ set_current_modes (MMIfaceModem       *self,
  * carries a real band list -- 0x0709/0x0708 are Android's coarse regional
  * preset and 0x0746 reports the serving band. Its reply holds two blocks, what
  * the part supports and what it is currently restricted to, plus a manual-mode
- * flag; see research/sit-protocol.md.
+ * flag; see docs/subsystems/modem/reference/sit-protocol.md.
  *
  * Only LTE and UMTS are mapped. The reply's third bitmap is GSM but its
  * enumeration is not the 3GPP band number the other two use (two set bits on a
