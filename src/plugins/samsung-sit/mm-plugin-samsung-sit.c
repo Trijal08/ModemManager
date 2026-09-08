@@ -117,7 +117,7 @@ MM_PLUGIN_NAMED_CREATOR_SCOPE MMPlugin *
 mm_plugin_create_samsung_sit (void)
 {
     static const gchar *subsystems[] = { "wwan", "net", NULL };
-    static const gchar *drivers[] = { "s5300-modem", NULL };
+    static const gchar *drivers[] = { "s5300-modem", "s5xxx-modem", NULL };
 
     return MM_PLUGIN (
         g_object_new (MM_TYPE_PLUGIN_SAMSUNG_SIT,
