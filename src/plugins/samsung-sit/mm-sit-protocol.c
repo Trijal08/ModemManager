@@ -548,6 +548,23 @@ mm_sit_request_new_set_initial_attach_apn (guint16      token,
 }
 
 GByteArray *
+mm_sit_request_new_set_initial_attach_apn_for_stack (guint16      token,
+                                                   guint8       stack,
+                                           const gchar *apn,
+                                           MMSitPdpType pdp,
+                                           const MMSitApnAuth *auth,
+                                           GError     **error)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitApnAuth ffi;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_set_initial_attach_apn_for_stack (token, stack, apn, (SamsungSitPdpType) pdp, ffi_auth (auth, &ffi), &buffer, &len);
+    return finish_build (status, buffer, len, error);
+}
+
+GByteArray *
 mm_sit_request_new_setup_data_call (guint16      token,
                                     guint8       cid,
                                     const gchar *apn,
@@ -722,6 +739,17 @@ mm_sit_request_new_set_modem_config (guint16 token)
     SamsungSitStatus status;
 
     status = samsung_sit_build_set_modem_config (token, &buffer, &len);
+    return finish_build (status, buffer, len, NULL);
+}
+
+GByteArray *
+mm_sit_request_new_set_modem_config_count (guint16 token, guint8 count)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_set_modem_config_count (token, count, &buffer, &len);
     return finish_build (status, buffer, len, NULL);
 }
 

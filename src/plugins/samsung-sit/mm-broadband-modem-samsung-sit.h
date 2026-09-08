@@ -37,7 +37,8 @@ MMBroadbandModemSamsungSit *mm_broadband_modem_samsung_sit_new (const gchar  *de
                                                                  guint16       vendor_id,
                                                                  guint16       product_id,
                                                                  const gchar  *carrier_config_database,
-                                                                 gboolean      use_proxy);
+                                                                 gboolean      use_proxy,
+                                                                 gint          logical_stack);
 
 MMSitClient *mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
                                                           GError                     **error);

@@ -49,6 +49,7 @@ if plugins_options['samsung-sit']
       'mm-sit-tool.c',
       '../src/plugins/samsung-sit/mm-port-serial-sit.c',
       '../src/plugins/samsung-sit/mm-sit-client.c',
+      '../src/plugins/samsung-sit/mm-sit-cp.c',
       '../src/plugins/samsung-sit/mm-sit-protocol.c',
     ),
     include_directories: [

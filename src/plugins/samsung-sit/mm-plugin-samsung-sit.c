@@ -27,6 +27,7 @@ create_modem (MMPlugin      *self,
     g_autofree gchar *database = NULL;
     const gchar      *directory = MM_SIT_DEFAULT_CARRIER_CONFIG_DIRECTORY;
     gboolean          use_proxy = FALSE;
+    gint              logical_stack = -1;
     GList            *l;
 
     if (!mm_port_probe_list_has_sit_port (probes)) {
@@ -50,13 +51,26 @@ create_modem (MMPlugin      *self,
         /* Declared by the udev rule that ships with sit-proxy, so the transport
          * is a packaging decision rather than something probed at runtime. */
         use_proxy = mm_kernel_device_get_property_as_boolean (port, "ID_MM_SIT_PROXY");
+        {
+            const gchar *stack = mm_kernel_device_get_property (port, "ID_MM_SIT_LOGICAL_STACK");
+
+            if (stack && g_str_equal (stack, "0"))
+                logical_stack = 0;
+            else if (stack && g_str_equal (stack, "1"))
+                logical_stack = 1;
+            else if (stack) {
+                g_set_error_literal (error, MM_CORE_ERROR, MM_CORE_ERROR_INVALID_ARGS,
+                                     "ID_MM_SIT_LOGICAL_STACK must be 0 or 1");
+                return NULL;
+            }
+        }
         break;
     }
 
     database = g_build_filename (directory, "cfg.db", NULL);
     return MM_BASE_MODEM (mm_broadband_modem_samsung_sit_new (
         uid, physdev, drivers, mm_plugin_get_name (self), vendor, product, database,
-        use_proxy));
+        use_proxy, logical_stack));
 }
 
 /* The CP exposes an AT service on its own WWAN port, and it is a veneer: the

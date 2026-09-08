@@ -16,6 +16,7 @@
 typedef struct _MMSitClient        MMSitClient;
 typedef struct _MMSitClientClass   MMSitClientClass;
 typedef struct _MMSitClientPrivate MMSitClientPrivate;
+typedef struct _MMSitCp MMSitCp;
 
 struct _MMSitClient {
     GObject parent;
@@ -30,6 +31,8 @@ struct _MMSitClientClass {
 #define MM_SIT_PROXY_SOCKET_DIRECTORY "/run/sit-proxy"
 
 GType        mm_sit_client_get_type   (void);
+void mm_sit_client_set_stack (MMSitClient *self, MMSitCp *cp, guint stack);
+guint mm_sit_client_get_stack (MMSitClient *self);
 /* Own the device node directly. Nothing else can then use the port. */
 MMSitClient *mm_sit_client_new        (const gchar *device);
 /* Go through sit-proxy so debug tools can share the port, falling back to the

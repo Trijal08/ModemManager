@@ -6,6 +6,7 @@
 
 #include "mm-log-object.h"
 #include "mm-sit-client.h"
+#include "mm-sit-cp.h"
 
 enum {
     SIGNAL_INDICATION,
@@ -15,6 +16,8 @@ enum {
 static guint signals[SIGNAL_LAST];
 
 struct _MMSitClientPrivate {
+    MMSitCp             *cp; /* weak; the CP owns its clients */
+    guint                stack;
     gchar               *device;
     MMPortSerialSit     *port;
     /* Device node to retry on if the proxy socket will not open; NULL when we
@@ -91,7 +94,34 @@ port_indication (MMPortSerialSit    *port,
             self->priv->has_carrier_sim_info = TRUE;
         }
     }
+    if (self->priv->cp && message->id == MM_SIT_MESSAGE_DATA_CALL_LIST_CHANGED) {
+        g_autoptr(GArray) calls = NULL;
+
+        if (mm_sit_message_parse_data_call_list (message, &calls, NULL))
+            mm_sit_cp_update_data_calls (self->priv->cp, self->priv->stack, calls);
+    }
     g_signal_emit (self, signals[SIGNAL_INDICATION], 0, message);
+}
+
+void
+mm_sit_client_set_stack (MMSitClient *self, MMSitCp *cp, guint stack)
+{
+    g_return_if_fail (stack < 2 && !self->priv->cp);
+    self->priv->stack = stack;
+    self->priv->cp = cp;
+    g_object_add_weak_pointer (G_OBJECT (cp), (gpointer *) &self->priv->cp);
+}
+
+guint
+mm_sit_client_get_stack (MMSitClient *self)
+{
+    return self->priv->stack;
+}
+
+static MMSitClient *
+control_client (MMSitClient *self)
+{
+    return self->priv->cp ? mm_sit_cp_peek_client (self->priv->cp, 0) : self;
 }
 
 MMSitClient *
@@ -471,6 +501,10 @@ set_radio_poll_ready (MMSitClient *self,
     }
     if (state == ctx->state) {
         self->priv->radio_state_trusted = TRUE;
+        if (state == MM_SIT_RADIO_STATE_OFF && self->priv->cp) {
+            mm_sit_cp_release_stack_data (self->priv->cp, self->priv->stack);
+            g_clear_pointer (&self->priv->cids, g_hash_table_unref);
+        }
         g_task_return_boolean (task, TRUE);
         g_object_unref (task);
         return;
@@ -1089,8 +1123,8 @@ mm_sit_client_get_sim_slot_status (MMSitClient        *self,
 
     task = g_task_new (self, cancellable, callback, user_data);
     request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS,
-                                        mm_sit_client_next_token (self));
-    mm_sit_client_command (self, request, 5, cancellable,
+                                        mm_sit_client_next_token (control_client (self)));
+    mm_sit_client_command (control_client (self), request, 5, cancellable,
                            (GAsyncReadyCallback) get_sim_slot_status_ready, task);
 }
 
@@ -1148,20 +1182,9 @@ mm_sit_client_set_logical_slot_mapping_finish (MMSitClient  *self,
     return g_task_propagate_boolean (G_TASK (res), error);
 }
 
-/*
- * The 0x0701 data-registration state byte only reports registered once the
- * data-call prelude has run: while merely camped the CP answers state 0
- * with the serving RAT (the downstream capture shows 0/rat=14 during the
- * whole camped window, flipping to 1 only ~1.4 s after the initial-attach
- * APN and data profiles are set, right before SETUP_DATA_CALL) -- the
- * vendor RIL's AllowData flow.  Gating ModemManager's 3GPP registration on
- * it therefore deadlocks the core (it requires registration before it
- * connects the bearer that would run those steps).  When 0x0701 reports
- * exactly that hollow idle state, treat a serving PLMN in the operator
- * response as registered -- the camped state that lets the connect
- * sequence do the real work.  Meaningful non-registered states (searching,
- * denied, ...) are preserved.
- */
+/* A serving PLMN is also available while camped without registration. Keep the
+ * raw registration state: the enable path provisions attachment before core
+ * waits for registration, and a roaming subscription must remain roaming. */
 static void
 get_registration_operator_ready (MMSitClient *self,
                                  GAsyncResult *res,
@@ -1180,11 +1203,7 @@ get_registration_operator_ready (MMSitClient *self,
                     registration->registered ? "yes" : "no",
                     registration->radio_technology,
                     operator_info.plmn);
-        if (operator_info.plmn[0] != '\0' && registration->state == 0) {
-            mm_obj_dbg (self->priv->port, "registration check: promoting camped PLMN to registered");
-            registration->registered = TRUE;
-            registration->state = 1;
-        }
+
     } else {
         mm_obj_dbg (self->priv->port, "registration check: no operator response (%s); reg state %u",
                     error ? error->message : "parse failed", registration->state);
@@ -2287,7 +2306,13 @@ boot_config_step (GTask *task)
         request = mm_sit_request_new_oem_config (mm_sit_client_next_token (self), ctx->software_version, &error);
         break;
     case BOOT_CONFIG_STEP_MODEM_CONFIG:
-        request = mm_sit_request_new_set_modem_config (mm_sit_client_next_token (self));
+        if (self->priv->cp && self->priv->stack == 1) {
+            ctx->step++;
+            boot_config_step (task);
+            return;
+        }
+        request = mm_sit_request_new_set_modem_config_count (
+            mm_sit_client_next_token (self), self->priv->cp ? 2 : 1);
         break;
     case BOOT_CONFIG_STEP_LAST:
         self->priv->boot_config_done = TRUE;
@@ -2399,6 +2424,8 @@ cid_acquire (MMSitClient  *self,
              GError      **error)
 {
     guint cid;
+    guint first = CID_FIRST + 15 * self->priv->stack;
+    guint last = CID_LAST + 15 * self->priv->stack;
 
     if (!self->priv->cids)
         self->priv->cids = g_hash_table_new_full (g_direct_hash, g_direct_equal,
@@ -2406,7 +2433,7 @@ cid_acquire (MMSitClient  *self,
 
     /* Reuse rather than duplicate: the same APN asked for twice is the same
      * context, which is also what core's find_best does on the AT path. */
-    for (cid = CID_FIRST; cid <= CID_LAST; cid++) {
+    for (cid = first; cid <= last; cid++) {
         const gchar *held = g_hash_table_lookup (self->priv->cids,
                                                  GUINT_TO_POINTER (cid));
         if (held && g_str_equal (held, apn)) {
@@ -2415,7 +2442,7 @@ cid_acquire (MMSitClient  *self,
         }
     }
 
-    for (cid = CID_FIRST; cid <= CID_LAST; cid++) {
+    for (cid = first; cid <= last; cid++) {
         if (!g_hash_table_contains (self->priv->cids, GUINT_TO_POINTER (cid))) {
             g_hash_table_insert (self->priv->cids, GUINT_TO_POINTER (cid),
                                  g_strdup (apn));
@@ -2425,7 +2452,7 @@ cid_acquire (MMSitClient  *self,
     }
 
     g_set_error (error, MM_CORE_ERROR, MM_CORE_ERROR_TOO_MANY,
-                 "No free context id between %u and %u", CID_FIRST, CID_LAST);
+                 "No free context id between %u and %u", first, last);
     return 0;
 }
 
@@ -2433,6 +2460,8 @@ static void
 cid_release (MMSitClient *self,
              guint8       cid)
 {
+    if (self->priv->cp)
+        mm_sit_cp_release_data (self->priv->cp, cid);
     if (self->priv->cids &&
         g_hash_table_remove (self->priv->cids, GUINT_TO_POINTER ((guint) cid)))
         mm_obj_dbg (self->priv->port, "context id %u released", cid);
@@ -2468,6 +2497,9 @@ cid_confirm (MMSitClient *self,
 
 typedef struct {
     ConnectStep    step;
+    MMSitCp       *cp; /* keeps global ownership alive through asynchronous work */
+    gboolean       setup_sent;
+    gboolean       unexpected_cid;
     /* Reserved for the whole attempt, retries included, and released again if
      * the attempt does not end with a context up. */
     guint8         cid;
@@ -2492,14 +2524,34 @@ typedef struct {
 static void connect_step (GTask *task);
 
 static void
+connect_cleanup_ready (MMSitClient *client, GAsyncResult *res, MMSitCp *cp)
+{
+    g_autoptr(GError) error = NULL;
+
+    if (!mm_sit_client_disconnect_data_finish (client, res, &error))
+        mm_obj_warn (client, "DSDS data cleanup failed; retaining ownership until radio-off: %s", error->message);
+    g_object_unref (cp);
+}
+
+static void
 connect_context_free (ConnectContext *ctx)
 {
     /* Every failure path lands here -- cancelled, refused, timed out, retries
      * exhausted -- so releasing the reservation here is the one place that
      * cannot be forgotten. A context that did come up keeps its cid until the
      * bearer disconnects it. */
-    if (!ctx->cid_kept)
-        cid_release (ctx->client, ctx->cid);
+    if (!ctx->cid_kept) {
+        if (ctx->cp && ctx->unexpected_cid) {
+            /* Do not deactivate an unexpected context owned by another stack. */
+            mm_obj_warn (ctx->client, "Unexpected DSDS CID; retaining data ownership until radio-off");
+        } else if (ctx->cp && ctx->setup_sent)
+            mm_sit_client_disconnect_data (ctx->client, ctx->cid, NULL,
+                                           (GAsyncReadyCallback) connect_cleanup_ready,
+                                           g_object_ref (ctx->cp));
+        else
+            cid_release (ctx->client, ctx->cid);
+    }
+    g_clear_object (&ctx->cp);
     if (ctx->retry_id)
         g_source_remove (ctx->retry_id);
     if (ctx->indication_handler_id)
@@ -2525,7 +2577,7 @@ connect_pick_call (GArray *calls, guint8 cid)
     for (i = 0; i < calls->len; i++) {
         const MMSitDataCall *c = &g_array_index (calls, MMSitDataCall, i);
 
-        if (!c->has_ipv4)
+        if (!c->has_ipv4 && !c->has_ipv6)
             continue;
         if (cid && c->cid == cid)
             return c;
@@ -2640,14 +2692,22 @@ connect_setup_ready (MMSitClient *self,
 
     /* The SETUP response assigns the cid but may not carry the address yet; take
      * it from the matching entry of the latest DATA_CALL_LIST_CHANGED list. */
-    if (!ctx->call.has_ipv4 && ctx->indicated_calls) {
+    if (!ctx->call.has_ipv4 && !ctx->call.has_ipv6 && ctx->indicated_calls) {
         const MMSitDataCall *m = connect_pick_call (ctx->indicated_calls, ctx->call.cid);
 
         if (m)
             ctx->call = *m;
     }
 
-    if (ctx->call.has_ipv4) {
+    if (ctx->cp && ctx->call.cid != ctx->cid) {
+        ctx->unexpected_cid = TRUE;
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "CP assigned unexpected DSDS context %u (requested %u)",
+                                 ctx->call.cid, ctx->cid);
+        g_object_unref (task);
+        return;
+    }
+    if (!ctx->call.cause && (ctx->call.has_ipv4 || ctx->call.has_ipv6)) {
         ctx->step++;
         connect_step (task);
         return;
@@ -2675,7 +2735,7 @@ connect_build_request (MMSitClient   *self,
 
     switch (ctx->step) {
     case CONNECT_STEP_PREFERRED_MODEM:
-        return mm_sit_request_new_set_preferred_modem (mm_sit_client_next_token (self), 0);
+        return mm_sit_request_new_set_preferred_modem (mm_sit_client_next_token (control_client (self)), self->priv->stack);
     case CONNECT_STEP_DATA_PROFILE:
         return mm_sit_request_new_set_data_profile (mm_sit_client_next_token (self), ctx->apn, ctx->pdp, ctx->apn_types, &ctx->auth, error);
     case CONNECT_STEP_ATTACH_APN:
@@ -2723,11 +2783,16 @@ connect_step (GTask *task)
 
         cid_confirm (self, ctx->cid, ctx->call.cid);
         ctx->cid_kept = TRUE;
+        if (ctx->cp)
+            mm_sit_cp_commit_data (ctx->cp, ctx->cid);
         *result = ctx->call;
         g_task_return_pointer (task, result, g_free);
         g_object_unref (task);
         return;
     }
+
+    if (ctx->cp && ctx->step == CONNECT_STEP_ATTACH_APN)
+        ctx->step++;
 
     if (ctx->step == CONNECT_STEP_REGISTRATION) {
         mm_sit_client_get_registration (self,
@@ -2744,11 +2809,13 @@ connect_step (GTask *task)
         return;
     }
 
-    if (ctx->step == CONNECT_STEP_SETUP)
+    if (ctx->step == CONNECT_STEP_SETUP) {
+        ctx->setup_sent = TRUE;
         mm_sit_client_command (self, request, 10, cancellable,
                                (GAsyncReadyCallback) connect_setup_ready, task);
-    else
-        run_checked_command (self, request, 5, cancellable,
+    } else
+        run_checked_command (ctx->step == CONNECT_STEP_PREFERRED_MODEM ? control_client (self) : self,
+                             request, 5, cancellable,
                              (GAsyncReadyCallback) connect_checked_ready, task);
 }
 
@@ -2785,7 +2852,15 @@ mm_sit_client_connect_data (MMSitClient        *self,
         return;
     }
 
+    if (self->priv->cp && !mm_sit_cp_claim_data (self->priv->cp, self->priv->stack, cid, &error)) {
+        if (!mm_sit_cp_data_reserved (self->priv->cp, cid))
+            cid_release (self, cid);
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
     ctx = g_new0 (ConnectContext, 1);
+    ctx->cp = self->priv->cp ? g_object_ref (self->priv->cp) : NULL;
     ctx->cid = cid;
     ctx->apn = g_strdup (apn);
     ctx->pdp = pdp;
@@ -3259,7 +3334,8 @@ mm_sit_client_set_initial_attach_apn (MMSitClient        *self,
     g_autoptr(GByteArray) request = NULL;
     g_autoptr(GError)     error = NULL;
 
-    request = mm_sit_request_new_set_initial_attach_apn (mm_sit_client_next_token (self), apn, pdp, auth, &error);
+    request = mm_sit_request_new_set_initial_attach_apn_for_stack (
+        mm_sit_client_next_token (self), self->priv->stack, apn, pdp, auth, &error);
     if (!request) {
         GTask *task = g_task_new (self, cancellable, callback, user_data);
 
@@ -3497,6 +3573,8 @@ finalize (GObject *object)
 {
     MMSitClient *self = MM_SIT_CLIENT (object);
 
+    if (self->priv->cp)
+        g_object_remove_weak_pointer (G_OBJECT (self->priv->cp), (gpointer *) &self->priv->cp);
     g_free (self->priv->device);
     g_free (self->priv->proxy_fallback_device);
     g_free (self->priv->device_model);

@@ -10,6 +10,7 @@
 #include "mm-port-serial-sit.h"
 #include "mm-sit-carrier-config.h"
 #include "mm-sit-client.h"
+#include "mm-sit-cp.h"
 #include "mm-sit-ims-config.h"
 #include "mm-sit-protocol.h"
 
@@ -1722,6 +1723,11 @@ test_port_command_and_indication (void)
 
 typedef struct {
     gint          peer_fd;
+    gint          control_fd;
+    gboolean      dsds;
+    gboolean      ipv6_only;
+    guint         add_mapping; /* 1: explicit fallback, 2: CP maps asynchronously */
+    guint         callbacks;
     GMainLoop    *loop;
     MMSitDataCall call;
     GError       *error;
@@ -1748,6 +1754,8 @@ read_all (gint    fd,
     return TRUE;
 }
 
+static void reply_request (gint fd, guint16 expected, guint8 *response, gsize response_len);
+
 static gpointer
 client_test_peer (ClientTestContext *ctx)
 {
@@ -1772,16 +1780,23 @@ client_test_peer (ClientTestContext *ctx)
         guint16 request_len;
         guint16 response_len = 12;
 
-        g_assert_true (read_all (ctx->peer_fd, header, sizeof (header)));
+        gint fd = ctx->dsds && expected_ids[i] == MM_SIT_MESSAGE_SET_PREFERRED_DATA_MODEM
+            ? ctx->control_fd : ctx->peer_fd;
+
+        if (ctx->dsds && expected_ids[i] == MM_SIT_MESSAGE_SET_INITIAL_ATTACH_APN)
+            continue;
+        g_assert_true (read_all (fd, header, sizeof (header)));
         request_len = header[4] | (((guint16) header[5]) << 8);
         g_assert_cmpuint (header[2] | (((guint16) header[3]) << 8), ==, expected_ids[i]);
         g_assert_cmpuint (request_len, >=, MM_SIT_HEADER_SIZE);
         if (request_len > MM_SIT_HEADER_SIZE) {
             g_autofree guint8 *body = g_malloc (request_len - MM_SIT_HEADER_SIZE);
 
-            g_assert_true (read_all (ctx->peer_fd, body, request_len - MM_SIT_HEADER_SIZE));
+            g_assert_true (read_all (fd, body, request_len - MM_SIT_HEADER_SIZE));
             /* The requested PDP type has to reach the wire: @0xda of the frame,
              * so 0xda - 8 of the body. */
+            if (ctx->dsds && expected_ids[i] == MM_SIT_MESSAGE_SET_PREFERRED_DATA_MODEM)
+                g_assert_cmpuint (body[4], ==, 1);
             if (expected_ids[i] == MM_SIT_MESSAGE_SETUP_DATA_CALL) {
                 g_assert_cmpuint (body[0xda - MM_SIT_HEADER_SIZE], ==, MM_SIT_PDP_TYPE_IPV4V6);
                 /* @0x0c is the context id the host picked. */
@@ -1828,6 +1843,10 @@ client_test_peer (ClientTestContext *ctx)
             response[140] = 0x05;
         }
 
+        if (ctx->ipv6_only && expected_ids[i] == MM_SIT_MESSAGE_SETUP_DATA_CALL) {
+            response[16] = 2;
+            memset (&response[17], 0, 4);
+        }
         response[0] = MM_SIT_MESSAGE_TYPE_RESPONSE;
         response[2] = header[2];
         response[3] = header[3];
@@ -1835,7 +1854,12 @@ client_test_peer (ClientTestContext *ctx)
         response[5] = response_len >> 8;
         response[6] = header[6];
         response[7] = header[7];
-        g_assert_true (write_all (ctx->peer_fd, response, response_len));
+        g_assert_true (write_all (fd, response, response_len));
+    }
+    if (ctx->dsds) {
+        guint8 ack[12] = { 0 };
+
+        reply_request (ctx->peer_fd, MM_SIT_MESSAGE_DEACTIVATE_DATA_CALL, ack, sizeof (ack));
     }
     return NULL;
 }
@@ -1923,6 +1947,114 @@ test_client_connect_sequence (void)
     g_assert_cmpstr (ctx.call.ipv6, ==, "2001:db8::1");
     g_assert_cmpstr (ctx.call.dns1_v6, ==, "2001:db8::53");
     g_assert_cmpuint (ctx.call.mtu, ==, 1500);
+}
+
+static void
+test_dsds_data_ownership (void)
+{
+    g_autoptr(MMSitClient) first = mm_sit_client_new ("test-sit0");
+    g_autoptr(MMSitClient) second = mm_sit_client_new ("test-sit1");
+    g_autoptr(MMSitCp) cp = mm_sit_cp_new (first, second);
+    g_autoptr(GArray) calls = g_array_new (FALSE, FALSE, sizeof (MMSitDataCall));
+    g_autoptr(GError) error = NULL;
+
+    g_assert_true (mm_sit_cp_claim_data (cp, 0, 2, &error));
+    g_assert_false (mm_sit_cp_claim_data (cp, 0, 2, &error));
+    g_assert_error (error, MM_CORE_ERROR, MM_CORE_ERROR_IN_PROGRESS);
+    g_clear_error (&error);
+    /* Pending setup alone excludes the other stack, even before an address. */
+    mm_sit_cp_update_data_calls (cp, 0, calls);
+    g_assert_false (mm_sit_cp_claim_data (cp, 1, 17, &error));
+    g_assert_error (error, MM_CORE_ERROR, MM_CORE_ERROR_IN_PROGRESS);
+    g_clear_error (&error);
+    mm_sit_cp_commit_data (cp, 2);
+    g_assert_true (mm_sit_cp_claim_data (cp, 0, 3, &error));
+    mm_sit_cp_release_data (cp, 2);
+    g_assert_false (mm_sit_cp_claim_data (cp, 1, 17, &error));
+    g_clear_error (&error);
+    mm_sit_cp_release_data (cp, 3);
+    g_assert_true (mm_sit_cp_claim_data (cp, 1, 17, &error));
+    mm_sit_cp_commit_data (cp, 17);
+    /* A confirmed network deactivation frees the preference, too. */
+    mm_sit_cp_update_data_calls (cp, 1, calls);
+    g_assert_true (mm_sit_cp_claim_data (cp, 0, 2, &error));
+    g_assert_no_error (error);
+}
+
+static void
+client_test_disconnect_ready (MMSitClient *client, GAsyncResult *res, ClientTestContext *ctx)
+{
+    ctx->completed = mm_sit_client_disconnect_data_finish (client, res, &ctx->error);
+    g_main_loop_quit (ctx->loop);
+}
+
+static void
+test_client_dsds_secondary (void)
+{
+    ClientTestContext ctx = { .dsds = TRUE, .ipv6_only = TRUE, .rounds = 1 };
+    gint primary[2], secondary[2];
+    guint timeout_id;
+    g_autoptr(MMPortSerialSit) port0 = NULL;
+    g_autoptr(MMPortSerialSit) port1 = NULL;
+    g_autoptr(MMSitClient) first = NULL;
+    g_autoptr(MMSitClient) second = NULL;
+    g_autoptr(MMSitCp) cp = NULL;
+    g_autoptr(GThread) peer = NULL;
+    g_autoptr(GError) error = NULL;
+
+    g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, primary), ==, 0);
+    g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, secondary), ==, 0);
+    port0 = MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+        MM_PORT_DEVICE, "test-dsds-sit0", MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+        MM_PORT_TYPE, MM_PORT_TYPE_SIT, MM_PORT_SERIAL_FD, primary[0], NULL));
+    port1 = MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+        MM_PORT_DEVICE, "test-dsds-sit1", MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+        MM_PORT_TYPE, MM_PORT_TYPE_SIT, MM_PORT_SERIAL_FD, secondary[0], NULL));
+    first = mm_sit_client_new_from_port (port0);
+    second = mm_sit_client_new_from_port (port1);
+    g_assert_true (mm_sit_client_open (first, &error));
+    g_assert_true (mm_sit_client_open (second, &error));
+    cp = mm_sit_cp_new (first, second);
+    ctx.peer_fd = secondary[1];
+    ctx.control_fd = primary[1];
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    peer = g_thread_new ("sit-dsds-peer", (GThreadFunc) client_test_peer, &ctx);
+    mm_sit_client_connect_data (second, "wbdata", MM_SIT_PDP_TYPE_IPV4V6,
+                                MM_SIT_APN_TYPE_DEFAULT, NULL, NULL,
+                                (GAsyncReadyCallback) client_test_connect_ready, &ctx);
+    g_assert_false (mm_sit_cp_claim_data (cp, 0, 2, &error));
+    g_assert_error (error, MM_CORE_ERROR, MM_CORE_ERROR_IN_PROGRESS);
+    g_clear_error (&error);
+    timeout_id = g_timeout_add_seconds (10, (GSourceFunc) client_test_timeout, &ctx);
+    g_main_loop_run (ctx.loop);
+    if (!ctx.timed_out)
+        g_source_remove (timeout_id);
+    g_assert_false (ctx.timed_out);
+    g_assert_no_error (ctx.error);
+    g_assert_true (ctx.completed);
+    g_assert_cmpuint (ctx.requested_cid[0], ==, 17);
+    g_assert_cmpuint (ctx.call.cid, ==, 17);
+    g_assert_false (ctx.call.has_ipv4);
+    g_assert_true (ctx.call.has_ipv6);
+    g_assert_false (mm_sit_cp_claim_data (cp, 0, 2, &error));
+    g_clear_error (&error);
+    ctx.completed = FALSE;
+    mm_sit_client_disconnect_data (second, 17, NULL,
+                                   (GAsyncReadyCallback) client_test_disconnect_ready, &ctx);
+    timeout_id = g_timeout_add_seconds (5, (GSourceFunc) client_test_timeout, &ctx);
+    g_main_loop_run (ctx.loop);
+    g_assert_false (ctx.timed_out);
+    g_source_remove (timeout_id);
+    g_assert_true (ctx.completed);
+    g_assert_no_error (ctx.error);
+    g_assert_true (mm_sit_cp_claim_data (cp, 0, 2, &error));
+    g_assert_no_error (error);
+    g_thread_join (g_steal_pointer (&peer));
+    mm_sit_client_close (first);
+    mm_sit_client_close (second);
+    close (primary[1]);
+    close (secondary[1]);
+    g_main_loop_unref (ctx.loop);
 }
 
 static gpointer
@@ -2070,6 +2202,8 @@ client_boot_config_test_peer (ClientTestContext *ctx)
              * so 0xda - 8 of the body. */
             if (expected_ids[i] == MM_SIT_MESSAGE_SETUP_DATA_CALL)
                 g_assert_cmpuint (body[0xda - MM_SIT_HEADER_SIZE], ==, MM_SIT_PDP_TYPE_IPV4V6);
+            if (expected_ids[i] == MM_SIT_MESSAGE_SET_MODEM_CONFIG)
+                g_assert_cmpuint (body[4], ==, ctx->dsds ? 1 : 0);
             /* And the software version has to be the one the CP just gave,
              * not a constant: @12 of the frame, ASCII. */
             if (expected_ids[i] == MM_SIT_MESSAGE_OEM_CONFIG) {
@@ -2095,6 +2229,191 @@ client_boot_config_test_peer (ClientTestContext *ctx)
         g_assert_true (write_all (ctx->peer_fd, response, response_len));
     }
     return NULL;
+}
+
+static void
+reply_request (gint fd, guint16 expected, guint8 *response, gsize response_len)
+{
+    guint8 header[8];
+    guint16 request_len;
+    g_autofree guint8 *body = NULL;
+
+    g_assert_true (read_all (fd, header, sizeof (header)));
+    g_assert_cmpuint (header[2] | ((guint16) header[3] << 8), ==, expected);
+    request_len = header[4] | ((guint16) header[5] << 8);
+    g_assert_cmpuint (request_len, >=, 8);
+    body = g_malloc (request_len);
+    g_assert_true (read_all (fd, body, request_len - 8));
+    if (expected == MM_SIT_MESSAGE_SET_RADIO_POWER)
+        g_assert_cmpuint (body[4], ==, MM_SIT_RADIO_STATE_OFF);
+    if (expected == MM_SIT_MESSAGE_DEACTIVATE_DATA_CALL)
+        g_assert_cmpuint (body[4], ==, 17);
+    if (expected == MM_SIT_MESSAGE_SET_LOGICAL_SLOT_MAPPING) {
+        static const guint8 mapping[] = { 0, 0, 0, 0, 2, 1, 0, 0, 0, 0, 0, 0, 0 };
+
+        g_assert_cmpmem (body, request_len - 8, mapping, sizeof (mapping));
+    }
+    response[0] = MM_SIT_MESSAGE_TYPE_RESPONSE;
+    set_le16 (&response[2], expected);
+    set_le16 (&response[4], response_len);
+    response[6] = header[6];
+    response[7] = header[7];
+    g_assert_true (write_all (fd, response, response_len));
+}
+
+static gpointer
+cp_prepare_peer (ClientTestContext *ctx)
+{
+    guint8 ack[12] = { 0 };
+    guint8 radio[16] = { 0 };
+    guint8 slots[433] = { 0 };
+    guint i;
+
+    client_boot_config_test_peer (ctx);
+    radio[12] = 0; /* GET reports off/on as 0/1; SET uses 1/2. */
+    slots[12] = 2;
+    for (i = 0; i < 2; i++) {
+        guint8 *slot = &slots[13 + 105 * i];
+
+        slot[0] = 1;
+        slot[52] = 1;
+        slot[53] = 10;
+        memset (&slot[54], 0x98, 10);
+        slot[64] = 1 - i; /* physical 0 -> stack 1, physical 1 -> stack 0 */
+        slot[65] = 1;
+    }
+    reply_request (ctx->peer_fd, MM_SIT_MESSAGE_SET_RADIO_POWER, ack, sizeof (ack));
+    reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_RADIO_POWER, radio, sizeof (radio));
+    if (ctx->add_mapping) {
+        slots[13 + 64] = 0xff;
+        slots[13 + 65] = 0;
+    }
+    reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS, slots, sizeof (slots));
+    if (ctx->add_mapping) {
+        if (ctx->add_mapping == 1) {
+            for (i = 0; i < 5; i++)
+                reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS, slots, sizeof (slots));
+            ack[10] = 7; /* CP may reject a mapping that nevertheless appears. */
+            reply_request (ctx->peer_fd, MM_SIT_MESSAGE_SET_LOGICAL_SLOT_MAPPING, ack, sizeof (ack));
+            ack[10] = 0;
+        }
+        slots[13 + 64] = 1;
+        slots[13 + 65] = 1;
+        reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS, slots, sizeof (slots));
+    }
+    reply_request (ctx->control_fd, MM_SIT_MESSAGE_SET_RADIO_POWER, ack, sizeof (ack));
+    reply_request (ctx->control_fd, MM_SIT_MESSAGE_GET_RADIO_POWER, radio, sizeof (radio));
+    reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS, slots, sizeof (slots));
+    return NULL;
+}
+
+static void
+cp_prepare_ready (MMSitCp *cp, GAsyncResult *res, ClientTestContext *ctx)
+{
+    g_assert_true (mm_sit_cp_prepare_finish (cp, res, &ctx->error));
+    g_assert_no_error (ctx->error);
+    if (++ctx->callbacks == 2)
+        g_main_loop_quit (ctx->loop);
+}
+
+static void
+test_cp_prepare_coalesced (gconstpointer data)
+{
+    ClientTestContext ctx = { .dsds = TRUE, .add_mapping = GPOINTER_TO_UINT (data) };
+    gint sockets[2][2];
+    guint timeout_id, i;
+    g_autoptr(GPtrArray) clients = g_ptr_array_new_with_free_func (g_object_unref);
+    g_autoptr(MMSitCp) cp = NULL;
+    g_autoptr(GThread) peer = NULL;
+    g_autoptr(GError) error = NULL;
+
+    for (i = 0; i < 2; i++) {
+        g_autofree gchar *name = g_strdup_printf ("prepare-sit%u", i);
+        g_autoptr(MMPortSerialSit) port = NULL;
+        MMSitClient *client;
+
+        g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, sockets[i]), ==, 0);
+        port = MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+            MM_PORT_DEVICE, name, MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+            MM_PORT_TYPE, MM_PORT_TYPE_SIT, MM_PORT_SERIAL_FD, sockets[i][0], NULL));
+        client = mm_sit_client_new_from_port (port);
+        g_assert_true (mm_sit_client_open (client, &error));
+        g_ptr_array_add (clients, client);
+    }
+    cp = mm_sit_cp_new (g_ptr_array_index (clients, 0), g_ptr_array_index (clients, 1));
+    ctx.peer_fd = sockets[0][1];
+    ctx.control_fd = sockets[1][1];
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    peer = g_thread_new ("cp-prepare", (GThreadFunc) cp_prepare_peer, &ctx);
+    mm_sit_cp_prepare (cp, (GAsyncReadyCallback) cp_prepare_ready, &ctx);
+    mm_sit_cp_prepare (cp, (GAsyncReadyCallback) cp_prepare_ready, &ctx);
+    timeout_id = g_timeout_add_seconds (10, (GSourceFunc) client_test_timeout, &ctx);
+    g_main_loop_run (ctx.loop);
+    g_assert_false (ctx.timed_out);
+    g_source_remove (timeout_id);
+    g_assert_cmpuint (ctx.callbacks, ==, 2);
+    g_thread_join (g_steal_pointer (&peer));
+    for (i = 0; i < 2; i++) {
+        mm_sit_client_close (g_ptr_array_index (clients, i));
+        close (sockets[i][1]);
+    }
+    g_main_loop_unref (ctx.loop);
+}
+
+static gpointer
+registration_camped_peer (ClientTestContext *ctx)
+{
+    guint8 registration[86] = { 0 };
+    guint8 operator[119] = { 0 };
+
+    registration[15] = 14;
+    memcpy (&operator[12], "26202#", 6);
+    reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_DATA_REGISTRATION, registration, sizeof (registration));
+    reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_OPERATOR, operator, sizeof (operator));
+    return NULL;
+}
+
+static void
+registration_camped_ready (MMSitClient *client, GAsyncResult *res, ClientTestContext *ctx)
+{
+    MMSitRegistration registration;
+
+    g_assert_true (mm_sit_client_get_registration_finish (client, res, &registration, &ctx->error));
+    g_assert_no_error (ctx->error);
+    g_assert_false (registration.registered);
+    g_assert_cmpuint (registration.state, ==, 0);
+    g_main_loop_quit (ctx->loop);
+}
+
+static void
+test_registration_camped (void)
+{
+    ClientTestContext ctx = { 0 };
+    gint sockets[2];
+    guint timeout_id;
+    g_autoptr(MMPortSerialSit) port = NULL;
+    g_autoptr(MMSitClient) client = NULL;
+    g_autoptr(GThread) peer = NULL;
+    g_autoptr(GError) error = NULL;
+
+    g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    port = MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+        MM_PORT_DEVICE, "camped-sit0", MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+        MM_PORT_TYPE, MM_PORT_TYPE_SIT, MM_PORT_SERIAL_FD, sockets[0], NULL));
+    client = mm_sit_client_new_from_port (port);
+    g_assert_true (mm_sit_client_open (client, &error));
+    ctx.peer_fd = sockets[1];
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    peer = g_thread_new ("camped-registration", (GThreadFunc) registration_camped_peer, &ctx);
+    mm_sit_client_get_registration (client, NULL, (GAsyncReadyCallback) registration_camped_ready, &ctx);
+    timeout_id = g_timeout_add_seconds (5, (GSourceFunc) client_test_timeout, &ctx);
+    g_main_loop_run (ctx.loop);
+    g_assert_false (ctx.timed_out);
+    g_source_remove (timeout_id);
+    g_thread_join (g_steal_pointer (&peer));
+    mm_sit_client_close (client);
+    close (sockets[1]);
+    g_main_loop_unref (ctx.loop);
 }
 
 static void
@@ -2470,6 +2789,12 @@ main (int argc,
     g_test_add_func ("/MM/sit/ims/config-user-agent", test_ims_config_user_agent);
     g_test_add_func ("/MM/sit/client/radio-transition", test_client_radio_transition);
     g_test_add_func ("/MM/sit/client/boot-config", test_client_boot_config);
+    g_test_add_func ("/MM/sit/dsds/data-ownership", test_dsds_data_ownership);
+    g_test_add_data_func ("/MM/sit/dsds/prepare-coalesced", NULL, test_cp_prepare_coalesced);
+    g_test_add_data_func ("/MM/sit/dsds/prepare-add-mapping", GUINT_TO_POINTER (1), test_cp_prepare_coalesced);
+    g_test_add_data_func ("/MM/sit/dsds/prepare-automatic-mapping", GUINT_TO_POINTER (2), test_cp_prepare_coalesced);
+    g_test_add_func ("/MM/sit/client/camped-is-unregistered", test_registration_camped);
+    g_test_add_func ("/MM/sit/dsds/secondary-connect", test_client_dsds_secondary);
     g_test_add_func ("/MM/sit/decode/registration-failed", test_parse_registration_failed);
 
     return g_test_run ();

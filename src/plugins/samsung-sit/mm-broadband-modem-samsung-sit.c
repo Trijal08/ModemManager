@@ -22,6 +22,7 @@
 #include "mm-sms-samsung-sit.h"
 #include "mm-sit-carrier-config.h"
 #include "mm-sit-ims.h"
+#include "mm-sit-cp.h"
 #include "mm-utils.h"
 
 static void iface_modem_init      (MMIfaceModemInterface     *iface);
@@ -32,6 +33,8 @@ static void iface_modem_time_init (MMIfaceModemTimeInterface *iface);
 static void iface_modem_voice_init (MMIfaceModemVoiceInterface *iface);
 
 struct _MMBroadbandModemSamsungSitPrivate {
+    MMSitCp     *cp;
+    gint         logical_stack; /* -1: legacy single-active SIM switching */
     GPtrArray   *clients;
     MMSitClient *client; /* borrowed primary logical-stack client */
     /* The CP's IMS stack, on the primary client's port. One per stack: the port
@@ -1304,6 +1307,34 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
     }
 
     ports = g_list_sort (ports, compare_sit_ports);
+    if (self->priv->logical_stack >= 0) {
+        MMPort *port = MM_PORT (ports->data);
+        g_autofree gchar *expected_suffix = g_strdup_printf ("sit%d", self->priv->logical_stack);
+
+        if (g_list_length (ports) != 1 ||
+            !g_str_has_suffix (mm_port_get_device (port), expected_suffix)) {
+            g_set_error_literal (error, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "DSDS modem must own exactly its configured SIT port");
+            g_list_free_full (ports, g_object_unref);
+            return NULL;
+        }
+        self->priv->cp = mm_sit_cp_get (mm_base_modem_get_physdev (MM_BASE_MODEM (self)),
+                                       mm_port_get_device (port), self->priv->use_proxy, error);
+        if (self->priv->cp) {
+            self->priv->client = mm_sit_cp_peek_client (self->priv->cp, self->priv->logical_stack);
+            mm_sit_client_set_device_info (
+                self->priv->client,
+                mm_kernel_device_get_property (mm_port_peek_kernel_device (port), "ID_MM_SIT_DEVICE_MODEL"),
+                mm_kernel_device_get_property (mm_port_peek_kernel_device (port), "ID_MM_SIT_DEVICE_BUILD"),
+                mm_kernel_device_get_property (mm_port_peek_kernel_device (port), "ID_MM_SIT_DEVICE_CODENAME"));
+            mm_obj_info (self, "DSDS logical stack %d on %s", self->priv->logical_stack,
+                         mm_port_get_device (port));
+        }
+        g_list_free_full (ports, g_object_unref);
+        if (!self->priv->client)
+            return NULL;
+        goto client_ready;
+    }
     self->priv->clients = g_ptr_array_new_with_free_func (g_object_unref);
     for (l = ports; l; l = g_list_next (l)) {
         MMPort      *port = MM_PORT (l->data);
@@ -1353,7 +1384,8 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
     }
 
     self->priv->client = g_ptr_array_index (self->priv->clients, 0);
-    g_signal_connect (self->priv->client, "indication", G_CALLBACK (sit_indication), self);
+client_ready:
+    g_signal_connect_object (self->priv->client, "indication", G_CALLBACK (sit_indication), self, 0);
     {
         /* ims.db sits beside the carrier-config database rather than being
          * configured separately: both are per-carrier data for the same modem,
@@ -1368,7 +1400,7 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
             directory = g_path_get_dirname (mapping);
             ims_database = g_build_filename (directory, "ims.db", NULL);
         }
-        self->priv->ims = mm_sit_ims_new (self->priv->client, 0, ims_database);
+        self->priv->ims = mm_sit_ims_new (self->priv->client, mm_sit_client_get_stack (self->priv->client), ims_database);
     }
     g_signal_connect_swapped (self->priv->ims, MM_SIT_IMS_SIGNAL_CALLS_CHANGED,
                               G_CALLBACK (ims_calls_changed), self);
@@ -2726,8 +2758,8 @@ load_sim_slots_ready (MMSitClient *client,
         for (j = 0; j < slot->port_count; j++) {
             const MMSitSimPort *port = &slot->ports[j];
 
-            if (port->logical_slot_id == 0) {
-                ctx->primary_sim_slot = i + 1;
+            if (port->logical_slot_id == (guint) MAX (self->priv->logical_stack, 0)) {
+                ctx->primary_sim_slot = self->priv->logical_stack >= 0 ? 1 : i + 1;
                 primary_port = port;
             }
             if (!active_port && port->state == 1)
@@ -2739,6 +2771,8 @@ load_sim_slots_ready (MMSitClient *client,
          * one in ModemManager's slot model; a secondary or stale active
          * port must not mark the non-primary SIM as active. */
         active = primary_port != NULL;
+        if (self->priv->logical_stack >= 0 && !active)
+            continue;
         identity_port = (primary_port && primary_port->state == 1) ? primary_port :
                         active_port ? active_port :
                         (primary_port && primary_port->iccid_len) ? primary_port :
@@ -2768,7 +2802,7 @@ load_sim_slots_ready (MMSitClient *client,
                          active ?
                          mm_sim_samsung_sit_new_initialized (MM_BASE_MODEM (self),
                                                              G_OBJECT (self),
-                                                             i + 1,
+                                                             self->priv->logical_stack >= 0 ? 1 : i + 1,
                                                              active,
                                                              iccid,
                                                              eid) :
@@ -2788,19 +2822,21 @@ load_sim_slots_ready (MMSitClient *client,
         if (ctx->attempts_left > 0) {
             ctx->attempts_left--;
             g_clear_pointer (&ctx->sim_slots, g_ptr_array_unref);
-            mm_obj_dbg (self, "SIT slot status has no mapping for logical stack 0 yet; retrying");
+            mm_obj_dbg (self, "SIT slot status has no mapping for logical stack %d yet; retrying",
+                        MAX (self->priv->logical_stack, 0));
             g_timeout_add_seconds (LOAD_SIM_SLOTS_RETRY_SECS,
                                    (GSourceFunc) load_sim_slots_retry, task);
             return;
         }
         g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
-                                 "SIT slot status has no mapping for logical stack 0");
+                                 "SIT slot status has no mapping for logical stack %d",
+                                 MAX (self->priv->logical_stack, 0));
         g_object_unref (task);
         return;
     }
 
-    mm_obj_info (self, "loaded %u physical SIM slots; slot %u maps to logical stack 0",
-                 status.slot_count, ctx->primary_sim_slot);
+    mm_obj_info (self, "loaded %u SIM slots; slot %u maps to logical stack %d",
+                 ctx->sim_slots->len, ctx->primary_sim_slot, MAX (self->priv->logical_stack, 0));
     g_task_return_boolean (task, TRUE);
     g_object_unref (task);
 }
@@ -3030,6 +3066,13 @@ set_primary_sim_slot (MMIfaceModem        *iface,
     GTask                      *task;
 
     task = g_task_new (iface, NULL, callback, user_data);
+    if (self->priv->logical_stack >= 0) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_UNSUPPORTED,
+                                 "DSDS exposes one modem per SIM; select the other modem instead of remapping slots");
+        g_object_unref (task);
+        return;
+    }
+
     client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
     if (!client) {
         g_task_return_error (task, error);
@@ -4969,6 +5012,18 @@ initialization_started_finish (MMBroadbandModem  *self,
 }
 
 static void
+cp_initialization_ready (MMSitCp *cp, GAsyncResult *res, GTask *task)
+{
+    g_autoptr(GError) error = NULL;
+
+    if (!mm_sit_cp_prepare_finish (cp, res, &error))
+        g_task_return_error (task, g_steal_pointer (&error));
+    else
+        g_task_return_pointer (task, g_task_get_task_data (task), NULL);
+    g_object_unref (task);
+}
+
+static void
 parent_initialization_started_ready (MMBroadbandModem *self,
                                      GAsyncResult     *res,
                                      GTask            *task)
@@ -4981,6 +5036,19 @@ parent_initialization_started_ready (MMBroadbandModem *self,
     if (error)
         mm_obj_dbg (self, "couldn't start parent initialization: %s", error->message);
 
+    if (MM_BROADBAND_MODEM_SAMSUNG_SIT (self)->priv->logical_stack >= 0) {
+        MMBroadbandModemSamsungSit *sit = MM_BROADBAND_MODEM_SAMSUNG_SIT (self);
+
+        g_clear_error (&error);
+        if (!mm_broadband_modem_samsung_sit_peek_client (sit, &error)) {
+            g_task_return_error (task, g_steal_pointer (&error));
+            g_object_unref (task);
+            return;
+        }
+        g_task_set_task_data (task, parent_ctx, NULL);
+        mm_sit_cp_prepare (sit->priv->cp, (GAsyncReadyCallback) cp_initialization_ready, task);
+        return;
+    }
     g_task_return_pointer (task, parent_ctx, NULL);
     g_object_unref (task);
 }
@@ -5041,7 +5109,8 @@ mm_broadband_modem_samsung_sit_new (const gchar  *device,
                                     guint16       vendor_id,
                                     guint16       product_id,
                                     const gchar  *carrier_config_database,
-                                    gboolean      use_proxy)
+                                    gboolean      use_proxy,
+                                    gint          logical_stack)
 {
     MMBroadbandModemSamsungSit *self;
 
@@ -5064,6 +5133,7 @@ mm_broadband_modem_samsung_sit_new (const gchar  *device,
     /* Not a construct property: nothing reads it until peek_client, which is
      * well after construction. */
     self->priv->use_proxy = use_proxy;
+    self->priv->logical_stack = logical_stack;
     return self;
 }
 
@@ -5078,8 +5148,11 @@ dispose (GObject *object)
     }
     g_clear_object (&self->priv->initial_eps_bearer_settings);
     g_clear_object (&self->priv->ims);
+    if (self->priv->client)
+        g_signal_handlers_disconnect_by_data (self->priv->client, self);
     self->priv->client = NULL;
     g_clear_pointer (&self->priv->clients, g_ptr_array_unref);
+    g_clear_object (&self->priv->cp);
     G_OBJECT_CLASS (mm_broadband_modem_samsung_sit_parent_class)->dispose (object);
 }
 
@@ -5101,6 +5174,7 @@ mm_broadband_modem_samsung_sit_init (MMBroadbandModemSamsungSit *self)
     self->priv = G_TYPE_INSTANCE_GET_PRIVATE (self,
                                               MM_TYPE_BROADBAND_MODEM_SAMSUNG_SIT,
                                               MMBroadbandModemSamsungSitPrivate);
+    self->priv->logical_stack = -1;
 }
 
 static void

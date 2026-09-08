@@ -601,6 +601,11 @@ GByteArray *mm_sit_request_new_oem_config             (guint16                to
                                                        const gchar           *software_version,
                                                        GError               **error);
 GByteArray *mm_sit_request_new_set_modem_config       (guint16                token);
+GByteArray *mm_sit_request_new_set_modem_config_count (guint16 token, guint8 count);
+GByteArray *mm_sit_request_new_set_initial_attach_apn_for_stack
+                                                      (guint16 token, guint8 stack,
+                                                       const gchar *apn, MMSitPdpType pdp,
+                                                       const MMSitApnAuth *auth, GError **error);
 GByteArray *mm_sit_request_new_device_info            (guint16                token,
                                                        const gchar           *model,
                                                        const gchar           *build,
