@@ -54,10 +54,12 @@ if enable_tests and plugins_options['samsung-sit']
       'samsung-sit/mm-sit-client.c',
       'samsung-sit/mm-sit-cp.c',
       'samsung-sit/mm-sit-ims-config.c',
+      'samsung-sit/mm-sit-ims.c',
       'samsung-sit/tests/test-sit-protocol.c',
     ),
     include_directories: [top_inc, src_inc, include_directories('samsung-sit')],
     dependencies: [libhelpers_dep, libport_dep, sqlite3_dep, samsung_sit_ffi_dep],
+    c_args: ['-DMM_SIT_IMS_RETRY_TIMEOUT_SECS=1'],
   )
   test('samsung-sit-protocol', samsung_sit_protocol_test)
 endif

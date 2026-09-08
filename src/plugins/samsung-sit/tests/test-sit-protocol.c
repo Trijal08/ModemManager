@@ -2,6 +2,7 @@
 /* Copyright (C) 2026 The ModemManager authors */
 
 #include <glib.h>
+#include <glib-unix.h>
 #include <glib/gstdio.h>
 #include <sqlite3.h>
 #include <sys/socket.h>
@@ -12,6 +13,7 @@
 #include "mm-sit-client.h"
 #include "mm-sit-cp.h"
 #include "mm-sit-ims-config.h"
+#include "mm-sit-ims.h"
 #include "mm-sit-protocol.h"
 
 static void
@@ -2567,6 +2569,185 @@ build_test_ims_db (void)
     return path;
 }
 
+typedef struct {
+    guint setups;
+    guint stops;
+    guint pdn_infos;
+    guint deactivations;
+    guint succeed_on;
+} ImsRetryPeer;
+
+/* Exercise the real IMS/client state machines over the SIT socket. The test
+ * target uses a one-second retry delay; production keeps thirty seconds. */
+static gboolean
+ims_retry_peer_ready (gint fd, GIOCondition condition, ImsRetryPeer *peer)
+{
+    guint8 header[8];
+    guint8 response[304] = { 0 };
+    guint16 id, length, response_len = 12;
+    g_autofree guint8 *body = NULL;
+
+    g_assert_cmpuint (condition & (G_IO_HUP | G_IO_ERR), ==, 0);
+    g_assert_true (read_all (fd, header, sizeof (header)));
+    id = header[2] | ((guint16) header[3] << 8);
+    length = header[4] | ((guint16) header[5] << 8);
+    g_assert_cmpuint (length, >=, sizeof (header));
+    body = g_malloc (length);
+    g_assert_true (read_all (fd, body, length - sizeof (header)));
+
+    switch (id) {
+    case MM_SIT_MESSAGE_SETUP_DATA_CALL:
+        g_assert_cmpuint (length, >, 218);
+        g_assert_cmpmem (&body[8], 4, "ims", 4);
+        peer->setups++;
+        response_len = sizeof (response);
+        response[14] = body[4]; /* requested CID */
+        if (!peer->succeed_on || peer->setups < peer->succeed_on)
+            set_le16 (&response[12], 33);
+        else {
+            response[15] = 1;
+            response[16] = 1; /* IPv4 grant with a P-CSCF */
+            response[17] = 10;
+            response[20] = 2;
+            response[79] = 192;
+            response[81] = 2;
+            response[82] = 1;
+        }
+        break;
+    case 0x0d06: /* AIMS_DEREGISTRATION */
+    case 0x0d39: /* AIMS_STACK_START_REQ */
+    case 0x0d07: /* AIMS_HIDDEN_MENU */
+        break;
+    case 0x0d3a: /* AIMS_STACK_STOP_REQ */
+        peer->stops++;
+        break;
+    case 0x0d08: /* AIMS_ADD_PDN_INFO */
+        peer->pdn_infos++;
+        break;
+    case MM_SIT_MESSAGE_DEACTIVATE_DATA_CALL:
+        peer->deactivations++;
+        break;
+    default:
+        g_assert_not_reached ();
+    }
+    response[0] = MM_SIT_MESSAGE_TYPE_RESPONSE;
+    set_le16 (&response[2], id);
+    set_le16 (&response[4], response_len);
+    response[6] = header[6];
+    response[7] = header[7];
+    g_assert_true (write_all (fd, response, response_len));
+    return G_SOURCE_CONTINUE;
+}
+
+typedef struct {
+    GMainLoop *loop;
+    guint *counter;
+    guint target;
+} ImsRetryWait;
+
+static gboolean
+ims_retry_wait_poll (ImsRetryWait *wait)
+{
+    if (*wait->counter < wait->target)
+        return G_SOURCE_CONTINUE;
+    g_main_loop_quit (wait->loop);
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean
+ims_retry_wait_done (GMainLoop *loop)
+{
+    g_main_loop_quit (loop);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+ims_retry_wait (guint *counter, guint target)
+{
+    g_autoptr(GMainLoop) loop = g_main_loop_new (NULL, FALSE);
+    ImsRetryWait wait = { loop, counter, target };
+    guint poll_id, timeout_id;
+
+    poll_id = g_timeout_add (10, (GSourceFunc) ims_retry_wait_poll, &wait);
+    timeout_id = g_timeout_add_seconds (8, (GSourceFunc) ims_retry_wait_done, loop);
+    g_main_loop_run (loop);
+    if (*counter < target) {
+        g_source_remove (poll_id);
+        g_assert_cmpuint (*counter, >=, target);
+    }
+    g_source_remove (timeout_id);
+}
+
+static void
+ims_retry_check_quiet (MMSitIms *ims)
+{
+    g_autoptr(GMainLoop) loop = g_main_loop_new (NULL, FALSE);
+    guint i;
+
+    /* Normal registration/RAT/operator updates must not defeat either the
+     * exhausted budget or successful provisioning. Observe beyond a retry. */
+    for (i = 0; i < 3; i++) {
+        mm_sit_ims_update_access_tech (ims, MM_MODEM_ACCESS_TECHNOLOGY_LTE);
+        mm_sit_ims_set_registered (ims, TRUE);
+        mm_sit_ims_set_operator_code (ims, i % 2 ? "00102" : "00101");
+    }
+    g_timeout_add (2200, (GSourceFunc) ims_retry_wait_done, loop);
+    g_main_loop_run (loop);
+}
+
+static void
+test_ims_provisioning_retries (gconstpointer data)
+{
+    gboolean recover = GPOINTER_TO_UINT (data);
+    ImsRetryPeer peer = { .succeed_on = recover ? 3 : 0 };
+    g_autofree gchar *database = build_test_ims_db ();
+    g_autofree gchar *directory = g_path_get_dirname (database);
+    g_autoptr(MMPortSerialSit) port = NULL;
+    g_autoptr(MMSitClient) client = NULL;
+    g_autoptr(MMSitIms) ims = NULL;
+    g_autoptr(GError) error = NULL;
+    gint sockets[2];
+    guint peer_id;
+
+    g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    port = MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+        MM_PORT_DEVICE, "ims-retry-sit0", MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+        MM_PORT_TYPE, MM_PORT_TYPE_SIT, MM_PORT_SERIAL_FD, sockets[0], NULL));
+    client = mm_sit_client_new_from_port (port);
+    g_assert_true (mm_sit_client_open (client, &error));
+    g_assert_no_error (error);
+    peer_id = g_unix_fd_add (sockets[1], G_IO_IN | G_IO_HUP | G_IO_ERR,
+                             (GUnixFDSourceFunc) ims_retry_peer_ready, &peer);
+    ims = mm_sit_ims_new (client, 0, database);
+    mm_sit_ims_set_device_identity (ims, &test_device);
+    mm_sit_ims_update_access_tech (ims, MM_MODEM_ACCESS_TECHNOLOGY_LTE);
+    mm_sit_ims_set_registered (ims, TRUE);
+    ims_retry_wait (recover ? &peer.pdn_infos : &peer.stops, 1);
+    ims_retry_check_quiet (ims);
+    g_assert_cmpuint (peer.setups, ==, 3);
+    g_assert_cmpuint (peer.pdn_infos, ==, recover ? 1 : 0);
+    g_assert_cmpuint (peer.stops, ==, recover ? 0 : 1);
+
+    if (!recover) {
+        /* A new registration cycle gets the full budget again. */
+        mm_sit_ims_set_registered (ims, FALSE);
+        mm_sit_ims_set_registered (ims, TRUE);
+        ims_retry_wait (&peer.stops, 3);
+        ims_retry_check_quiet (ims);
+        g_assert_cmpuint (peer.setups, ==, 6);
+    }
+    mm_sit_ims_stop (ims);
+    ims_retry_wait (&peer.stops, recover ? 1 : 4);
+    if (recover)
+        ims_retry_wait (&peer.deactivations, 1);
+    g_clear_object (&ims);
+    g_source_remove (peer_id);
+    mm_sit_client_close (client);
+    close (sockets[1]);
+    g_unlink (database);
+    g_rmdir (directory);
+}
+
 /* An unknown carrier is the defaults, not a failure: a CP with sane timers and
  * a valid User-Agent is worth trying. */
 static void
@@ -2787,6 +2968,8 @@ main (int argc,
     g_test_add_func ("/MM/sit/ims/config-identity", test_ims_config_identity_discriminators);
     g_test_add_func ("/MM/sit/ims/config-carrier-overrides", test_ims_config_carrier_overrides_replace);
     g_test_add_func ("/MM/sit/ims/config-user-agent", test_ims_config_user_agent);
+    g_test_add_data_func ("/MM/sit/ims/provisioning-retry-limit", NULL, test_ims_provisioning_retries);
+    g_test_add_data_func ("/MM/sit/ims/provisioning-retry-recovery", GUINT_TO_POINTER (1), test_ims_provisioning_retries);
     g_test_add_func ("/MM/sit/client/radio-transition", test_client_radio_transition);
     g_test_add_func ("/MM/sit/client/boot-config", test_client_boot_config);
     g_test_add_func ("/MM/sit/dsds/data-ownership", test_dsds_data_ownership);

@@ -38,12 +38,19 @@
 /* How long to wait before trying again after the CP refuses a step. The CP
  * throttles its own registration attempts (RILC_UNSOL_IMS_THROTTLED_TIME), so
  * being patient here costs nothing and hammering it would be actively wrong. */
-#define RETRY_TIMEOUT_SECS 30
+#ifndef MM_SIT_IMS_RETRY_TIMEOUT_SECS
+#define MM_SIT_IMS_RETRY_TIMEOUT_SECS 30
+#endif
+
+/* Data-only subscriptions may always refuse the IMS PDN. Bound AP-side
+ * provisioning attempts per lifecycle; the CP manages SIP retries itself. */
+#define MAX_PROVISIONING_ATTEMPTS 3
 
 typedef enum {
     IMS_STATE_STOPPED,
     IMS_STATE_STARTING,
     IMS_STATE_STARTED,
+    IMS_STATE_FAILED,
 } ImsState;
 
 struct _MMSitImsPrivate {
@@ -90,6 +97,7 @@ struct _MMSitImsPrivate {
 
     GCancellable *cancellable;
     guint         retry_id;
+    guint         provisioning_failures;
 };
 
 enum {
@@ -205,11 +213,23 @@ schedule_retry (MMSitIms    *self,
                 const gchar *what,
                 GError      *error)
 {
-    mm_obj_dbg (self, "IMS %s failed (%s); retrying in %us",
-                what, error ? error->message : "unknown", RETRY_TIMEOUT_SECS);
-    g_clear_error (&error);
     clear_retry (self);
-    self->priv->retry_id = g_timeout_add_seconds (RETRY_TIMEOUT_SECS,
+    if (++self->priv->provisioning_failures >= MAX_PROVISIONING_ATTEMPTS) {
+        mm_obj_info (self, "IMS %s failed after %u attempts (%s); giving up until the next registration cycle",
+                     what, self->priv->provisioning_failures,
+                     error ? error->message : "unknown");
+        g_clear_error (&error);
+        /* Clean up any PDN or stack left by a failure after SETUP. Keep a
+         * distinct state so ordinary RAT/operator polls cannot restart us. */
+        mm_sit_ims_stop (self);
+        self->priv->state = IMS_STATE_FAILED;
+        return;
+    }
+    mm_obj_dbg (self, "IMS %s attempt %u/%u failed (%s); retrying in %us",
+                what, self->priv->provisioning_failures, MAX_PROVISIONING_ATTEMPTS,
+                error ? error->message : "unknown", MM_SIT_IMS_RETRY_TIMEOUT_SECS);
+    g_clear_error (&error);
+    self->priv->retry_id = g_timeout_add_seconds (MM_SIT_IMS_RETRY_TIMEOUT_SECS,
                                                   (GSourceFunc) retry_cb, self);
 }
 
@@ -437,6 +457,7 @@ sequence_ready (MMSitIms     *self,
      * which is why this is not treated as success for call routing.
      */
     self->priv->state = IMS_STATE_STARTED;
+    self->priv->provisioning_failures = 0;
     mm_obj_info (self, "IMS provisioned; waiting for the CP to register");
 }
 
@@ -1014,6 +1035,7 @@ mm_sit_ims_stop (MMSitIms *self)
     g_return_if_fail (MM_IS_SIT_IMS (self));
 
     clear_retry (self);
+    self->priv->provisioning_failures = 0;
     if (self->priv->cancellable) {
         g_cancellable_cancel (self->priv->cancellable);
         g_clear_object (&self->priv->cancellable);
