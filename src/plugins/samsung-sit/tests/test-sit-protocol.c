@@ -706,6 +706,28 @@ test_parse_status_and_registration (void)
     g_assert_true (registration.registered);
     g_assert_cmpuint (registration.state, ==, 1);
     g_assert_cmpuint (registration.radio_technology, ==, 14);
+    g_assert_cmpint (registration.vops_support, ==, MM_SIT_VOPS_SUPPORT_UNSUPPORTED);
+    {
+        static const struct {
+            guint8 wire;
+            MMSitVopsSupport expected;
+        } cases[] = {
+            { 1, MM_SIT_VOPS_SUPPORT_SUPPORTED },
+            { 0xff, MM_SIT_VOPS_SUPPORT_UNKNOWN },
+        };
+        guint i;
+
+        reg_response[15] = 20; /* SIT's second LTE value, not Android NR */
+        for (i = 0; i < G_N_ELEMENTS (cases); i++) {
+            reg_response[0x2d] = cases[i].wire;
+            g_clear_pointer (&message, mm_sit_message_free);
+            message = mm_sit_message_parse (reg_response, sizeof (reg_response), &error);
+            g_assert_no_error (error);
+            g_assert_true (mm_sit_message_parse_registration (message, &registration, &error));
+            g_assert_no_error (error);
+            g_assert_cmpint (registration.vops_support, ==, cases[i].expected);
+        }
+    }
 
     memcpy (&operator_response[12], "26203#", 6);
     memcpy (&operator_response[18], "o2-de", 6);
@@ -2679,9 +2701,17 @@ ims_retry_wait (guint *counter, guint target)
 }
 
 static void
-ims_retry_check_quiet (MMSitIms *ims)
+ims_wait_retry_interval (void)
 {
     g_autoptr(GMainLoop) loop = g_main_loop_new (NULL, FALSE);
+
+    g_timeout_add (2200, (GSourceFunc) ims_retry_wait_done, loop);
+    g_main_loop_run (loop);
+}
+
+static void
+ims_retry_check_quiet (MMSitIms *ims)
+{
     guint i;
 
     /* Normal registration/RAT/operator updates must not defeat either the
@@ -2691,15 +2721,59 @@ ims_retry_check_quiet (MMSitIms *ims)
         mm_sit_ims_set_registered (ims, TRUE);
         mm_sit_ims_set_operator_code (ims, i % 2 ? "00102" : "00101");
     }
-    g_timeout_add (2200, (GSourceFunc) ims_retry_wait_done, loop);
-    g_main_loop_run (loop);
+    ims_wait_retry_interval ();
+}
+
+static void
+ims_test_vops_updates (MMSitIms *ims, ImsRetryPeer *peer)
+{
+    MMSitRegistration registration = {
+        .registered = TRUE,
+        .vops_support = MM_SIT_VOPS_SUPPORT_UNSUPPORTED,
+    };
+
+    /* Install capability before the first registered/RAT notification. */
+    mm_sit_ims_update_registration (ims, &registration);
+    ims_retry_check_quiet (ims);
+    g_assert_cmpuint (peer->setups, ==, 0);
+    g_assert_cmpuint (peer->stops, ==, 0);
+
+    /* A capability change alone can unblock IMS on an already registered SIM. */
+    registration.vops_support = MM_SIT_VOPS_SUPPORT_SUPPORTED;
+    mm_sit_ims_update_registration (ims, &registration);
+    ims_retry_wait (&peer->pdn_infos, 1);
+    g_assert_cmpuint (peer->setups, ==, 1);
+
+    registration.vops_support = MM_SIT_VOPS_SUPPORT_UNSUPPORTED;
+    mm_sit_ims_update_registration (ims, &registration);
+    ims_retry_wait (&peer->deactivations, 1);
+    ims_retry_check_quiet (ims);
+    g_assert_cmpuint (peer->setups, ==, 1);
+    g_assert_cmpuint (peer->stops, ==, 1);
+
+    /* Clearing the old refusal on registration loss must not briefly start
+     * IMS using the previous registered state. */
+    registration.registered = FALSE;
+    registration.vops_support = MM_SIT_VOPS_SUPPORT_UNKNOWN;
+    mm_sit_ims_update_registration (ims, &registration);
+    ims_wait_retry_interval ();
+    g_assert_cmpuint (peer->setups, ==, 1);
+
+    /* Older frames/other RATs provide no capability: retain the fallback. */
+    registration.registered = TRUE;
+    mm_sit_ims_update_registration (ims, &registration);
+    ims_retry_wait (&peer->pdn_infos, 2);
+    g_assert_cmpuint (peer->setups, ==, 2);
+    mm_sit_ims_stop (ims);
+    ims_retry_wait (&peer->deactivations, 2);
 }
 
 static void
 test_ims_provisioning_retries (gconstpointer data)
 {
-    gboolean recover = GPOINTER_TO_UINT (data);
-    ImsRetryPeer peer = { .succeed_on = recover ? 3 : 0 };
+    gboolean recover = GPOINTER_TO_UINT (data) == 1;
+    gboolean vops = GPOINTER_TO_UINT (data) == 2;
+    ImsRetryPeer peer = { .succeed_on = vops ? 1 : (recover ? 3 : 0) };
     g_autofree gchar *database = build_test_ims_db ();
     g_autofree gchar *directory = g_path_get_dirname (database);
     g_autoptr(MMPortSerialSit) port = NULL;
@@ -2720,6 +2794,10 @@ test_ims_provisioning_retries (gconstpointer data)
                              (GUnixFDSourceFunc) ims_retry_peer_ready, &peer);
     ims = mm_sit_ims_new (client, 0, database);
     mm_sit_ims_set_device_identity (ims, &test_device);
+    if (vops) {
+        ims_test_vops_updates (ims, &peer);
+        goto out;
+    }
     mm_sit_ims_update_access_tech (ims, MM_MODEM_ACCESS_TECHNOLOGY_LTE);
     mm_sit_ims_set_registered (ims, TRUE);
     ims_retry_wait (recover ? &peer.pdn_infos : &peer.stops, 1);
@@ -2740,6 +2818,7 @@ test_ims_provisioning_retries (gconstpointer data)
     ims_retry_wait (&peer.stops, recover ? 1 : 4);
     if (recover)
         ims_retry_wait (&peer.deactivations, 1);
+out:
     g_clear_object (&ims);
     g_source_remove (peer_id);
     mm_sit_client_close (client);
@@ -2970,6 +3049,7 @@ main (int argc,
     g_test_add_func ("/MM/sit/ims/config-user-agent", test_ims_config_user_agent);
     g_test_add_data_func ("/MM/sit/ims/provisioning-retry-limit", NULL, test_ims_provisioning_retries);
     g_test_add_data_func ("/MM/sit/ims/provisioning-retry-recovery", GUINT_TO_POINTER (1), test_ims_provisioning_retries);
+    g_test_add_data_func ("/MM/sit/ims/vops-gating", GUINT_TO_POINTER (2), test_ims_provisioning_retries);
     g_test_add_func ("/MM/sit/client/radio-transition", test_client_radio_transition);
     g_test_add_func ("/MM/sit/client/boot-config", test_client_boot_config);
     g_test_add_func ("/MM/sit/dsds/data-ownership", test_dsds_data_ownership);

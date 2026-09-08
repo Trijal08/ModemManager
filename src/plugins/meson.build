@@ -61,7 +61,7 @@ if enable_tests and plugins_options['samsung-sit']
     dependencies: [libhelpers_dep, libport_dep, sqlite3_dep, samsung_sit_ffi_dep],
     c_args: ['-DMM_SIT_IMS_RETRY_TIMEOUT_SECS=1'],
   )
-  test('samsung-sit-protocol', samsung_sit_protocol_test)
+  test('samsung-sit-protocol', samsung_sit_protocol_test, timeout: 60)
 endif
 
 # never include static libs as deps when building

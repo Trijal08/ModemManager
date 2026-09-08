@@ -74,6 +74,12 @@ void mm_sit_ims_update_access_tech (MMSitIms                   *self,
 void mm_sit_ims_set_registered (MMSitIms *self,
                                 gboolean  registered);
 
+/* Apply packet registration and its VoPS capability together, before MM core
+ * publishes a state change that may start IMS. Unknown preserves the fallback
+ * to RAT/registration and bounded provisioning attempts. */
+void mm_sit_ims_update_registration (MMSitIms              *self,
+                                    const MMSitRegistration *registration);
+
 /* The serving network's MCCMNC, which selects the carrier configuration. */
 /*
  * Which subscription's configuration to use. This is the SIM's identity, not

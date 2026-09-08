@@ -1384,6 +1384,17 @@ mm_sit_message_parse_registration (const MMSitMessage *message,
     out_registration->state            = reg.state;
     out_registration->radio_technology = reg.radio_technology;
     out_registration->registered       = reg.registered ? TRUE : FALSE;
+    switch (reg.vops_support) {
+    case SAMSUNG_SIT_VOPS_SUPPORT_SUPPORTED:
+        out_registration->vops_support = MM_SIT_VOPS_SUPPORT_SUPPORTED;
+        break;
+    case SAMSUNG_SIT_VOPS_SUPPORT_UNSUPPORTED:
+        out_registration->vops_support = MM_SIT_VOPS_SUPPORT_UNSUPPORTED;
+        break;
+    default:
+        out_registration->vops_support = MM_SIT_VOPS_SUPPORT_UNKNOWN;
+        break;
+    }
     return TRUE;
 }
 

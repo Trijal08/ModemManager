@@ -303,10 +303,17 @@ typedef struct {
  * scan's, see MM_SIT_SCAN_RAT_LTE). */
 #define MM_SIT_REGISTRATION_RAT_LTE 14
 
+typedef enum {
+    MM_SIT_VOPS_SUPPORT_UNKNOWN,
+    MM_SIT_VOPS_SUPPORT_UNSUPPORTED,
+    MM_SIT_VOPS_SUPPORT_SUPPORTED,
+} MMSitVopsSupport;
+
 typedef struct {
     guint8   state;
     guint8   radio_technology;
     gboolean registered;
+    MMSitVopsSupport vops_support;
 } MMSitRegistration;
 
 /* Reported for a cause the CP says it does not have. */

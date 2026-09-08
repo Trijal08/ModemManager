@@ -337,6 +337,11 @@ update_ps_registration (MMBroadbandModemSamsungSit *self,
 {
     MMModem3gppRegistrationState state = sit_registration_state (registration);
 
+    /* Install VoPS before publishing REGISTERED: its state notification may
+     * start IMS immediately, even before the next signal/RAT indication. */
+    if (self->priv->ims)
+        mm_sit_ims_update_registration (self->priv->ims, registration);
+
     /* Registered again: forget the rejections, so a later one gets the full
      * retry budget rather than inheriting an exhausted one. */
     if (registration->registered) {

@@ -82,6 +82,7 @@ struct _MMSitImsPrivate {
     /* The modem's own registration -- the radio being up and settled. Distinct
      * from `registered` below, which is the CP's IMS/SIP registration. */
     gboolean                net_registered;
+    MMSitVopsSupport        vops_support;
 
     /* The context the CP granted, kept because every later step describes it --
      * a retry that had forgotten it would hand the stack an empty PDN. */
@@ -883,7 +884,8 @@ mm_sit_ims_update_access_tech (MMSitIms                *self,
 
     g_return_if_fail (MM_IS_SIT_IMS (self));
 
-    possible = act_supports_ims (act);
+    possible = act_supports_ims (act) &&
+               self->priv->vops_support != MM_SIT_VOPS_SUPPORT_UNSUPPORTED;
     self->priv->last_act = act;
 
     if (possible && self->priv->state == IMS_STATE_STOPPED) {
@@ -912,7 +914,7 @@ mm_sit_ims_update_access_tech (MMSitIms                *self,
     }
 
     if (!possible && self->priv->state != IMS_STATE_STOPPED) {
-        mm_obj_dbg (self, "no packet-switched RAT; stopping IMS");
+        mm_obj_dbg (self, "IMS unavailable on this RAT or network; stopping IMS");
         mm_sit_ims_stop (self);
     }
 }
@@ -940,6 +942,33 @@ mm_sit_ims_set_registered (MMSitIms *self,
     }
     if (self->priv->last_act != MM_MODEM_ACCESS_TECHNOLOGY_UNKNOWN)
         mm_sit_ims_update_access_tech (self, self->priv->last_act);
+}
+
+void
+mm_sit_ims_update_registration (MMSitIms                *self,
+                                 const MMSitRegistration *registration)
+{
+    MMSitVopsSupport support;
+
+    g_return_if_fail (MM_IS_SIT_IMS (self));
+    g_return_if_fail (registration != NULL);
+
+    /* Stop before clearing a stale capability. Otherwise a loss of packet
+     * registration could change unsupported to unknown and briefly start IMS
+     * while MM core still reports the previous registered state. */
+    if (!registration->registered)
+        mm_sit_ims_set_registered (self, FALSE);
+    support = registration->registered ? registration->vops_support : MM_SIT_VOPS_SUPPORT_UNKNOWN;
+    if (self->priv->vops_support != support) {
+        self->priv->vops_support = support;
+        mm_obj_info (self, "network IMS voice support (VoPS): %s",
+                      support == MM_SIT_VOPS_SUPPORT_SUPPORTED ? "supported" :
+                      support == MM_SIT_VOPS_SUPPORT_UNSUPPORTED ? "unsupported" : "unknown");
+        mm_sit_ims_update_access_tech (self, self->priv->last_act);
+    }
+    /* MM may already be REGISTERED through CS, so a newly registered packet
+     * service need not produce another modem-state notification. */
+    mm_sit_ims_set_registered (self, registration->registered);
 }
 
 void
