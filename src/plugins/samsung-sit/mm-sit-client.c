@@ -43,6 +43,8 @@ struct _MMSitClientPrivate {
     gchar               *device_os_name;
     gchar               *device_os_version;
     gboolean             radio_state_trusted;
+    guint8               sim_iccid[MM_SIT_MAX_ICCID_LENGTH];
+    gsize                sim_iccid_len;
     /* AID of the subscription application, cached from the last SIM status so
      * file reads can address it the way the downstream RIL does. */
     guint8               sim_aid[MM_SIT_MAX_AID_LENGTH];
@@ -86,6 +88,14 @@ port_indication (MMPortSerialSit    *port,
                  const MMSitMessage *message,
                  MMSitClient        *self)
 {
+    if (message->id == MM_SIT_MESSAGE_SIM_STATUS_CHANGED) {
+        /* DSDS clients are shared by the CP and can outlive the modem/SIM
+         * objects replaced after a profile switch. Drop profile-specific
+         * state before notifying their users. */
+        self->priv->has_carrier_sim_info = FALSE;
+        self->priv->sim_aid_len = 0;
+        self->priv->smsc_len = 0;
+    }
     if (message->id == MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO) {
         MMSitCarrierSimInfo info;
 
@@ -273,6 +283,7 @@ mm_sit_client_close (MMSitClient *self)
     self->priv->boot_config_done = FALSE;
     self->priv->struct_versions_known = FALSE;
     self->priv->radio_state_trusted = FALSE;
+    self->priv->sim_iccid_len = 0;
     if (!mm_port_serial_is_open (MM_PORT_SERIAL (self->priv->port)))
         return;
     if (self->priv->unsolicited_handler_id) {
@@ -607,6 +618,19 @@ get_sim_ready (MMSitClient *self,
     response = mm_sit_client_command_finish (self, res, &error);
     status = g_new0 (MMSitSimStatus, 1);
     if (response && mm_sit_message_parse_sim_status (response, status, &error)) {
+        if (status->iccid_len) {
+            /* A profile refresh can leave GET_RADIO_POWER reporting on while
+             * the new subscription is parked. Make the replacement modem run
+             * carrier/attach-APN setup and an explicit radio-on again. Merely
+             * receiving a global status indication must not reset the other
+             * DSDS stack's radio state. */
+            if (self->priv->sim_iccid_len &&
+                (self->priv->sim_iccid_len != status->iccid_len ||
+                 memcmp (self->priv->sim_iccid, status->iccid, status->iccid_len)))
+                self->priv->radio_state_trusted = FALSE;
+            self->priv->sim_iccid_len = status->iccid_len;
+            memcpy (self->priv->sim_iccid, status->iccid, status->iccid_len);
+        }
         if (status->app_count) {
             self->priv->sim_aid_len = MIN (status->apps[0].aid_len, MM_SIT_MAX_AID_LENGTH);
             memcpy (self->priv->sim_aid, status->apps[0].aid, self->priv->sim_aid_len);

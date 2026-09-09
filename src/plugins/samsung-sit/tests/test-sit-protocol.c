@@ -1906,6 +1906,66 @@ client_test_timeout (ClientTestContext *ctx)
 }
 
 static void
+client_sim_changed (MMSitClient *client, const MMSitMessage *message, ClientTestContext *ctx)
+{
+    MMSitCarrierSimInfo info;
+
+    ctx->rounds++;
+    if (ctx->rounds == 2) {
+        g_assert_cmpuint (message->id, ==, MM_SIT_MESSAGE_SIM_STATUS_CHANGED);
+        g_assert_false (mm_sit_client_get_carrier_sim_info (client, &info));
+    } else {
+        g_assert_cmpuint (message->id, ==, MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO);
+        g_assert_true (mm_sit_client_get_carrier_sim_info (client, &info));
+        g_assert_cmpstr (info.iccid, ==,
+                         ctx->rounds == 1 ? "8901234567890123456" : "8901234567890123457");
+    }
+    if (ctx->rounds == 3)
+        g_main_loop_quit (ctx->loop);
+}
+
+static void
+test_client_sim_cache_refresh (void)
+{
+    ClientTestContext ctx = { 0 };
+    gint sockets[2];
+    guint timeout_id;
+    guint8 carrier[207] = { MM_SIT_MESSAGE_TYPE_INDICATION, 0, 0x02, 0x46, 207 };
+    guint8 changed[12] = { MM_SIT_MESSAGE_TYPE_INDICATION, 0, 0x10, 0x02, 12 };
+    g_autoptr(MMPortSerialSit) port = NULL;
+    g_autoptr(MMSitClient) client = NULL;
+    g_autoptr(GError) error = NULL;
+
+    g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    port = MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+        MM_PORT_DEVICE, "sim-refresh-sit1", MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+        MM_PORT_TYPE, MM_PORT_TYPE_SIT, MM_PORT_SERIAL_FD, sockets[0], NULL));
+    client = mm_sit_client_new_from_port (port);
+    g_assert_true (mm_sit_client_open (client, &error));
+    g_assert_no_error (error);
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    g_signal_connect (client, "indication", G_CALLBACK (client_sim_changed), &ctx);
+
+    /* The old profile must be unavailable as soon as the change is delivered,
+     * even if the replacement carrier information has not arrived yet. */
+    carrier[8] = sizeof (carrier) - MM_SIT_HEADER_SIZE;
+    memcpy (&carrier[12], "8901234567890123456", 19);
+    memcpy (&carrier[33], "262071234567890", 15);
+    g_assert_true (write_all (sockets[1], carrier, sizeof (carrier)));
+    g_assert_true (write_all (sockets[1], changed, sizeof (changed)));
+    carrier[30] = '7';
+    g_assert_true (write_all (sockets[1], carrier, sizeof (carrier)));
+    timeout_id = g_timeout_add_seconds (5, (GSourceFunc) client_test_timeout, &ctx);
+    g_main_loop_run (ctx.loop);
+    g_assert_false (ctx.timed_out);
+    g_assert_cmpuint (ctx.rounds, ==, 3);
+    g_source_remove (timeout_id);
+    mm_sit_client_close (client);
+    close (sockets[1]);
+    g_main_loop_unref (ctx.loop);
+}
+
+static void
 test_client_connect_sequence (void)
 {
     /* Three attempts on one client, because the context id is what keeps
@@ -2139,11 +2199,39 @@ client_radio_test_ready (MMSitClient       *client,
 }
 
 static void
+client_sim_status_ready (MMSitClient *client, GAsyncResult *res, ClientTestContext *ctx)
+{
+    MMSitSimStatus status;
+
+    ctx->completed = mm_sit_client_get_sim_status_finish (client, res, &status, &ctx->error);
+    g_main_loop_quit (ctx->loop);
+}
+
+static gpointer
+client_sim_status_peer (ClientTestContext *ctx)
+{
+    guint i;
+
+    for (i = 0; i < 4; i++) {
+        /* No application records, followed by one 63-byte card block. */
+        guint8 status[80] = { 0 };
+
+        status[12] = i != 2;
+        status[51] = i == 2 ? 0 : 2;
+        status[52] = 0x98;
+        status[53] = i == 3 ? 0x11 : 0x10;
+        reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_SIM_STATUS, status, sizeof (status));
+    }
+    return NULL;
+}
+
+static void
 test_client_radio_transition (void)
 {
     ClientTestContext          ctx = { 0 };
     gint                       sockets[2];
     guint                      timeout_id;
+    guint                      i;
     g_autoptr(GThread)         peer = NULL;
     g_autoptr(MMPortSerialSit) port = NULL;
     g_autoptr(MMSitClient)     client = NULL;
@@ -2177,6 +2265,23 @@ test_client_radio_transition (void)
     g_assert_no_error (ctx.error);
     g_assert_true (ctx.completed);
     g_assert_true (mm_sit_client_radio_state_trusted (client));
+
+    peer = g_thread_new ("sit-sim-status-peer", (GThreadFunc) client_sim_status_peer, &ctx);
+    /* Same identity (including a transient absent card) preserves radio
+     * trust. Only a confirmed new ICCID requires subscription setup again. */
+    for (i = 0; i < 4; i++) {
+        ctx.completed = FALSE;
+        mm_sit_client_get_sim_status (client, NULL,
+                                      (GAsyncReadyCallback) client_sim_status_ready, &ctx);
+        timeout_id = g_timeout_add_seconds (5, (GSourceFunc) client_test_timeout, &ctx);
+        g_main_loop_run (ctx.loop);
+        g_assert_false (ctx.timed_out);
+        g_source_remove (timeout_id);
+        g_assert_no_error (ctx.error);
+        g_assert_true (ctx.completed);
+        g_assert_cmpint (mm_sit_client_radio_state_trusted (client), ==, i != 3);
+    }
+    g_thread_join (g_steal_pointer (&peer));
 
     mm_sit_client_close (client);
     g_assert_false (mm_sit_client_radio_state_trusted (client));
@@ -3042,6 +3147,7 @@ main (int argc,
     g_test_add_func ("/MM/sit/port/stale-response", test_port_drops_a_stale_response);
     g_test_add_func ("/MM/sit/port/queued-commands", test_port_answers_queued_commands);
     g_test_add_func ("/MM/sit/client/connect-sequence", test_client_connect_sequence);
+    g_test_add_func ("/MM/sit/client/sim-cache-refresh", test_client_sim_cache_refresh);
     g_test_add_func ("/MM/sit/ims/config-defaults", test_ims_config_defaults);
     g_test_add_func ("/MM/sit/ims/config-missing-database", test_ims_config_missing_database);
     g_test_add_func ("/MM/sit/ims/config-identity", test_ims_config_identity_discriminators);

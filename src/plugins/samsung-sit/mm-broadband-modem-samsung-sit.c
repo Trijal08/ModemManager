@@ -58,6 +58,15 @@ struct _MMBroadbandModemSamsungSitPrivate {
      * nodes, so mm-sit-tool and the IMS helper can share them. Set from
      * ID_MM_SIT_PROXY on the port. */
     gboolean     use_proxy;
+    /* Coalesce SIM refresh indications before checking the affected stack.
+     * The inventory notification is global and arrives on stack 0. */
+    gboolean     sim_hot_swap_enabled;
+    gboolean     sim_check_running;
+    gboolean     sim_check_pending;
+    guint        sim_check_id;
+    guint        sim_check_retries;
+    MMSitClient *sim_inventory_client; /* borrowed from cp */
+    gulong       sim_inventory_id;
     /* The CP's version block, read once. Three separate loaders want fields of
      * it and the values do not change while the CP is up. */
     MMSitBaseBandVersion  version;
@@ -962,6 +971,170 @@ handle_registration_failed (MMBroadbandModemSamsungSit *self,
                                                          self);
 }
 
+/* A refresh produces several status notifications while the card restarts.
+ * Give it time to publish a usable ICCID, then use MM's existing comparison
+ * and disable/reprobe path. Unchanged identities do not disturb the other
+ * DSDS stack, even though it also receives a global inventory notification. */
+#define SIM_CHECK_SETTLE_MS 1500
+#define SIM_CHECK_RETRY_MS  2000
+#define SIM_CHECK_RETRIES   5
+
+static gboolean sim_check_timeout (MMBroadbandModemSamsungSit *self);
+
+static gboolean
+sim_check_allowed (MMBroadbandModemSamsungSit *self)
+{
+    return self->priv->sim_hot_swap_enabled &&
+           mm_base_modem_get_valid (MM_BASE_MODEM (self)) &&
+           !mm_base_modem_get_reprobe (MM_BASE_MODEM (self));
+}
+
+static void
+schedule_sim_check (MMBroadbandModemSamsungSit *self)
+{
+    if (!sim_check_allowed (self))
+        return;
+    self->priv->sim_check_pending = TRUE;
+    self->priv->sim_check_retries = 0;
+    if (self->priv->sim_check_running)
+        return;
+    if (self->priv->sim_check_id)
+        g_source_remove (self->priv->sim_check_id);
+    self->priv->sim_check_id = g_timeout_add (SIM_CHECK_SETTLE_MS,
+                                              (GSourceFunc) sim_check_timeout, self);
+}
+
+static void
+sim_swap_checked (MMIfaceModem *iface,
+                  GAsyncResult *res,
+                  MMBroadbandModemSamsungSit *self)
+{
+    g_autoptr(GError) error = NULL;
+
+    if (!mm_iface_modem_check_for_sim_swap_finish (iface, res, &error))
+        mm_obj_dbg (self, "SIT SIM identity check failed: %s", error->message);
+    self->priv->sim_check_running = FALSE;
+    if (self->priv->sim_check_pending)
+        schedule_sim_check (self);
+    g_object_unref (self);
+}
+
+static void
+sim_check_status_ready (MMSitClient *client,
+                        GAsyncResult *res,
+                        MMBroadbandModemSamsungSit *self)
+{
+    MMSitSimStatus status;
+    g_autoptr(GError) error = NULL;
+    gboolean loaded;
+
+    loaded = mm_sit_client_get_sim_status_finish (client, res, &status, &error);
+    if (!sim_check_allowed (self))
+        goto done;
+    if (!loaded || !status.card_state || !status.iccid_len) {
+        self->priv->sim_check_running = FALSE;
+        if (self->priv->sim_check_retries++ < SIM_CHECK_RETRIES) {
+            mm_obj_dbg (self, "SIT SIM not ready after status change; retrying");
+            self->priv->sim_check_id = g_timeout_add (SIM_CHECK_RETRY_MS,
+                                                      (GSourceFunc) sim_check_timeout, self);
+        } else if (loaded && !status.card_state) {
+            g_autoptr(MMBaseSim) sim = NULL;
+
+            g_object_get (self, MM_IFACE_MODEM_SIM, &sim, NULL);
+            if (sim) {
+                mm_obj_info (self, "SIT SIM remains absent after status change");
+                mm_iface_modem_process_sim_event (MM_IFACE_MODEM (self));
+            }
+        } else {
+            mm_obj_warn (self, "SIT SIM readiness check failed: %s",
+                          error ? error->message : "no ICCID after refresh");
+        }
+        g_object_unref (self);
+        return;
+    }
+
+    mm_obj_dbg (self, "SIT SIM ready after status change; checking identity");
+    mm_iface_modem_check_for_sim_swap (MM_IFACE_MODEM (self),
+                                       (GAsyncReadyCallback) sim_swap_checked, self);
+    return;
+
+done:
+    self->priv->sim_check_running = FALSE;
+    g_object_unref (self);
+}
+
+static gboolean
+sim_check_timeout (MMBroadbandModemSamsungSit *self)
+{
+    self->priv->sim_check_id = 0;
+    if (!sim_check_allowed (self))
+        return G_SOURCE_REMOVE;
+    self->priv->sim_check_pending = FALSE;
+    self->priv->sim_check_running = TRUE;
+    mm_sit_client_get_sim_status (self->priv->client,
+                                  mm_base_modem_peek_cancellable (MM_BASE_MODEM (self)),
+                                  (GAsyncReadyCallback) sim_check_status_ready,
+                                  g_object_ref (self));
+    return G_SOURCE_REMOVE;
+}
+
+static void
+sim_inventory_indication (MMSitClient *client,
+                          const MMSitMessage *message,
+                          MMBroadbandModemSamsungSit *self)
+{
+    if (message->id == MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED)
+        schedule_sim_check (self);
+}
+
+static void
+cleanup_sim_hot_swap (MMIfaceModem *iface)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+
+    self->priv->sim_hot_swap_enabled = FALSE;
+    self->priv->sim_check_pending = FALSE;
+    if (self->priv->sim_check_id) {
+        g_source_remove (self->priv->sim_check_id);
+        self->priv->sim_check_id = 0;
+    }
+    if (self->priv->sim_inventory_id) {
+        g_signal_handler_disconnect (self->priv->sim_inventory_client, self->priv->sim_inventory_id);
+        self->priv->sim_inventory_id = 0;
+    }
+    self->priv->sim_inventory_client = NULL;
+}
+
+static gboolean
+setup_sim_hot_swap_finish (MMIfaceModem *iface, GAsyncResult *res, GError **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+setup_sim_hot_swap (MMIfaceModem *iface, GAsyncReadyCallback callback, gpointer user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    g_autoptr(GTask) task = g_task_new (iface, NULL, callback, user_data);
+    g_autoptr(GError) error = NULL;
+
+    if (!mm_broadband_modem_samsung_sit_peek_client (self, &error)) {
+        g_task_return_error (task, g_steal_pointer (&error));
+        return;
+    }
+    if (self->priv->cp && !self->priv->sim_inventory_id) {
+        MMSitClient *inventory = mm_sit_cp_peek_client (self->priv->cp, 0);
+
+        if (inventory != self->priv->client) {
+            self->priv->sim_inventory_client = inventory;
+            self->priv->sim_inventory_id = g_signal_connect_object (
+                inventory, "indication", G_CALLBACK (sim_inventory_indication), self, 0);
+        }
+    }
+    self->priv->sim_hot_swap_enabled = TRUE;
+    g_task_return_boolean (task, TRUE);
+}
+
 static void
 sit_indication (MMSitClient              *client,
                 const MMSitMessage       *message,
@@ -987,8 +1160,11 @@ sit_indication (MMSitClient              *client,
         message->id == MM_SIT_MESSAGE_IMS_NEW_SMS)
         handle_new_sms (self, message);
 
-    if (message->id == MM_SIT_MESSAGE_SIM_STATUS_CHANGED)
+    if (message->id == MM_SIT_MESSAGE_SIM_STATUS_CHANGED) {
         invalidate_carrier_config (self);
+        schedule_sim_check (self);
+    } else if (message->id == MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED)
+        schedule_sim_check (self);
     else if (message->id == MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO) {
         MMSitCarrierSimInfo info;
 
@@ -4365,6 +4541,9 @@ iface_modem_init (MMIfaceModemInterface *iface)
     iface->load_current_modes_finish = load_current_modes_finish;
     iface->set_current_modes = set_current_modes;
     iface->set_current_modes_finish = set_current_modes_finish;
+    iface->setup_sim_hot_swap = setup_sim_hot_swap;
+    iface->setup_sim_hot_swap_finish = setup_sim_hot_swap_finish;
+    iface->cleanup_sim_hot_swap = cleanup_sim_hot_swap;
     iface->load_sim_slots = load_sim_slots;
     iface->load_sim_slots_finish = load_sim_slots_finish;
     iface->set_primary_sim_slot = set_primary_sim_slot;
@@ -5147,6 +5326,7 @@ dispose (GObject *object)
 {
     MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (object);
 
+    cleanup_sim_hot_swap (MM_IFACE_MODEM (self));
     if (self->priv->reject_retry_id) {
         g_source_remove (self->priv->reject_retry_id);
         self->priv->reject_retry_id = 0;
