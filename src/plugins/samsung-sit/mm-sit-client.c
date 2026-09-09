@@ -274,16 +274,26 @@ mm_sit_client_open (MMSitClient  *self,
 }
 
 void
+mm_sit_client_invalidate_sim (MMSitClient *self)
+{
+    /* Call only for a confirmed subscription transition, not every global
+     * SIM notification. Re-enabling even the same ICCID needs radio setup. */
+    self->priv->has_carrier_sim_info = FALSE;
+    self->priv->sim_iccid_len = 0;
+    self->priv->sim_aid_len = 0;
+    self->priv->smsc_len = 0;
+    self->priv->radio_state_trusted = FALSE;
+}
+
+void
 mm_sit_client_close (MMSitClient *self)
 {
     g_return_if_fail (MM_IS_SIT_CLIENT (self));
 
-    self->priv->has_carrier_sim_info = FALSE;
+    mm_sit_client_invalidate_sim (self);
     memset (&self->priv->carrier_sim_info, 0, sizeof (self->priv->carrier_sim_info));
     self->priv->boot_config_done = FALSE;
     self->priv->struct_versions_known = FALSE;
-    self->priv->radio_state_trusted = FALSE;
-    self->priv->sim_iccid_len = 0;
     if (!mm_port_serial_is_open (MM_PORT_SERIAL (self->priv->port)))
         return;
     if (self->priv->unsolicited_handler_id) {

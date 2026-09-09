@@ -49,6 +49,7 @@ gchar       *mm_sit_proxy_socket_path (const gchar *device);
 gboolean mm_sit_client_open    (MMSitClient  *self,
                                 GError      **error);
 void     mm_sit_client_close   (MMSitClient  *self);
+void     mm_sit_client_invalidate_sim (MMSitClient *self);
 gboolean mm_sit_client_is_open (MMSitClient  *self);
 /*
  * What this device is, as resolved from the device tree and os-release for

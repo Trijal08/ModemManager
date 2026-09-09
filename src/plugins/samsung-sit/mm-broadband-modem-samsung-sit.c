@@ -1020,6 +1020,54 @@ sim_swap_checked (MMIfaceModem *iface,
 }
 
 static void
+sim_check_empty_slots_ready (MMSitClient *client,
+                             GAsyncResult *res,
+                             MMBroadbandModemSamsungSit *self)
+{
+    MMSitSimSlotStatus inventory;
+    g_autoptr(MMBaseSim) sim = NULL;
+    g_autoptr(GError) error = NULL;
+    guint i, j;
+
+    if (!mm_sit_client_get_sim_slot_status_finish (client, res, &inventory, &error)) {
+        mm_obj_warn (self, "couldn't confirm empty eSIM: %s", error->message);
+        goto done;
+    }
+    if (!sim_check_allowed (self))
+        goto done;
+
+    /* A present card without an application is only a profileless eUICC
+     * when the inventory agrees and identifies that card by its EID. */
+    for (i = 0; i < inventory.slot_count; i++) {
+        const MMSitSimSlot *slot = &inventory.slots[i];
+
+        if (slot->card_state != 1 || !slot->eid_len)
+            continue;
+        for (j = 0; j < slot->port_count; j++) {
+            const MMSitSimPort *port = &slot->ports[j];
+
+            if (port->logical_slot_id != (guint) MAX (self->priv->logical_stack, 0) ||
+                port->state != 1 || port->iccid_len)
+                continue;
+            g_object_get (self, MM_IFACE_MODEM_SIM, &sim, NULL);
+            if (!sim || !mm_base_sim_is_esim_without_profiles (sim)) {
+                mm_obj_info (self, "SIT eUICC has no enabled profile");
+                mm_sit_client_invalidate_sim (self->priv->client);
+                mm_iface_modem_process_sim_event (MM_IFACE_MODEM (self));
+            }
+            goto done;
+        }
+    }
+    mm_obj_dbg (self, "SIM inventory does not confirm a profileless eUICC");
+
+done:
+    self->priv->sim_check_running = FALSE;
+    if (self->priv->sim_check_pending)
+        schedule_sim_check (self);
+    g_object_unref (self);
+}
+
+static void
 sim_check_status_ready (MMSitClient *client,
                         GAsyncResult *res,
                         MMBroadbandModemSamsungSit *self)
@@ -1043,8 +1091,15 @@ sim_check_status_ready (MMSitClient *client,
             g_object_get (self, MM_IFACE_MODEM_SIM, &sim, NULL);
             if (sim) {
                 mm_obj_info (self, "SIT SIM remains absent after status change");
+                mm_sit_client_invalidate_sim (client);
                 mm_iface_modem_process_sim_event (MM_IFACE_MODEM (self));
             }
+        } else if (loaded && status.card_state == 1 && !status.app_count && !status.iccid_len) {
+            self->priv->sim_check_running = TRUE;
+            mm_sit_client_get_sim_slot_status (
+                client, mm_base_modem_peek_cancellable (MM_BASE_MODEM (self)),
+                (GAsyncReadyCallback) sim_check_empty_slots_ready, self);
+            return;
         } else {
             mm_obj_warn (self, "SIT SIM readiness check failed: %s",
                           error ? error->message : "no ICCID after refresh");
@@ -1053,6 +1108,19 @@ sim_check_status_ready (MMSitClient *client,
         return;
     }
 
+    {
+        g_autoptr(MMBaseSim) sim = NULL;
+
+        g_object_get (self, MM_IFACE_MODEM_SIM, &sim, NULL);
+        if (sim && mm_base_sim_is_esim_without_profiles (sim)) {
+            /* The generic SIM identifier loader deliberately skips reads
+             * for an empty eUICC. We already have a fresh ICCID here. */
+            mm_obj_info (self, "SIT eSIM profile became available");
+            mm_sit_client_invalidate_sim (client);
+            mm_iface_modem_process_sim_event (MM_IFACE_MODEM (self));
+            goto done;
+        }
+    }
     mm_obj_dbg (self, "SIT SIM ready after status change; checking identity");
     mm_iface_modem_check_for_sim_swap (MM_IFACE_MODEM (self),
                                        (GAsyncReadyCallback) sim_swap_checked, self);
@@ -2212,8 +2280,15 @@ load_own_numbers (MMIfaceModem       *iface,
     MMSitClient                *client;
     GError                     *error = NULL;
     GTask                      *task;
+    g_autoptr(MMBaseSim)         sim = NULL;
 
     task = g_task_new (iface, NULL, callback, user_data);
+    g_object_get (self, MM_IFACE_MODEM_SIM, &sim, NULL);
+    if (sim && mm_base_sim_is_esim_without_profiles (sim)) {
+        g_task_return_pointer (task, NULL, NULL);
+        g_object_unref (task);
+        return;
+    }
     client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
     if (!client) {
         g_task_return_error (task, error);
@@ -2291,6 +2366,14 @@ load_unlock_required_ready (MMSitClient  *client,
         return;
     }
 
+    if (status.card_state == 0) {
+        g_task_return_new_error (task, MM_MOBILE_EQUIPMENT_ERROR,
+                                 MM_MOBILE_EQUIPMENT_ERROR_SIM_NOT_INSERTED,
+                                 "SIM card is not inserted");
+        g_object_unref (task);
+        return;
+    }
+
     switch (status.universal_pin_state) {
     case MM_SIT_PIN_STATE_ENABLED_NOT_VERIFIED:
         lock = MM_MODEM_LOCK_SIM_PIN;
@@ -2307,9 +2390,7 @@ load_unlock_required_ready (MMSitClient  *client,
         break;
     case MM_SIT_PIN_STATE_UNKNOWN:
     default:
-        /* No card, or a card the CP has not finished reading. Reporting a lock
-         * here would strand the core waiting for a PIN that is not wanted, so
-         * say unknown and let it ask again. */
+        /* The card is present but its PIN state is not known yet. */
         lock = MM_MODEM_LOCK_UNKNOWN;
         break;
     }

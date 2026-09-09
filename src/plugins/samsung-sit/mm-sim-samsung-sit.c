@@ -671,10 +671,10 @@ load_preferred_networks (MMBaseSim          *self,
 
 /*****************************************************************************/
 
-/* The slot-inventory constructor. A modem that implements load_sim_slots hands
- * ModemManager the SIM objects itself and its create_sim vfunc is then never
- * called, so the active slot has to be built as this subclass here or every
- * read falls back to AT. */
+/* The slot inventory provides the active SIM object, bypassing create_sim.
+ * Publish eSIM readiness before core initialization checks unlock status and
+ * tries subscription file reads. A mapped eUICC without an ICCID is still
+ * present and accessible to an LPA. */
 MMBaseSim *
 mm_sim_samsung_sit_new_initialized (MMBaseModem *modem,
                                     GObject     *bind_to,
@@ -692,6 +692,10 @@ mm_sim_samsung_sit_new_initialized (MMBaseModem *modem,
                                      "active",                active,
                                      "sim-identifier",        sim_identifier,
                                      "eid",                   eid,
+                                     "sim-type",              eid ? MM_SIM_TYPE_ESIM : MM_SIM_TYPE_PHYSICAL,
+                                     "esim-status",           eid ? (sim_identifier ? MM_SIM_ESIM_STATUS_WITH_PROFILES :
+                                                                                       MM_SIM_ESIM_STATUS_NO_PROFILES) :
+                                                                    MM_SIM_ESIM_STATUS_UNKNOWN,
                                      NULL));
     mm_base_sim_export (sim);
     return sim;

@@ -157,7 +157,9 @@ slots_ready (MMSitClient *client, GAsyncResult *res, MMSitCp *self)
             const MMSitSimPort *port = &status.slots[i].ports[j];
             guint stack = port->logical_slot_id;
 
-            if (stack < 2 && status.slots[i].card_state == 1 && port->iccid_len) {
+            /* A mapped stack exists even with an empty tray or no enabled
+             * eSIM profile. Subscription readiness belongs to its MM modem. */
+            if (stack < 2 && port->state == 1) {
                 found[stack] = TRUE;
                 if (!self->mapping_sent) {
                     self->mapping[stack].physical_slot_id = i;
@@ -186,13 +188,11 @@ slots_ready (MMSitClient *client, GAsyncResult *res, MMSitCp *self)
         guint present = 1 - missing;
 
         for (i = 0; i < status.slot_count; i++) {
-            if (i == self->mapping[present].physical_slot_id || status.slots[i].card_state != 1)
+            if (i == self->mapping[present].physical_slot_id)
                 continue;
             for (j = 0; j < status.slots[i].port_count; j++) {
                 g_autoptr(GByteArray) request = NULL;
 
-                if (!status.slots[i].ports[j].iccid_len)
-                    continue;
                 self->mapping[missing].physical_slot_id = i;
                 self->mapping[missing].port_id = j;
                 request = mm_sit_request_new_set_logical_slot_mapping (
@@ -213,7 +213,7 @@ slots_ready (MMSitClient *client, GAsyncResult *res, MMSitCp *self)
         return;
     }
     error = g_error_new_literal (MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
-                                 "DSDS experiment requires two mapped SIMs with readable identities");
+                                 "DSDS requires two mapped logical SIM ports");
     prepare_complete (self, error);
 }
 

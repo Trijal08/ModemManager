@@ -1750,6 +1750,8 @@ typedef struct {
     gint          control_fd;
     gboolean      dsds;
     gboolean      ipv6_only;
+    gboolean      empty_sims;
+    gboolean      same_sim;
     guint         add_mapping; /* 1: explicit fallback, 2: CP maps asynchronously */
     guint         callbacks;
     GMainLoop    *loop;
@@ -1930,6 +1932,7 @@ test_client_sim_cache_refresh (void)
     ClientTestContext ctx = { 0 };
     gint sockets[2];
     guint timeout_id;
+    MMSitCarrierSimInfo info;
     guint8 carrier[207] = { MM_SIT_MESSAGE_TYPE_INDICATION, 0, 0x02, 0x46, 207 };
     guint8 changed[12] = { MM_SIT_MESSAGE_TYPE_INDICATION, 0, 0x10, 0x02, 12 };
     g_autoptr(MMPortSerialSit) port = NULL;
@@ -1960,6 +1963,9 @@ test_client_sim_cache_refresh (void)
     g_assert_false (ctx.timed_out);
     g_assert_cmpuint (ctx.rounds, ==, 3);
     g_source_remove (timeout_id);
+    g_assert_true (mm_sit_client_get_carrier_sim_info (client, &info));
+    mm_sit_client_invalidate_sim (client);
+    g_assert_false (mm_sit_client_get_carrier_sim_info (client, &info));
     mm_sit_client_close (client);
     close (sockets[1]);
     g_main_loop_unref (ctx.loop);
@@ -2219,16 +2225,16 @@ client_sim_status_peer (ClientTestContext *ctx)
         status[12] = i != 2;
         status[51] = i == 2 ? 0 : 2;
         status[52] = 0x98;
-        status[53] = i == 3 ? 0x11 : 0x10;
+        status[53] = i == 3 && !ctx->same_sim ? 0x11 : 0x10;
         reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_SIM_STATUS, status, sizeof (status));
     }
     return NULL;
 }
 
 static void
-test_client_radio_transition (void)
+test_client_radio_transition (gconstpointer data)
 {
-    ClientTestContext          ctx = { 0 };
+    ClientTestContext          ctx = { .same_sim = GPOINTER_TO_UINT (data) };
     gint                       sockets[2];
     guint                      timeout_id;
     guint                      i;
@@ -2280,6 +2286,12 @@ test_client_radio_transition (void)
         g_assert_no_error (ctx.error);
         g_assert_true (ctx.completed);
         g_assert_cmpint (mm_sit_client_radio_state_trusted (client), ==, i != 3);
+        if (ctx.same_sim && i == 2) {
+            /* A confirmed empty subscription invalidates setup even when
+             * the next enabled profile has the exact same ICCID. */
+            mm_sit_client_invalidate_sim (client);
+            g_assert_false (mm_sit_client_radio_state_trusted (client));
+        }
     }
     g_thread_join (g_steal_pointer (&peer));
 
@@ -2410,6 +2422,13 @@ cp_prepare_peer (ClientTestContext *ctx)
         memset (&slot[54], 0x98, 10);
         slot[64] = 1 - i; /* physical 0 -> stack 1, physical 1 -> stack 0 */
         slot[65] = 1;
+        if (ctx->empty_sims) {
+            /* Present eUICC with no enabled profile; absent physical card. */
+            slot[0] = i == 0;
+            slot[35] = i == 0 ? 16 : 0;
+            slot[53] = 0;
+            memset (&slot[54], 0, 10);
+        }
     }
     reply_request (ctx->peer_fd, MM_SIT_MESSAGE_SET_RADIO_POWER, ack, sizeof (ack));
     reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_RADIO_POWER, radio, sizeof (radio));
@@ -2448,7 +2467,8 @@ cp_prepare_ready (MMSitCp *cp, GAsyncResult *res, ClientTestContext *ctx)
 static void
 test_cp_prepare_coalesced (gconstpointer data)
 {
-    ClientTestContext ctx = { .dsds = TRUE, .add_mapping = GPOINTER_TO_UINT (data) };
+    ClientTestContext ctx = { .dsds = TRUE, .add_mapping = GPOINTER_TO_UINT (data) % 3,
+                              .empty_sims = GPOINTER_TO_UINT (data) >= 3 };
     gint sockets[2][2];
     guint timeout_id, i;
     g_autoptr(GPtrArray) clients = g_ptr_array_new_with_free_func (g_object_unref);
@@ -3156,12 +3176,16 @@ main (int argc,
     g_test_add_data_func ("/MM/sit/ims/provisioning-retry-limit", NULL, test_ims_provisioning_retries);
     g_test_add_data_func ("/MM/sit/ims/provisioning-retry-recovery", GUINT_TO_POINTER (1), test_ims_provisioning_retries);
     g_test_add_data_func ("/MM/sit/ims/vops-gating", GUINT_TO_POINTER (2), test_ims_provisioning_retries);
-    g_test_add_func ("/MM/sit/client/radio-transition", test_client_radio_transition);
+    g_test_add_data_func ("/MM/sit/client/radio-transition", NULL, test_client_radio_transition);
+    g_test_add_data_func ("/MM/sit/client/same-profile-after-empty", GUINT_TO_POINTER (1), test_client_radio_transition);
     g_test_add_func ("/MM/sit/client/boot-config", test_client_boot_config);
     g_test_add_func ("/MM/sit/dsds/data-ownership", test_dsds_data_ownership);
     g_test_add_data_func ("/MM/sit/dsds/prepare-coalesced", NULL, test_cp_prepare_coalesced);
     g_test_add_data_func ("/MM/sit/dsds/prepare-add-mapping", GUINT_TO_POINTER (1), test_cp_prepare_coalesced);
     g_test_add_data_func ("/MM/sit/dsds/prepare-automatic-mapping", GUINT_TO_POINTER (2), test_cp_prepare_coalesced);
+    g_test_add_data_func ("/MM/sit/dsds/prepare-empty", GUINT_TO_POINTER (3), test_cp_prepare_coalesced);
+    g_test_add_data_func ("/MM/sit/dsds/prepare-empty-add-mapping", GUINT_TO_POINTER (4), test_cp_prepare_coalesced);
+    g_test_add_data_func ("/MM/sit/dsds/prepare-empty-automatic-mapping", GUINT_TO_POINTER (5), test_cp_prepare_coalesced);
     g_test_add_func ("/MM/sit/client/camped-is-unregistered", test_registration_camped);
     g_test_add_func ("/MM/sit/dsds/secondary-connect", test_client_dsds_secondary);
     g_test_add_func ("/MM/sit/decode/registration-failed", test_parse_registration_failed);
