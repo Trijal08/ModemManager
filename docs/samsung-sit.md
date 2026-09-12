@@ -26,6 +26,23 @@ SIT logs contain message names, IDs, tokens, lengths and status values. Payload
 bytes are deliberately not logged because they may contain subscriber or
 carrier information.
 
+## Suspend and resume
+
+With ModemManager's quick suspend/resume mode enabled, the Samsung SIT plugin
+uses Android's screen-off indication policy before allowing logind to suspend:
+it sends `SET_INDICATION_FILTER` (`0x0928`) with only the registration-failure
+bit (`0x20`) set, followed by `SET_SCREEN_STATE` (`0x0902`) with state zero.
+Call, SMS, SIM and network-time indications are outside this filter and remain
+available as wake events. On resume, ModemManager's normal synchronization
+restores the full `0x7f` filter and refreshes modem state.
+
+Use `systemctl suspend` when testing this path. Writing `mem` directly to
+`/sys/power/state` bypasses logind's `PrepareForSleep` notification and its
+delay inhibitors, so ModemManager cannot quiesce the CP first. Applications
+which issue explicit requests, such as periodic cell-info queries, must also
+stop those requests on `PrepareForSleep`; the unsolicited indication filter
+does not block solicited traffic.
+
 ## Build and postmarketOS packaging
 
 Enable the plugin explicitly when using a package configuration that disables

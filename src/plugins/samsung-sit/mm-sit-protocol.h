@@ -122,6 +122,18 @@ typedef enum {
     MM_SIT_RADIO_STATE_ON      = 2,
 } MMSitRadioState;
 
+/* Android's radio indication-filter bits, passed unchanged on the SIT wire. */
+typedef enum {
+    MM_SIT_INDICATION_FILTER_SIGNAL_STRENGTH      = 1 << 0,
+    MM_SIT_INDICATION_FILTER_FULL_NETWORK_STATE   = 1 << 1,
+    MM_SIT_INDICATION_FILTER_DATA_CALL_DORMANCY   = 1 << 2,
+    MM_SIT_INDICATION_FILTER_LINK_CAPACITY        = 1 << 3,
+    MM_SIT_INDICATION_FILTER_PHYSICAL_CHANNEL     = 1 << 4,
+    MM_SIT_INDICATION_FILTER_REGISTRATION_FAILURE = 1 << 5,
+    MM_SIT_INDICATION_FILTER_BARRING_INFO         = 1 << 6,
+    MM_SIT_INDICATION_FILTER_ALL                   = 0x7f,
+} MMSitIndicationFilter;
+
 /* Address families to ask the network for in a data context. The CP's own
  * numbering, so a data call's granted addr_type uses the same values. */
 /* Why a data call is being torn down. PDP_RESET is the RIL's own

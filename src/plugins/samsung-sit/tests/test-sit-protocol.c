@@ -346,6 +346,7 @@ test_build_config_requests (void)
     };
     g_autoptr(GByteArray) info = NULL;
     g_autoptr(GByteArray) manifest = NULL;
+    g_autoptr(GByteArray) indication_filter = NULL;
     g_autoptr(GByteArray) screen_state = NULL;
     g_autoptr(GError)     error = NULL;
 
@@ -362,7 +363,14 @@ test_build_config_requests (void)
     g_assert_cmpuint (manifest->data[0x110], ==, 20);
     g_assert_cmpmem (&manifest->data[0x114], 20, sha1, 20);
 
-    screen_state = mm_sit_request_new_set_screen_state (4, FALSE);
+    indication_filter = mm_sit_request_new_set_indication_filter (
+        4, MM_SIT_INDICATION_FILTER_REGISTRATION_FAILURE);
+    g_assert_cmpuint (indication_filter->len, ==, 16);
+    g_assert_cmpuint (indication_filter->data[2], ==, 0x28);
+    g_assert_cmpuint (indication_filter->data[3], ==, 0x09);
+    g_assert_cmpmem (&indication_filter->data[12], 4, "\x20\0\0\0", 4);
+
+    screen_state = mm_sit_request_new_set_screen_state (5, FALSE);
     g_assert_cmpuint (screen_state->len, ==, 16);
     g_assert_cmpuint (screen_state->data[2], ==, 0x02);
     g_assert_cmpuint (screen_state->data[3], ==, 0x09);

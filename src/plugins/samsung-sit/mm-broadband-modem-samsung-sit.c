@@ -3929,9 +3929,9 @@ set_screen_state_ready (MMSitClient *client,
 }
 
 static void
-set_unsolicited_events_ready (MMSitClient *client,
-                              GAsyncResult *res,
-                              GTask *task)
+set_indication_filter_ready (MMSitClient *client,
+                             GAsyncResult *res,
+                             GTask *task)
 {
     GError *error = NULL;
 
@@ -3941,10 +3941,9 @@ set_unsolicited_events_ready (MMSitClient *client,
         return;
     }
 
-    /* Android maps the signal indication-filter bit to SET_SCREEN_STATE=1,
-     * which makes this modem emit a large SIGNAL_STRENGTH_IND every second.
-     * ModemManager has no display-state integration, so keep the modem in its
-     * low-rate screen-off policy and use explicit signal queries instead. */
+    /* Android pairs the indication filter with the display state. ModemManager
+     * has no display-state integration, so keep the modem in its screen-off
+     * policy and use explicit signal queries while the system is awake. */
     mm_sit_client_set_screen_state (client, FALSE, NULL,
                                     (GAsyncReadyCallback) set_screen_state_ready,
                                     task);
@@ -3967,8 +3966,8 @@ set_unsolicited_events (MMIfaceModem3gpp   *iface,
         g_object_unref (task);
         return;
     }
-    mm_sit_client_set_indication_filter (client, 0x7f, NULL,
-                                         (GAsyncReadyCallback) set_unsolicited_events_ready,
+    mm_sit_client_set_indication_filter (client, MM_SIT_INDICATION_FILTER_ALL, NULL,
+                                         (GAsyncReadyCallback) set_indication_filter_ready,
                                          task);
 }
 
@@ -3985,11 +3984,26 @@ clear_unsolicited_events (MMIfaceModem3gpp   *self,
                           GAsyncReadyCallback callback,
                           gpointer            user_data)
 {
-    GTask *task = g_task_new (self, NULL, callback, user_data);
+    MMBroadbandModemSamsungSit *sit = MM_BROADBAND_MODEM_SAMSUNG_SIT (self);
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    GTask                      *task;
 
-    /* Keep the control port open: closing it may release an active data call. */
-    g_task_return_boolean (task, TRUE);
-    g_object_unref (task);
+    task = g_task_new (self, NULL, callback, user_data);
+    client = mm_broadband_modem_samsung_sit_peek_client (sit, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    /* Android keeps registration-failure reporting enabled with the screen
+     * off. Calls, SMS, SIM changes and network time are outside this mask and
+     * remain available as wake events. Keep the control port open so active
+     * data calls survive quick suspend. */
+    mm_sit_client_set_indication_filter (
+        client, MM_SIT_INDICATION_FILTER_REGISTRATION_FAILURE, NULL,
+        (GAsyncReadyCallback) set_indication_filter_ready, task);
 }
 
 /*
