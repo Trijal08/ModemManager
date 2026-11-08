@@ -3543,9 +3543,6 @@ typedef struct {
     guint32       apn_types;
     guint32       bearers;
     MMSitDataCall call;
-    /* How long this setup has waited for the channel to go quiet; see
-     * SETUP_QUIESCE_MAX_MS. */
-    guint         quiesce_waited_ms;
 } SetupContext;
 
 static void
@@ -3580,17 +3577,21 @@ static void setup_data_call_ready (MMSitClient  *self,
  * connect_data) brought the same PDN up on the same CP seconds after the IMS
  * path had been refused, and the CP announced "IMS Registered" as it did.
  */
-/* See the quiesce comment in setup_profile_ready(). */
-#define SETUP_QUIESCE_POLL_MS  25
-#define SETUP_QUIESCE_MAX_MS  500
 
-static void setup_profile_ready (MMSitClient *self, GAsyncResult *res, GTask *task);
+static void setup_issue_data_call (MMSitClient *self, GTask *task);
 
-static gboolean
-setup_quiesce_retry (GTask *task)
+/* The PRE_PDN block is advisory: a refused row cannot fail the context. */
+static void
+setup_preamble_ready (MMSitClient  *self,
+                      GAsyncResult *res,
+                      GTask        *task)
 {
-    setup_profile_ready (g_task_get_source_object (task), NULL, task);
-    return G_SOURCE_REMOVE;
+    g_autoptr(GError) error = NULL;
+
+    if (!mm_sit_client_run_pdn_preamble_finish (self, res, &error))
+        mm_obj_dbg (self->priv->port, "pdn preamble: %s; continuing",
+                    error ? error->message : "failed");
+    setup_issue_data_call (self, task);
 }
 
 static void
@@ -3603,39 +3604,44 @@ setup_profile_ready (MMSitClient  *self,
     SetupContext           *ctx = g_task_get_task_data (task);
     GError                 *error = NULL;
 
-    /* res is NULL when re-entered from setup_quiesce_retry(); the profile has
-     * already been dealt with in that case. */
-    if (res) {
-        response = mm_sit_client_command_finish (self, res, &error);
-        if (!response || !message_check_success (response, &error)) {
-            mm_obj_dbg (self->priv->port,
-                        "data profile for APN '%s' rejected (%s); attempting data call setup",
-                        ctx->apn, error ? error->message : "no response");
-            g_clear_error (&error);
-        }
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (!response || !message_check_success (response, &error)) {
+        mm_obj_dbg (self->priv->port,
+                    "data profile for APN '%s' rejected (%s); attempting data call setup",
+                    ctx->apn, error ? error->message : "no response");
+        g_clear_error (&error);
     }
 
+
     /*
-     * Ask with the channel quiet, as stock does.
+     * Stock's last writes before it asks for a context are queries, not
+     * writes. Across five captures its SET_INITIAL_ATTACH_APN lands
+     * 974-8171ms before the ask and its SET_DATA_PROFILE 518-7646ms, and
+     * neither is in its final seven frames -- those are GET_OPERATOR,
+     * QUERY_NETWORK_SELECTION_MODE, GET_DATA_REGISTRATION and
+     * GET_VOICE_REGISTRATION, then the request.
      *
-     * Stock has no registration query in flight beside its SETUP_DATA_CALL for
-     * `ims` in any of five captures -- its companions are setters or nothing --
-     * and the CP answers in 1.0-2.6s against our 2.9-10.9s. Coalescing caps us
-     * at stock's two outstanding; this drains the last of them.
-     *
-     * It has to be here and not where the IMS sequence decides to ask: between
-     * that decision and this frame are a cid acquire, the data preference, the
-     * attach re-assert and the profile push, and other callers issue
-     * registration queries inside those tens of milliseconds. Gating earlier
-     * reads a moment that does not matter, which is exactly what r64 did and
-     * why it changed nothing.
+     * We wrote the attach APN 10-14ms and the profile 4-8ms before asking, so
+     * the CP was still taking a profile change as it was asked to establish a
+     * context against it. Running the PRE_PDN block here instead of before
+     * this sequence puts those writes where stock has them and leaves the
+     * queries last, which is the whole point of that block.
      */
-    if (mm_sit_client_registration_queries_in_flight (self) &&
-        ctx->quiesce_waited_ms < SETUP_QUIESCE_MAX_MS) {
-        ctx->quiesce_waited_ms += SETUP_QUIESCE_POLL_MS;
-        g_timeout_add (SETUP_QUIESCE_POLL_MS, (GSourceFunc) setup_quiesce_retry, task);
+    if (ctx->apn_types & MM_SIT_APN_TYPE_IMS) {
+        mm_sit_client_run_pdn_preamble (self, g_task_get_cancellable (task),
+                                        (GAsyncReadyCallback) setup_preamble_ready,
+                                        task);
         return;
     }
+    setup_issue_data_call (self, task);
+}
+
+static void
+setup_issue_data_call (MMSitClient *self, GTask *task)
+{
+    SetupContext         *ctx = g_task_get_task_data (task);
+    g_autoptr(GByteArray) request = NULL;
+    GError               *error = NULL;
 
     request = mm_sit_request_new_setup_data_call (mm_sit_client_next_token (self), ctx->cid,
                                                   ctx->apn, ctx->pdp, ctx->apn_types, NULL, &error);
@@ -3649,8 +3655,7 @@ setup_profile_ready (MMSitClient  *self,
     /* The CP takes its time on a fresh context -- the captured ims activation
      * ran to about 600 ms and a retry ladder belongs to the caller, not here. */
     mm_sit_client_command (self, request, 30, g_task_get_cancellable (task),
-                           (GAsyncReadyCallback) setup_data_call_ready, task);
-}
+                           (GAsyncReadyCallback) setup_data_call_ready, task);}
 
 static void
 setup_data_call_ready (MMSitClient  *self,

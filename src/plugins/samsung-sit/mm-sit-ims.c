@@ -765,23 +765,16 @@ sequence_step (GTask *task)
 
     case STEP_PREAMBLE:
         /*
-         * Stock's last act before asking for the context is a short block, not
-         * the profile push: 0x0d39, 0x0d0b, 0x0d3b, 0x091a, 0x0d0b and two
-         * queries, inside the 518 ms (ch 0xf5) / 618 ms (0xf6) between its last
-         * SET_DATA_PROFILE and its SETUP_DATA_CALL.
-         *
-         * We send those same ids -- at radio-on, twenty seconds early. Aligning
-         * our AP->CP stream against stock's on identical firmware left this as
-         * the divergence at the point of the request: 59% of stock's order on
-         * ch 0xf5 and 31% on 0xf6, with the tail of both missing exactly this
-         * block. See MM_SIT_BOOT_PHASE_PRE_PDN.
-         *
-         * Advisory: a refused row is still a row the CP saw, so this cannot
-         * fail the context.
+         * The block itself now runs from mm_sit_client_setup_data_call(),
+         * between the profile push and the context request, because that is
+         * where stock's equivalent sits: its SET_DATA_PROFILE is 518ms (ch
+         * 0xf5) / 618ms (0xf6) before its SETUP_DATA_CALL and this block fills
+         * the gap. Run from here it landed before the profile push instead, so
+         * our last writes before the request were the attach APN at 10-14ms
+         * and the profile at 4-8ms, where stock has queries.
          */
-        mm_sit_client_run_pdn_preamble (self->priv->client,
-                                        g_task_get_cancellable (task),
-                                        (GAsyncReadyCallback) preamble_ready, task);
+        ctx->step++;
+        sequence_step (task);
         return;
 
     case STEP_PDN:
