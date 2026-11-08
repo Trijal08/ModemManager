@@ -3018,6 +3018,15 @@ ims_retry_peer_ready (gint fd, GIOCondition condition, ImsRetryPeer *peer)
     case MM_SIT_MESSAGE_SET_INDICATION_FILTER:
     case MM_SIT_MESSAGE_SET_SCREEN_STATE:
         break;
+    /*
+     * The registration nudge, which repeats once a second while the CP has
+     * not announced registration. Its answer is discarded -- the write is
+     * the point -- so a plain success is right, and the retry ladder this
+     * test measures is unaffected by it.
+     */
+    case MM_SIT_MESSAGE_GET_DATA_REGISTRATION:
+    case MM_SIT_MESSAGE_GET_OPERATOR:
+        break;
     case 0x0d3a: /* AIMS_STACK_STOP_REQ */
         peer->stops++;
         break;

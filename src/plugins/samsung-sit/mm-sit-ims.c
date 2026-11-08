@@ -133,6 +133,28 @@
  */
 #define REGISTRATION_WATCHDOG_SECS 180
 
+/*
+ * How often to ask after registration while waiting for the CP to announce
+ * it.
+ *
+ * Not impatience -- the CP will not emit its REGISTRATION indication while
+ * the link is idle, and the AP's next write is what frees it. Measured with
+ * the rings instrument at 20 Hz across a stall: `fmt rx undrained` was 0 for
+ * all 115 samples, so nothing was queued and no notification had been lost,
+ * and the indication arrived within a second of whatever the AP wrote next.
+ *
+ * Stock never goes quiet here. Over the three seconds after its IMS grant it
+ * makes 17-45 writes on the stack with a longest silent gap of 0.32-1.79 s,
+ * and its registration lands 0.7-2.5 s after the grant. We made a comparable
+ * 14-27 writes but all inside the first 30 ms, then nothing -- so the CP
+ * finished registering at about a second and the indication sat until the
+ * next periodic poll twelve to sixteen seconds later.
+ *
+ * One second keeps us inside stock's own gap, and the query is the one we
+ * already use for this question rather than traffic invented to fill space.
+ */
+#define REGISTRATION_NUDGE_SECS 1
+
 typedef enum {
     IMS_STATE_STOPPED,
     IMS_STATE_STARTING,
@@ -212,6 +234,9 @@ struct _MMSitImsPrivate {
     /* Armed when provisioning completes, disarmed by registration; see
      * REGISTRATION_WATCHDOG_SECS. */
     guint         registration_watchdog_id;
+    /* Keeps the link from going silent while a registration is outstanding;
+     * see REGISTRATION_NUDGE_SECS. */
+    guint         registration_nudge_id;
 };
 
 enum {
@@ -680,6 +705,34 @@ clear_registration_watchdog (MMSitIms *self)
         g_source_remove (self->priv->registration_watchdog_id);
         self->priv->registration_watchdog_id = 0;
     }
+    if (self->priv->registration_nudge_id) {
+        g_source_remove (self->priv->registration_nudge_id);
+        self->priv->registration_nudge_id = 0;
+    }
+}
+
+/* Ask after registration, and discard the answer: the CP announces the real
+ * state in its own indication, and what this is for is the write. */
+static void
+registration_nudge_done (MMSitClient  *client,
+                         GAsyncResult *res,
+                         gpointer      unused)
+{
+    MMSitRegistration registration;
+
+    mm_sit_client_get_registration_finish (client, res, &registration, NULL);
+}
+
+static gboolean
+registration_nudge_cb (MMSitIms *self)
+{
+    if (self->priv->registered || self->priv->state != IMS_STATE_STARTED) {
+        self->priv->registration_nudge_id = 0;
+        return G_SOURCE_REMOVE;
+    }
+    mm_sit_client_get_registration (self->priv->client, self->priv->cancellable,
+                                    (GAsyncReadyCallback) registration_nudge_done, NULL);
+    return G_SOURCE_CONTINUE;
 }
 
 static gboolean
@@ -709,6 +762,9 @@ arm_registration_watchdog (MMSitIms *self)
     self->priv->registration_watchdog_id =
         g_timeout_add_seconds (REGISTRATION_WATCHDOG_SECS,
                                (GSourceFunc) registration_watchdog_cb, self);
+    self->priv->registration_nudge_id =
+        g_timeout_add_seconds (REGISTRATION_NUDGE_SECS,
+                               (GSourceFunc) registration_nudge_cb, self);
 }
 
 static void
