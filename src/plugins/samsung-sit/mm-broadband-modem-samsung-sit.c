@@ -38,8 +38,38 @@ static void iface_modem_signal_init (MMIfaceModemSignalInterface *iface);
 static void iface_modem_time_init (MMIfaceModemTimeInterface *iface);
 static void iface_modem_voice_init (MMIfaceModemVoiceInterface *iface);
 
+/*
+ * Delivered-SMS duplicate suppression.
+ *
+ * SMS delivery is at-least-once: when an acknowledgement is lost the SMSC
+ * resends, and 3GPP makes that the sender's duty rather than a fault. The CP
+ * passes the resend up as another NEW_SMS with a byte-identical PDU, and so
+ * does its own fast retransmit. Measured here: the same PDU twice 21ms apart,
+ * and again 30s apart, both byte-identical, while our acknowledgement went out
+ * in 3-24ms every time -- so this is not something being slow enough to fix.
+ *
+ * Android drops these in the framework (InboundSmsHandler keeps a raw-message
+ * table for exactly this), so suppressing them here is parity, not a
+ * workaround. Keep the last few PDU digests with the time they arrived; an
+ * exact repeat inside the window is still acknowledged -- dropping it silently
+ * would only earn another resend -- but it is not handed up twice.
+ *
+ * Two genuinely distinct messages cannot collide: a deliver PDU carries the
+ * originating address and the SMSC timestamp, so an identical digest means the
+ * same message from the same sender in the same second.
+ */
+#define SMS_DEDUP_SLOTS   8
+#define SMS_DEDUP_WINDOW_SECS 120
+
+typedef struct {
+    guint  digest;
+    gint64 seen_us;
+} SmsDedupSlot;
+
 struct _MMBroadbandModemSamsungSitPrivate {
     MMSitCp     *cp;
+    SmsDedupSlot sms_seen[SMS_DEDUP_SLOTS];
+    guint        sms_seen_next;
     gint         logical_stack; /* -1: legacy single-active SIM switching */
     GPtrArray   *clients;
     MMSitClient *client; /* borrowed primary logical-stack client */
@@ -606,6 +636,95 @@ ack_sms_ready (MMSitClient  *client,
         mm_obj_warn (self, "couldn't acknowledge the delivered SMS: %s", error->message);
 }
 
+/*
+ * True when this exact PDU has already been handed up recently, and records it
+ * otherwise. Status reports go through the same door and are deduplicated the
+ * same way: a repeated report would mark the same message delivered twice.
+ */
+static gboolean
+sms_already_delivered (MMBroadbandModemSamsungSit *self,
+                       const guint8               *pdu,
+                       gsize                       pdu_len)
+{
+    gint64 now = g_get_monotonic_time ();
+    guint  digest;
+    guint  i;
+
+    if (!pdu || !pdu_len)
+        return FALSE;
+
+    /* A plain FNV-1a walk: the PDU is short and this never leaves the host. */
+    digest = 2166136261u;
+    for (i = 0; i < pdu_len; i++) {
+        digest ^= pdu[i];
+        digest *= 16777619u;
+    }
+
+    for (i = 0; i < SMS_DEDUP_SLOTS; i++) {
+        SmsDedupSlot *slot = &self->priv->sms_seen[i];
+
+        if (!slot->seen_us || slot->digest != digest)
+            continue;
+        if (now - slot->seen_us > (gint64) SMS_DEDUP_WINDOW_SECS * G_USEC_PER_SEC)
+            continue;
+        slot->seen_us = now;	/* keep a repeatedly resent message suppressed */
+        return TRUE;
+    }
+
+    self->priv->sms_seen[self->priv->sms_seen_next].digest = digest;
+    self->priv->sms_seen[self->priv->sms_seen_next].seen_us = now;
+    self->priv->sms_seen_next = (self->priv->sms_seen_next + 1) % SMS_DEDUP_SLOTS;
+    return FALSE;
+}
+
+/* A delivered PDU on its way up, owned by the idle below. */
+typedef struct {
+    MMBroadbandModemSamsungSit *self;
+    MMSmsPart                  *part;
+} TakePartContext;
+
+static void
+take_part_context_free (TakePartContext *ctx)
+{
+    g_clear_object (&ctx->self);
+    g_slice_free (TakePartContext, ctx);
+}
+
+/*
+ * Hand the part to the core.
+ *
+ * A delivery report is matched to the message it belongs to by its reference,
+ * and the reference is only recorded when the SEND_SMS response completes. The
+ * CP answers the send and reports the delivery in the same batch, so handling
+ * the report straight out of the indication runs it while the send's
+ * completion is still queued: nothing claims that reference yet, the match
+ * fails, and the report lands as a stray inbound message while the message it
+ * belonged to is never marked delivered. Observed exactly that way -- report
+ * for reference 237 taken at 21:59:09, "SMS part accepted, message reference
+ * 237" in the same second but after it.
+ *
+ * So let the main loop drain first. A GTask completes at G_PRIORITY_DEFAULT
+ * and this runs at G_PRIORITY_DEFAULT_IDLE, which is lower, so an already
+ * queued send completion is guaranteed to record its reference before the
+ * report looks for it. The acknowledgement does not wait for any of this.
+ */
+static gboolean
+take_part_idle (TakePartContext *ctx)
+{
+    g_autoptr(GError) error = NULL;
+
+    if (!mm_iface_modem_messaging_take_part (MM_IFACE_MODEM_MESSAGING (ctx->self),
+                                             mm_broadband_modem_create_sms (MM_BROADBAND_MODEM (ctx->self)),
+                                             ctx->part,
+                                             MM_SMS_STATE_RECEIVED,
+                                             MM_SMS_STORAGE_ME,
+                                             &error))
+        mm_obj_warn (ctx->self, "couldn't store the delivered SMS: %s", error->message);
+
+    take_part_context_free (ctx);
+    return G_SOURCE_REMOVE;
+}
+
 static void
 handle_new_sms (MMBroadbandModemSamsungSit *self,
                 const MMSitMessage         *message)
@@ -614,6 +733,7 @@ handle_new_sms (MMBroadbandModemSamsungSit *self,
     MMSitSmsDeliver    deliver;
     MMSmsPart         *part;
     MMSitClient       *client;
+    TakePartContext   *ctx;
 
     if (!mm_sit_message_parse_new_sms (message, &deliver, &error)) {
         mm_obj_warn (self, "couldn't parse a delivered SMS: %s", error->message);
@@ -624,21 +744,27 @@ handle_new_sms (MMBroadbandModemSamsungSit *self,
                 deliver.status_report ? "SMS delivery report" : "SMS",
                 deliver.over_ims ? "IMS" : "the CS group", deliver.pdu_len);
 
+    if (sms_already_delivered (self, deliver.pdu, deliver.pdu_len)) {
+        mm_obj_dbg (self, "%s is a byte-identical resend; acknowledging without delivering it again",
+                    deliver.status_report ? "SMS delivery report" : "SMS");
+        goto ack;
+    }
+
     part = mm_sms_part_3gpp_new_from_binary_pdu (SMS_PART_INVALID_INDEX,
                                                  deliver.pdu, deliver.pdu_len,
                                                  self, FALSE, &error);
-    if (!part)
+    if (!part) {
         mm_obj_warn (self, "couldn't parse the delivered SMS PDU: %s", error->message);
-    /* A delivery report goes through the same door: the core matches it to the
-     * message it belongs to by its reference and marks that one delivered. */
-    else if (!mm_iface_modem_messaging_take_part (MM_IFACE_MODEM_MESSAGING (self),
-                                                  mm_broadband_modem_create_sms (MM_BROADBAND_MODEM (self)),
-                                                  part,
-                                                  MM_SMS_STATE_RECEIVED,
-                                                  MM_SMS_STORAGE_ME,
-                                                  &error))
-        mm_obj_warn (self, "couldn't store the delivered SMS: %s", error->message);
+    } else {
+        /* A delivery report goes through the same door, and has to wait for
+         * the main loop -- see take_part_idle(). */
+        ctx = g_slice_new0 (TakePartContext);
+        ctx->self = g_object_ref (self);
+        ctx->part = part;
+        g_idle_add ((GSourceFunc) take_part_idle, ctx);
+    }
 
+ack:
     /* Acknowledge either way: a message the core could not take is still one
      * the CP is holding, and leaving it unacknowledged stalls delivery. */
     client = mm_broadband_modem_samsung_sit_peek_client (self, NULL);

@@ -52,23 +52,29 @@ typedef struct {
 } SendContext;
 
 /*
- * Whether a failed part is worth another try on the same transport.
+ * Whether a failure means the message was never submitted, so sending it again
+ * is safe.
  *
- * A timeout says nothing about the transport: the frame never reached the CP,
- * because the FMT ring was holding one the CP had not drained.  Switching
- * transports on that is the wrong answer twice over -- it spends the one retry
- * on a path we had already decided against, and if the ring then clears, the
- * message goes out over CS when IMS was correct.  A refusal from the CP is the
- * opposite: that transport was tried and declined, so the other one is exactly
- * what to reach for.
+ * Only an explicit refusal from the CP says that. It declined the message, so
+ * nothing went to the network and the other transport is exactly what to reach
+ * for.
+ *
+ * A timeout says the opposite of what it looks like. The earlier reading here
+ * was that the frame never reached the CP, so resending cost nothing -- and
+ * that is measurably false: the CP answers SEND_SMS in 10-30s on the CS group
+ * while the message is already on the air, confirmed by the recipient replying
+ * before the response arrived. Resending on a timeout therefore sends the
+ * message twice, and SMS submission is not idempotent. A timed-out send is
+ * reported as failed without a second copy; the 180s command timeout below is
+ * what makes that verdict mean something.
  */
 static gboolean
-send_failure_is_transport_blind (const GError *error)
+send_failure_was_refusal (const GError *error)
 {
-    return g_error_matches (error, MM_SERIAL_ERROR, MM_SERIAL_ERROR_RESPONSE_TIMEOUT) ||
-           g_error_matches (error, MM_SERIAL_ERROR, MM_SERIAL_ERROR_SEND_FAILED) ||
-           g_error_matches (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT) ||
-           g_error_matches (error, G_IO_ERROR, G_IO_ERROR_BUSY);
+    return !(g_error_matches (error, MM_SERIAL_ERROR, MM_SERIAL_ERROR_RESPONSE_TIMEOUT) ||
+             g_error_matches (error, MM_SERIAL_ERROR, MM_SERIAL_ERROR_SEND_FAILED) ||
+             g_error_matches (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT) ||
+             g_error_matches (error, G_IO_ERROR, G_IO_ERROR_BUSY));
 }
 
 static void
@@ -98,24 +104,21 @@ send_part_ready (MMSitClient  *client,
     GError          *error = NULL;
 
     if (!mm_sit_client_send_sms_finish (client, res, &reference, &error)) {
-        if (!ctx->retried) {
-            gboolean blind = send_failure_is_transport_blind (error);
-
+        if (!ctx->retried && send_failure_was_refusal (error)) {
             /* The CP may not take the transport we guessed from the access
-             * technology; try the other one once before giving up -- unless
-             * the frame never got to the CP at all, in which case the
-             * transport was never the question. */
-            mm_obj_warn (self, "SMS send over %s failed (%s); retrying over %s",
+             * technology; it has now declined this one, so try the other. */
+            mm_obj_warn (self, "SMS send over %s refused (%s); retrying over %s",
                          ctx->over_ims ? "IMS" : "the CS group", error->message,
-                         blind ? "the same transport"
-                               : (ctx->over_ims ? "the CS group" : "IMS"));
+                         ctx->over_ims ? "the CS group" : "IMS");
             g_clear_error (&error);
             ctx->retried = TRUE;
-            if (!blind)
-                ctx->over_ims = !ctx->over_ims;
+            ctx->over_ims = !ctx->over_ims;
             send_next_part (task);
             return;
         }
+        if (!send_failure_was_refusal (error))
+            mm_obj_warn (self, "SMS send over %s did not complete (%s); not resending, it may already be on the air",
+                         ctx->over_ims ? "IMS" : "the CS group", error->message);
         g_prefix_error (&error, "couldn't send SMS part: ");
         g_task_return_error (task, error);
         g_object_unref (task);

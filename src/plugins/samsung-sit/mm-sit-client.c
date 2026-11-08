@@ -924,8 +924,15 @@ send_sms_step (GTask *task)
         g_object_unref (task);
         return;
     }
-    /* The network round trip is on the CP's side of this, so allow for it. */
-    mm_sit_client_command (self, request, 60, g_task_get_cancellable (task),
+    /*
+     * The network round trip is on the CP's side of this, so allow for it --
+     * generously. Measured on the CS group: answers at 10.5, 13.7, 15.5, 17.2
+     * and 29.5s, with the message already delivered well before the answer.
+     * A timeout here can no longer be retried (SMS submission is not
+     * idempotent), so it has to be long enough that reaching it really does
+     * mean the CP never answered.
+     */
+    mm_sit_client_command (self, request, 180, g_task_get_cancellable (task),
                            (GAsyncReadyCallback) send_sms_ready, task);
 }
 
