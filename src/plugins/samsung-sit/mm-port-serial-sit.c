@@ -18,15 +18,26 @@ struct _MMPortSerialSitPrivate {
     GList   *unsolicited_handlers;
     guint    next_handler_id;
     guint16  next_token;
-    /* Tokens of the commands handed to MMPortSerial, oldest first.
+    /*
+     * Requests written and not yet answered, keyed by the token the CP echoes
+     * back. Several at once, on purpose.
      *
-     * It is a queue, not a single slot: mm_port_serial_command() appends to its
-     * own queue and runs them one at a time, so several commands can be
-     * submitted before the first is even written. The answer we are waiting for
-     * is always the one at the head -- responses come back in the order the
-     * commands went out -- and a response carrying any other token belongs to a
-     * command that already gave up. */
-    GQueue  *pending_tokens;
+     * The CP answers out of order and -- measured on hardware -- will sit on a
+     * finished reply until the AP writes again. One request at a time deadlocks
+     * against that: the write that would release the reply is the one we would
+     * only make once we had it, so the reply arrives when our own timeout fires
+     * and is then too late to use. Stock keeps up to nine requests outstanding
+     * on one channel and is never silent for more than 124ms with work
+     * pending, so it never meets the behaviour at all.
+     */
+    GHashTable *pending;
+    /*
+     * Frames written in submission order, held only while the transport is
+     * blocked. One frame per write, never two together and never a part of
+     * one: the ring is message-oriented and both have broken it before.
+     */
+    GQueue  *tx;
+    guint    tx_id;
 };
 
 G_DEFINE_TYPE (MMPortSerialSit, mm_port_serial_sit, MM_TYPE_PORT_SERIAL)
@@ -86,114 +97,186 @@ dispatch_indication (MMPortSerialSit    *self,
     }
 }
 
-/* Consume everything at the head of the buffer that is not the answer we are
- * waiting for: indications always, and -- when 'drop_stale' is set, i.e. a
- * command is in flight -- responses carrying somebody else's token.
- *
- * A stale response is the wreckage of a command that timed out: the CP answered
- * late, MMPortSerial has already moved on to the next command, and the frame
- * now sits in front of a caller it has nothing to do with. Returning it there
- * costs two commands, the one it is wrongly matched against and the one it
- * actually belonged to, so drop it and keep waiting. The token is the CP's own
- * echo of ours and exists precisely to tell these apart.
- *
- * "Somebody else's" is measured against the head of the pending queue, which is
- * the command currently being run. Measuring it against the most recently
- * submitted command instead would discard the running command's own answer as
- * soon as anything else was queued behind it. */
+typedef struct {
+    MMPortSerialSit *self;
+    GTask           *task;
+    guint16          token;
+    guint16          expected_id;
+    guint            timeout_id;
+    GCancellable    *cancellable;
+    gulong           cancelled_id;
+} Pending;
+
 static void
-drain_leading_noise (MMPortSerialSit *self,
-                     GByteArray      *buffer,
-                     gboolean         drop_stale)
+pending_free (Pending *pending)
+{
+    if (pending->timeout_id)
+        g_source_remove (pending->timeout_id);
+    if (pending->cancellable) {
+        if (pending->cancelled_id)
+            g_cancellable_disconnect (pending->cancellable, pending->cancelled_id);
+        g_object_unref (pending->cancellable);
+    }
+    g_clear_object (&pending->task);
+    g_free (pending);
+}
+
+/*
+ * Hand the answer to its caller and retire the token. Taking it out of the
+ * table frees the Pending, so nothing here may touch it afterwards -- and the
+ * task is stolen first so completing it cannot run against a freed Pending if
+ * the caller submits its next request from the callback.
+ */
+static void
+pending_complete (Pending *pending, MMSitMessage *response, GError *error)
+{
+    MMPortSerialSit         *self = pending->self;
+    g_autoptr(GTask)         task = g_steal_pointer (&pending->task);
+    g_autoptr(MMSitMessage)  owned = response;
+
+    g_hash_table_remove (self->priv->pending, GUINT_TO_POINTER ((guint) pending->token));
+    if (!task) {
+        if (error)
+            g_error_free (error);
+        return;
+    }
+    if (error)
+        g_task_return_error (task, error);
+    else
+        g_task_return_pointer (task, g_steal_pointer (&owned), (GDestroyNotify) mm_sit_message_free);
+}
+
+static gboolean
+pending_timed_out (Pending *pending)
+{
+    pending->timeout_id = 0;
+    mm_obj_dbg (pending->self, "SIT request 0x%04x token 0x%04x went unanswered",
+                pending->expected_id, pending->token);
+    pending_complete (pending, NULL,
+                      g_error_new (MM_SERIAL_ERROR, MM_SERIAL_ERROR_RESPONSE_TIMEOUT,
+                                   "Serial command timed out"));
+    return G_SOURCE_REMOVE;
+}
+
+static void
+pending_cancelled (GCancellable *cancellable, Pending *pending)
+{
+    pending_complete (pending, NULL,
+                      g_error_new (G_IO_ERROR, G_IO_ERROR_CANCELLED,
+                                   "SIT request cancelled"));
+}
+
+static void tx_flush (MMPortSerialSit *self);
+
+static gboolean
+tx_retry (MMPortSerialSit *self)
+{
+    self->priv->tx_id = 0;
+    tx_flush (self);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+tx_flush (MMPortSerialSit *self)
+{
+    while (!g_queue_is_empty (self->priv->tx)) {
+        g_autoptr(GByteArray) frame = g_queue_peek_head (self->priv->tx);
+        g_autoptr(GError)     error = NULL;
+
+        if (mm_port_serial_send (MM_PORT_SERIAL (self), frame, &error)) {
+            g_queue_pop_head (self->priv->tx);
+            continue;
+        }
+        if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK)) {
+            /* Keep it at the head so order is preserved, and come back for it. */
+            g_steal_pointer (&frame);
+            if (!self->priv->tx_id)
+                self->priv->tx_id = g_timeout_add (10, (GSourceFunc) tx_retry, self);
+            return;
+        }
+        mm_obj_warn (self, "could not write SIT frame: %s", error->message);
+        g_queue_pop_head (self->priv->tx);
+    }
+}
+
+static void
+tx_push (MMPortSerialSit *self, GByteArray *frame)
+{
+    g_queue_push_tail (self->priv->tx, g_byte_array_ref (frame));
+    tx_flush (self);
+}
+
+/*
+ * Consume every frame the buffer holds in full: indications go to their
+ * handlers, a response goes to whichever outstanding request echoes its token,
+ * and a response for no outstanding request is the wreckage of one that already
+ * gave up. Nothing is ever left behind for MMPortSerial's own response parsing,
+ * which this port does not use.
+ */
+static void
+drain_frames (MMPortSerialSit *self, GByteArray *buffer)
 {
     while (buffer->len >= MM_SIT_HEADER_SIZE) {
         g_autoptr(MMSitMessage) message = NULL;
         g_autoptr(GError)       error = NULL;
         guint16                 frame_len;
+        Pending                *pending;
 
         if (!peek_complete_frame (self, buffer, &frame_len))
             return;
 
         message = mm_sit_message_parse (buffer->data, frame_len, &error);
+        g_byte_array_remove_range (buffer, 0, frame_len);
         if (!message) {
             mm_obj_warn (self, "could not parse SIT message: %s", error->message);
-            g_byte_array_remove_range (buffer, 0, frame_len);
             continue;
         }
 
         if (message->type == MM_SIT_MESSAGE_TYPE_INDICATION) {
             dispatch_indication (self, message);
-            g_byte_array_remove_range (buffer, 0, frame_len);
             continue;
         }
 
-        if (drop_stale && message->type == MM_SIT_MESSAGE_TYPE_RESPONSE) {
-            guint16 waiting_for;
-
-            waiting_for = (guint16) GPOINTER_TO_UINT (g_queue_peek_head (self->priv->pending_tokens));
-            if (message->token != waiting_for) {
-                mm_obj_dbg (self, "<-- late response %s (0x%04x), token 0x%04x: dropped, waiting for token 0x%04x",
-                            mm_sit_message_id_get_string (message->id), message->id,
-                            message->token, waiting_for);
-                g_byte_array_remove_range (buffer, 0, frame_len);
-                continue;
-            }
+        if (message->type != MM_SIT_MESSAGE_TYPE_RESPONSE) {
+            mm_obj_warn (self, "unexpected SIT message type %u", message->type);
+            continue;
         }
 
-        return;
-    }
-}
+        pending = g_hash_table_lookup (self->priv->pending,
+                                       GUINT_TO_POINTER ((guint) message->token));
+        if (!pending) {
+            mm_obj_dbg (self, "<-- late response %s (0x%04x), token 0x%04x: nothing is waiting for it",
+                        mm_sit_message_id_get_string (message->id), message->id, message->token);
+            continue;
+        }
 
-static void
-drain_leading_indications (MMPortSerialSit *self,
-                           GByteArray      *buffer)
-{
-    drain_leading_noise (self, buffer, FALSE);
+        log_message (self, "<-- response", message);
+        if (message->id != pending->expected_id) {
+            pending_complete (pending, NULL,
+                              g_error_new (G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                                           "Unexpected SIT response 0x%04x for token 0x%04x; expected 0x%04x",
+                                           message->id, message->token, pending->expected_id));
+            continue;
+        }
+        pending_complete (pending, g_steal_pointer (&message), NULL);
+    }
 }
 
 static void
 parse_unsolicited (MMPortSerial *port,
                    GByteArray   *response_buffer)
 {
-    drain_leading_indications (MM_PORT_SERIAL_SIT (port), response_buffer);
+    drain_frames (MM_PORT_SERIAL_SIT (port), response_buffer);
 }
 
+/* Every frame is already accounted for by the time this runs; see drain_frames(). */
 static MMPortSerialResponseType
 parse_response (MMPortSerial  *port,
                 GByteArray    *response_buffer,
                 GByteArray   **parsed_response,
                 GError       **error)
 {
-    MMPortSerialSit          *self = MM_PORT_SERIAL_SIT (port);
-    g_autoptr(MMSitMessage)   message = NULL;
-    guint16                   frame_len;
-
-    drain_leading_noise (self, response_buffer, !g_queue_is_empty (self->priv->pending_tokens));
-    if (!peek_complete_frame (self, response_buffer, &frame_len))
-        return MM_PORT_SERIAL_RESPONSE_NONE;
-
-    message = mm_sit_message_parse (response_buffer->data, frame_len, error);
-    if (!message) {
-        g_byte_array_remove_range (response_buffer, 0, frame_len);
-        return MM_PORT_SERIAL_RESPONSE_ERROR;
-    }
-
-    if (message->type != MM_SIT_MESSAGE_TYPE_RESPONSE) {
-        g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                     "Unexpected SIT message type %u while waiting for a response",
-                     message->type);
-        g_byte_array_remove_range (response_buffer, 0, frame_len);
-        return MM_PORT_SERIAL_RESPONSE_ERROR;
-    }
-
-    log_message (self, "<-- response", message);
-    *parsed_response = g_byte_array_sized_new (frame_len);
-    g_byte_array_append (*parsed_response, response_buffer->data, frame_len);
-    g_byte_array_remove_range (response_buffer, 0, frame_len);
-
-    /* A single WWAN read may contain the response followed by indications. */
-    drain_leading_indications (self, response_buffer);
-    return MM_PORT_SERIAL_RESPONSE_BUFFER;
+    return MM_PORT_SERIAL_RESPONSE_NONE;
 }
 
 static void
@@ -216,56 +299,58 @@ debug_log (MMPortSerial *port,
                     buffer_len);
 }
 
-typedef struct {
-    guint16 expected_id;
-    guint16 expected_token;
-} CommandContext;
-
-static void
-serial_command_ready (MMPortSerialSit *self,
-                      GAsyncResult    *res,
-                      GTask           *task)
+void
+mm_port_serial_sit_command (MMPortSerialSit     *self,
+                            GByteArray          *request,
+                            guint32              timeout_seconds,
+                            GCancellable        *cancellable,
+                            GAsyncReadyCallback  callback,
+                            gpointer             user_data)
 {
-    g_autoptr(GByteArray)  response_buffer = NULL;
-    g_autoptr(MMSitMessage) response = NULL;
-    g_autoptr(GError)       error = NULL;
-    CommandContext         *ctx;
+    Pending *pending;
+    guint16  token;
 
-    response_buffer = mm_port_serial_command_finish (MM_PORT_SERIAL (self), res, &error);
+    g_return_if_fail (MM_IS_PORT_SERIAL_SIT (self));
+    g_return_if_fail (request != NULL);
+    g_return_if_fail (request->len >= MM_SIT_HEADER_SIZE);
 
-    /* This command is done, whatever happened to it: retire its token so the
-     * next one becomes the answer we are waiting for. */
-    g_queue_pop_head (self->priv->pending_tokens);
+    token = request->data[6] | (((guint16) request->data[7]) << 8);
 
-    if (!response_buffer) {
-        g_task_return_error (task, g_steal_pointer (&error));
-        g_object_unref (task);
+    /*
+     * Tokens come from mm_port_serial_sit_next_token() and wrap, so one still
+     * outstanding would silently take over the older request's answer. Refuse
+     * rather than guess whose response the next frame is.
+     */
+    if (g_hash_table_contains (self->priv->pending, GUINT_TO_POINTER ((guint) token))) {
+        g_task_report_new_error (self, callback, user_data, mm_port_serial_sit_command,
+                                 G_IO_ERROR, G_IO_ERROR_BUSY,
+                                 "SIT token 0x%04x is already outstanding", token);
         return;
     }
 
-    response = mm_sit_message_parse (response_buffer->data, response_buffer->len, &error);
-    if (!response) {
-        g_task_return_error (task, g_steal_pointer (&error));
-        g_object_unref (task);
-        return;
+    pending = g_new0 (Pending, 1);
+    pending->self = self;
+    pending->token = token;
+    pending->expected_id = request->data[2] | (((guint16) request->data[3]) << 8);
+    pending->task = g_task_new (self, NULL, callback, user_data);
+    pending->timeout_id = g_timeout_add_seconds (timeout_seconds,
+                                                 (GSourceFunc) pending_timed_out,
+                                                 pending);
+    /*
+     * The cancellable is held here rather than given to the GTask, because
+     * cancelling has to retire the token as well and only this knows how.
+     */
+    if (cancellable) {
+        pending->cancellable = g_object_ref (cancellable);
+        pending->cancelled_id = g_cancellable_connect (cancellable,
+                                                       (GCallback) pending_cancelled,
+                                                       pending, NULL);
     }
+    g_hash_table_insert (self->priv->pending, GUINT_TO_POINTER ((guint) token), pending);
 
-    ctx = g_task_get_task_data (task);
-    if (response->type != MM_SIT_MESSAGE_TYPE_RESPONSE ||
-        response->id != ctx->expected_id ||
-        response->token != ctx->expected_token) {
-        g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
-                                 "Unexpected SIT response 0x%04x token 0x%04x; expected 0x%04x token 0x%04x",
-                                 response->id, response->token,
-                                 ctx->expected_id, ctx->expected_token);
-        g_object_unref (task);
-        return;
-    }
-
-    g_task_return_pointer (task,
-                           g_steal_pointer (&response),
-                           (GDestroyNotify) mm_sit_message_free);
-    g_object_unref (task);
+    /* mm_port_serial_send() still logs the write through the debug_log vfunc
+     * below, so the request lines read exactly as they did before. */
+    tx_push (self, request);
 }
 
 MMSitMessage *
@@ -277,34 +362,13 @@ mm_port_serial_sit_command_finish (MMPortSerialSit  *self,
     return g_task_propagate_pointer (G_TASK (res), error);
 }
 
-static void
-indication_sent (MMPortSerialSit *self,
-                 GAsyncResult    *res,
-                 gpointer         user_data)
-{
-    g_autoptr(GByteArray)  discard = NULL;
-    g_autoptr(GError)      error = NULL;
-
-    discard = mm_port_serial_command_finish (MM_PORT_SERIAL (self), res, &error);
-    /*
-     * An indication is answered by nothing, so the serial layer always ends
-     * in a timeout.  That is the expected outcome, not a failure; anything
-     * else is worth a line.
-     */
-    if (error && !g_error_matches (error, MM_SERIAL_ERROR, MM_SERIAL_ERROR_RESPONSE_TIMEOUT))
-        mm_obj_dbg (self, "could not send SIT indication: %s", error->message);
-}
-
 /*
  * Send a frame the CP will not answer.
  *
  * Indications the AP raises at the CP (AIMS_MEDIA_STATE_IND is the one we
- * need) carry no token and get no response, so they must not go through
- * mm_port_serial_sit_command(): that pushes the frame's token onto
- * pending_tokens, and a token of zero there would swallow the matching of a
- * later real response.  The write itself still happens immediately; only the
- * wait is pointless, so it is given the shortest timeout the serial layer
- * takes and its result is dropped.
+ * need) carry no token and get no response, so they take the write path
+ * without an entry in `pending`: a token of zero there would swallow the
+ * matching of a later real response.
  */
 void
 mm_port_serial_sit_send_indication (MMPortSerialSit *self,
@@ -314,48 +378,7 @@ mm_port_serial_sit_send_indication (MMPortSerialSit *self,
     g_return_if_fail (frame != NULL);
     g_return_if_fail (frame->len >= MM_SIT_HEADER_SIZE);
 
-    mm_port_serial_command (MM_PORT_SERIAL (self),
-                            frame,
-                            1,
-                            FALSE,
-                            FALSE,
-                            NULL,
-                            (GAsyncReadyCallback) indication_sent,
-                            NULL);
-}
-
-void
-mm_port_serial_sit_command (MMPortSerialSit     *self,
-                            GByteArray          *request,
-                            guint32              timeout_seconds,
-                            GCancellable        *cancellable,
-                            GAsyncReadyCallback  callback,
-                            gpointer             user_data)
-{
-    CommandContext *ctx;
-    GTask          *task;
-
-    g_return_if_fail (MM_IS_PORT_SERIAL_SIT (self));
-    g_return_if_fail (request != NULL);
-    g_return_if_fail (request->len >= MM_SIT_HEADER_SIZE);
-
-    ctx = g_new0 (CommandContext, 1);
-    ctx->expected_id = request->data[2] | (((guint16) request->data[3]) << 8);
-    ctx->expected_token = request->data[6] | (((guint16) request->data[7]) << 8);
-
-    g_queue_push_tail (self->priv->pending_tokens,
-                       GUINT_TO_POINTER ((guint) ctx->expected_token));
-
-    task = g_task_new (self, cancellable, callback, user_data);
-    g_task_set_task_data (task, ctx, g_free);
-    mm_port_serial_command (MM_PORT_SERIAL (self),
-                            request,
-                            timeout_seconds,
-                            FALSE,
-                            FALSE,
-                            cancellable,
-                            (GAsyncReadyCallback) serial_command_ready,
-                            task);
+    tx_push (self, frame);
 }
 
 guint16
@@ -443,7 +466,9 @@ mm_port_serial_sit_init (MMPortSerialSit *self)
                                               MM_TYPE_PORT_SERIAL_SIT,
                                               MMPortSerialSitPrivate);
 
-    self->priv->pending_tokens = g_queue_new ();
+    self->priv->pending = g_hash_table_new_full (g_direct_hash, g_direct_equal,
+                                                 NULL, (GDestroyNotify) pending_free);
+    self->priv->tx = g_queue_new ();
 }
 
 static void
@@ -461,7 +486,10 @@ finalize (GObject *object)
                                                                 self->priv->unsolicited_handlers);
     }
 
-    g_queue_free (self->priv->pending_tokens);
+    if (self->priv->tx_id)
+        g_source_remove (self->priv->tx_id);
+    g_hash_table_unref (self->priv->pending);
+    g_queue_free_full (self->priv->tx, (GDestroyNotify) g_byte_array_unref);
 
     G_OBJECT_CLASS (mm_port_serial_sit_parent_class)->finalize (object);
 }

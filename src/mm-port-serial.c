@@ -526,6 +526,98 @@ serial_debug (MMPortSerial *self,
         MM_PORT_SERIAL_GET_CLASS (self)->debug_log (self, prefix, buf, len);
 }
 
+/*
+ * Write one message now: no queue, no timeout, no waiting for a response.
+ *
+ * mm_port_serial_command() is strictly one at a time -- it writes the head of
+ * its queue, waits for the answer or the timeout, and only then writes the
+ * next. That cannot drive a peer which may sit on a finished reply until the
+ * next write arrives, because the write it is waiting for is the one we would
+ * only make after collecting the reply. A subclass talking to such a peer uses
+ * this to keep several requests outstanding and does its own in-flight
+ * accounting, matching replies by whatever its protocol gives it.
+ *
+ * Nothing here touches the command queue, the response timeout or the
+ * consecutive-timeout count. A blocked transport is reported as
+ * G_IO_ERROR_WOULD_BLOCK and nothing is written, so the caller -- which still
+ * holds the frame -- can retry it in order rather than have it part-written.
+ */
+gboolean
+mm_port_serial_send (MMPortSerial     *self,
+                     const GByteArray *buffer,
+                     GError          **error)
+{
+    g_return_val_if_fail (MM_IS_PORT_SERIAL (self), FALSE);
+    g_return_val_if_fail (buffer != NULL && buffer->len > 0, FALSE);
+
+    if (self->priv->iochannel == NULL && self->priv->socket == NULL) {
+        g_set_error_literal (error, MM_SERIAL_ERROR, MM_SERIAL_ERROR_SEND_FAILED,
+                             "Sending message failed: device is not enabled");
+        return FALSE;
+    }
+
+    if (mm_port_get_connected (MM_PORT (self))) {
+        g_set_error_literal (error, MM_SERIAL_ERROR, MM_SERIAL_ERROR_SEND_FAILED,
+                             "Sending message failed: device is connected");
+        return FALSE;
+    }
+
+    serial_debug (self, "-->", (const gchar *) buffer->data, buffer->len);
+
+    if (self->priv->iochannel) {
+        GIOStatus status;
+        gsize     written = 0;
+
+        status = g_io_channel_write_chars (self->priv->iochannel,
+                                           (const gchar *) buffer->data,
+                                           (gssize) buffer->len,
+                                           &written, error);
+        if (status == G_IO_STATUS_AGAIN || (status == G_IO_STATUS_NORMAL && written == 0)) {
+            g_clear_error (error);
+            g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK,
+                                 "Sending message failed: transport is busy");
+            return FALSE;
+        }
+        if (status != G_IO_STATUS_NORMAL) {
+            g_prefix_error (error, "Sending message failed: ");
+            return FALSE;
+        }
+        if (written != buffer->len) {
+            g_set_error (error, MM_SERIAL_ERROR, MM_SERIAL_ERROR_SEND_FAILED,
+                         "Sending message failed: wrote %" G_GSIZE_FORMAT " of %u bytes",
+                         written, buffer->len);
+            return FALSE;
+        }
+        return TRUE;
+    }
+
+    {
+        g_autoptr(GError) inner_error = NULL;
+        gssize            sent;
+
+        sent = g_socket_send (self->priv->socket,
+                              (const gchar *) buffer->data, buffer->len,
+                              NULL, &inner_error);
+        if (sent < 0) {
+            if (g_error_matches (inner_error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK)) {
+                g_set_error_literal (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK,
+                                     "Sending message failed: transport is busy");
+                return FALSE;
+            }
+            g_propagate_error (error, g_steal_pointer (&inner_error));
+            g_prefix_error (error, "Sending message failed: ");
+            return FALSE;
+        }
+        if ((gsize) sent != buffer->len) {
+            g_set_error (error, MM_SERIAL_ERROR, MM_SERIAL_ERROR_SEND_FAILED,
+                         "Sending message failed: sent %" G_GSSIZE_FORMAT " of %u bytes",
+                         sent, buffer->len);
+            return FALSE;
+        }
+        return TRUE;
+    }
+}
+
 static gboolean
 port_serial_process_command (MMPortSerial *self,
                              CommandContext *ctx,

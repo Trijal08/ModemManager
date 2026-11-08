@@ -1611,27 +1611,53 @@ test_port_drops_a_stale_response (void)
 
 /* Peer for the queued-commands case: answer each request in the order it
  * arrives, promptly and correctly. Nothing is stale here -- the point is that
- * two commands are outstanding at once. */
+ * two commands are outstanding at once.
+ *
+ * Frames are taken by the length in their header rather than one per read: the
+ * port writes each one separately but this is a SOCK_STREAM socket, so with
+ * both requests outstanding they arrive together, exactly as they do on the
+ * sit-proxy socket. A read-per-request peer answers the first and then waits
+ * for a frame it has already eaten.
+ */
 static gpointer
 port_test_queue_peer (PortTestContext *ctx)
 {
-    guint i;
+    guint8 buffer[256];
+    gsize  have = 0;
+    guint  answered = 0;
 
-    for (i = 0; i < 2; i++) {
-        guint8 request[64];
-        guint8 reply[] = {
-            1, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-        };
-        gssize request_len;
+    while (answered < 2) {
+        gssize n;
+        gsize  offset = 0;
 
-        request_len = read (ctx->peer_fd, request, sizeof (request));
-        g_assert_cmpint (request_len, >=, MM_SIT_HEADER_SIZE);
-        reply[2] = request[2];
-        reply[3] = request[3];
-        reply[6] = request[6];
-        reply[7] = request[7];
-        g_assert_true (write_all (ctx->peer_fd, reply, sizeof (reply)));
+        n = read (ctx->peer_fd, buffer + have, sizeof (buffer) - have);
+        if (n <= 0)
+            break;
+        have += (gsize) n;
+
+        while (have - offset >= MM_SIT_HEADER_SIZE) {
+            guint8  reply[] = {
+                1, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0,
+                0, 0, 0, 0, 0, 0, 0, 0,
+            };
+            guint16 frame_len;
+
+            if (!mm_sit_frame_peek_length (buffer + offset, have - offset, &frame_len, NULL))
+                break;
+            if (have - offset < frame_len)
+                break;
+
+            reply[2] = buffer[offset + 2];
+            reply[3] = buffer[offset + 3];
+            reply[6] = buffer[offset + 6];
+            reply[7] = buffer[offset + 7];
+            g_assert_true (write_all (ctx->peer_fd, reply, sizeof (reply)));
+            answered++;
+            offset += frame_len;
+        }
+
+        memmove (buffer, buffer + offset, have - offset);
+        have -= offset;
     }
     return NULL;
 }

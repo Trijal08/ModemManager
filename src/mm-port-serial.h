@@ -151,6 +151,10 @@ gboolean mm_port_serial_flush             (MMPortSerial *self,
                                            MMPortSerialFlushType type,
                                            GError **error);
 
+gboolean    mm_port_serial_send           (MMPortSerial *self,
+                                           const GByteArray *buffer,
+                                           GError **error);
+
 void        mm_port_serial_command        (MMPortSerial *self,
                                            GByteArray *command,
                                            guint32 timeout_seconds,
