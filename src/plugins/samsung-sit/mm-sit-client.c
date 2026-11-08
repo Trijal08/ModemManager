@@ -3077,9 +3077,41 @@ mm_sit_client_send_boot_config_finish (MMSitClient  *self,
  * with "Serial command timed out" on an attempt that was about to succeed.
  * Stock's worst over 858 pairs on the same firmware is 2.59 s.
  *
- * CONNECT_STEP_SETUP already used this value and has its own retry on top.
+ * CONNECT_STEP_SETUP is the exception and has CONNECT_SETUP_TIMEOUT_SECS.
  */
 #define CONNECT_STEP_TIMEOUT_SECS 10
+
+/*
+ * How long CONNECT_STEP_SETUP waits, which is not the same question.
+ *
+ * A refused PDN comes back as a *response* carrying its cause, so the refusal
+ * path never waits for this; the timeout only fires when the CP says nothing
+ * at all. Bringing a PDN up is also the one step that does real work out on
+ * the network, and this CP takes its time over it.
+ *
+ * Measured across 24 captures: a SETUP that is going to be granted has been
+ * answered as late as 15.83 s, and one that is going to be refused as late as
+ * 29.96 s. The CP has never failed to answer within ~30 s.
+ *
+ * At the 10 s this used to share with the other steps, the retry raced the CP
+ * and lost. Captured on hardware 2026-11-08, stack 1:
+ *
+ *   16:59:42  --> SETUP_DATA_CALL token 0x015a
+ *   16:59:52  --> SETUP_DATA_CALL token 0x0166   retry, exactly 10 s later
+ *   16:59:52  <-- response        token 0x0166   retry answered at once
+ *   16:59:58  <-- response        token 0x015a   the first reply, orphaned
+ *
+ * So a context the CP was still establishing got a second SETUP for the same
+ * cid on top of it, and whichever reply lost the race was dropped as stale.
+ * Two establishments in flight for one context is also a plausible source of
+ * the first-ask refusals this has been chasing -- see the cause 168 / 2250 /
+ * 36 signatures in the capture set -- though that is not demonstrated here.
+ *
+ * 45 s clears the measured answer window with margin. It costs nothing in the
+ * refusal case and only delays recovery from a request the CP never answers,
+ * which no capture has yet shown happening.
+ */
+#define CONNECT_SETUP_TIMEOUT_SECS 45
 
 typedef enum {
     CONNECT_STEP_PREFERRED_MODEM,
@@ -3585,7 +3617,7 @@ connect_step (GTask *task)
 
     if (ctx->step == CONNECT_STEP_SETUP) {
         ctx->setup_sent = TRUE;
-        mm_sit_client_command (self, request, CONNECT_STEP_TIMEOUT_SECS, cancellable,
+        mm_sit_client_command (self, request, CONNECT_SETUP_TIMEOUT_SECS, cancellable,
                                (GAsyncReadyCallback) connect_setup_ready, task);
     } else
         run_checked_command (ctx->step == CONNECT_STEP_PREFERRED_MODEM ? control_client (self) : self,
