@@ -481,8 +481,14 @@ typedef enum {
 typedef struct {
     Step           step;
     MMSitDataCall  call;
-    /* Hidden-menu frames, sent in order; a large carrier set segments. */
-    SamsungAimsFrameList menu;
+    /*
+     * Hidden-menu frames, sent in order. One list per push: stock sends the
+     * configuration as three messages rather than one, and sending them as
+     * one left the link silent for twelve seconds while the CP sat on its
+     * registration indication. A large carrier set still segments within its
+     * own push.
+     */
+    SamsungAimsFrameList menu[MM_SIT_IMS_CONFIG_GROUP_LAST];
     gsize          menu_sent;
     MMSitImsConfig *config;
     /* The carrier's whole profile set, re-pushed before the PDN. */
@@ -493,10 +499,47 @@ typedef struct {
     gboolean        pdn_fresh;
 } SequenceContext;
 
+/* Total frames across the three pushes. */
+static gsize
+menu_total (const SequenceContext *ctx)
+{
+    gsize total = 0;
+    guint g;
+
+    for (g = 0; g < MM_SIT_IMS_CONFIG_GROUP_LAST; g++)
+        total += ctx->menu[g].count;
+    return total;
+}
+
+/* The nth frame over the three pushes in order, or FALSE past the end. */
+static gboolean
+menu_nth (const SequenceContext *ctx,
+          gsize                  n,
+          const guint8         **out_frame,
+          gsize                 *out_len)
+{
+    guint g;
+
+    for (g = 0; g < MM_SIT_IMS_CONFIG_GROUP_LAST; g++) {
+        if (n < ctx->menu[g].count) {
+            *out_frame = ctx->menu[g].frames[n];
+            *out_len   = ctx->menu[g].lens[n];
+            return TRUE;
+        }
+        n -= ctx->menu[g].count;
+    }
+    return FALSE;
+}
+
 static void
 sequence_context_free (SequenceContext *ctx)
 {
-    samsung_aims_frame_list_free (&ctx->menu);
+    {
+        guint g;
+
+        for (g = 0; g < MM_SIT_IMS_CONFIG_GROUP_LAST; g++)
+            samsung_aims_frame_list_free (&ctx->menu[g]);
+    }
     g_clear_pointer (&ctx->config, mm_sit_ims_config_free);
     g_clear_pointer (&ctx->apns, g_ptr_array_unref);
     g_free (ctx);
@@ -539,7 +582,7 @@ sequence_step_ready (MMSitIms     *self,
     }
 
     /* A segmented hidden menu stays on its step until every frame has gone. */
-    if (ctx->step == STEP_HIDDEN_MENU && ctx->menu_sent < ctx->menu.count) {
+    if (ctx->step == STEP_HIDDEN_MENU && ctx->menu_sent < menu_total (ctx)) {
         sequence_step (task);
         return;
     }
@@ -810,13 +853,19 @@ sequence_step (GTask *task)
                                              task);
         return;
 
-    case STEP_HIDDEN_MENU:
-        send_frame (task,
-                    ctx->menu.frames[ctx->menu_sent],
-                    ctx->menu.lens[ctx->menu_sent],
-                    "pushing configuration");
+    case STEP_HIDDEN_MENU: {
+        const guint8 *mframe = NULL;
+        gsize         mlen = 0;
+
+        if (!menu_nth (ctx, ctx->menu_sent, &mframe, &mlen)) {
+            g_task_return_boolean (task, TRUE);
+            g_object_unref (task);
+            return;
+        }
+        send_frame (task, mframe, mlen, "pushing configuration");
         ctx->menu_sent++;
         return;
+    }
 
     case STEP_ADD_PDN_INFO: {
         SamsungAimsPdnInfo info;
@@ -1010,21 +1059,42 @@ start_sequence (MMSitIms *self)
         sequence_context_free (ctx);
         return;
     }
-    entries = mm_sit_ims_config_peek_entries (ctx->config, &n_entries);
+    /*
+     * One menu per push. Stock splits its configuration into three messages
+     * -- everything, then the identity extras, then the carrier block on its
+     * own -- and they are three separate writes a second or two apart. That
+     * spacing is load-bearing: the CP does not emit its registration
+     * indication while the link is idle, so sending this as a single frame
+     * left the stack silent for twelve seconds afterwards and registration
+     * waited for whatever wrote next.
+     */
+    {
+        guint g;
 
-    status = samsung_aims_build_hidden_menu (mm_sit_client_next_token (self->priv->client),
-                                             entries, n_entries, &ctx->menu);
-    if (status != SAMSUNG_SIT_STATUS_OK) {
-        mm_obj_warn (self, "could not build the IMS configuration: %s",
-                     samsung_sit_status_name (status));
-        sequence_context_free (ctx);
-        return;
+        n_entries = 0;
+        for (g = 0; g < MM_SIT_IMS_CONFIG_GROUP_LAST; g++) {
+            gsize n = 0;
+
+            entries = mm_sit_ims_config_peek_group (ctx->config, g, &n);
+            if (!n)
+                continue;
+            n_entries += n;
+            status = samsung_aims_build_hidden_menu (mm_sit_client_next_token (self->priv->client),
+                                                     entries, n, &ctx->menu[g]);
+            if (status != SAMSUNG_SIT_STATUS_OK) {
+                mm_obj_warn (self, "could not build the IMS configuration: %s",
+                             samsung_sit_status_name (status));
+                sequence_context_free (ctx);
+                return;
+            }
+        }
     }
 
     mm_obj_dbg (self, "IMS configuration for '%s': %" G_GSIZE_FORMAT " entries in %"
-                G_GSIZE_FORMAT " frame(s), UA '%s'",
+                G_GSIZE_FORMAT " frame(s) over %u push(es), UA '%s'",
                 mm_sit_ims_config_get_carrier (ctx->config), n_entries,
-                ctx->menu.count, mm_sit_ims_config_get_user_agent (ctx->config));
+                menu_total (ctx), (guint) MM_SIT_IMS_CONFIG_GROUP_LAST,
+                mm_sit_ims_config_get_user_agent (ctx->config));
 
     /*
      * A PDN already up means this is a retry after a later step failed; keep it

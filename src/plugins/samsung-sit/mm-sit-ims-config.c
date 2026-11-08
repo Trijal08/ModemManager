@@ -99,6 +99,20 @@ mm_sit_ims_config_peek_entries (const MMSitImsConfig *self,
     return samsung_ims_config_entries (self->handle, out_n_entries);
 }
 
+const SamsungAimsConfigEntry *
+mm_sit_ims_config_peek_group (const MMSitImsConfig *self,
+                              MMSitImsConfigGroup   group,
+                              gsize                *out_n_entries)
+{
+    g_return_val_if_fail (self != NULL, NULL);
+    g_return_val_if_fail (out_n_entries != NULL, NULL);
+    g_return_val_if_fail (group < MM_SIT_IMS_CONFIG_GROUP_LAST, NULL);
+
+    return samsung_ims_config_group (self->handle,
+                                     (SamsungImsConfigGroup) group,
+                                     out_n_entries);
+}
+
 const gchar *
 mm_sit_ims_config_get_carrier (const MMSitImsConfig *self)
 {

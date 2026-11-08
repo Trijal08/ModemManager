@@ -63,6 +63,24 @@ MMSitImsConfig *mm_sit_ims_config_resolve (const gchar                  *databas
 
 void mm_sit_ims_config_free (MMSitImsConfig *self);
 
+/*
+ * Which of the vendor's three HIDDEN_MENU pushes to take. Stock sends its
+ * configuration as three messages and the CP does not emit its registration
+ * indication while the link is idle, so the three writes are part of the
+ * behaviour rather than a detail of packaging.
+ */
+typedef enum {
+    MM_SIT_IMS_CONFIG_GROUP_FULL     = 0,
+    MM_SIT_IMS_CONFIG_GROUP_IDENTITY = 1,
+    MM_SIT_IMS_CONFIG_GROUP_CARRIER  = 2,
+    MM_SIT_IMS_CONFIG_GROUP_LAST,
+} MMSitImsConfigGroup;
+
+/* The entries of one push, in the order they should reach the CP. */
+const SamsungAimsConfigEntry *mm_sit_ims_config_peek_group (const MMSitImsConfig *self,
+                                                            MMSitImsConfigGroup   group,
+                                                            gsize                *out_n_entries);
+
 /* The entries, in the order they should reach the CP. Owned by `self`. */
 const SamsungAimsConfigEntry *mm_sit_ims_config_peek_entries (const MMSitImsConfig *self,
                                                               gsize                *out_n_entries);
