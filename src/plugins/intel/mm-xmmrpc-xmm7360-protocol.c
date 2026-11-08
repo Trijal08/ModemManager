@@ -115,14 +115,10 @@ xmm7360_byte_array_read_asn_int (GByteArray        *buf,
         *out_arg = arg;
 
     if (out_val) {
-        /* If the ASN int is negative, we must convert a int8/int16
-         * value to the appropriate u32 value to avoid returning a
-         * positive 32-bit gint.
-         */
-        if ((arg.type == XMM7360_RPC_MSG_ARG_TYPE_BYTE) && (arg.value.b < 0))
-            *out_val = (arg.value.b << 24) >> 24;
-        else if ((arg.type == XMM7360_RPC_MSG_ARG_TYPE_SHORT) && (arg.value.s < 0))
-            *out_val = (arg.value.s << 16) >> 16;
+        if (arg.type == XMM7360_RPC_MSG_ARG_TYPE_BYTE)
+            *out_val = arg.value.b;
+        else if (arg.type == XMM7360_RPC_MSG_ARG_TYPE_SHORT)
+            *out_val = arg.value.s;
         else
             *out_val = arg.value.l;
     }
