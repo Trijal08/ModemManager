@@ -5,6 +5,7 @@
 #define MM_SIT_CLIENT_H
 
 #include "mm-port-serial-sit.h"
+#include "mm-sit-boot-parity.h"
 
 /*
  * A data PDN the CP would not create, carrying the cause it gave. On this CP
@@ -239,6 +240,29 @@ void     mm_sit_client_get_facility_lock        (MMSitClient        *self,
                                                  GCancellable       *cancellable,
                                                  GAsyncReadyCallback callback,
                                                  gpointer            user_data);
+/* How many applications the card named, and the facility query against one of
+ * them; stock repeats the pair once per application. */
+/*
+ * Stock's UICC access-control probe: look for the GSMA access-rule applets by
+ * AID, fall back to reading EF_DIR, and close the channel. Read-only, and it
+ * always closes what it opened. Nothing is reported; it exists for parity.
+ */
+void     mm_sit_client_probe_uicc_access_rules        (MMSitClient        *self,
+                                                       GCancellable       *cancellable,
+                                                       GAsyncReadyCallback callback,
+                                                       gpointer            user_data);
+gboolean mm_sit_client_probe_uicc_access_rules_finish (MMSitClient        *self,
+                                                       GAsyncResult       *res,
+                                                       GError            **error);
+
+guint    mm_sit_client_get_aid_count (MMSitClient *self);
+void     mm_sit_client_get_facility_lock_for_aid (MMSitClient        *self,
+                                                  guint8              facility,
+                                                  guint               aid_index,
+                                                  GCancellable       *cancellable,
+                                                  GAsyncReadyCallback callback,
+                                                  gpointer            user_data);
+
 gboolean mm_sit_client_get_facility_lock_finish (MMSitClient        *self,
                                                  GAsyncResult       *res,
                                                  gboolean           *out_locked,
@@ -540,6 +564,25 @@ gboolean mm_sit_client_connect_data_finish (MMSitClient        *self,
  * that second context, so it gets the bare request -- with a context id from
  * the same allocator, which is the part that must not be bypassed.
  */
+/*
+ * Replay the boot-parity PRE_PDN block -- what stock sends between its last
+ * data profile and its IMS context. Advisory throughout; it cannot fail.
+ */
+void     mm_sit_client_run_pdn_preamble        (MMSitClient        *self,
+                                                GCancellable       *cancellable,
+                                                GAsyncReadyCallback callback,
+                                                gpointer            user_data);
+gboolean mm_sit_client_run_pdn_preamble_finish (MMSitClient        *self,
+                                                GAsyncResult       *res,
+                                                GError            **error);
+
+/* Build one boot-parity row; `mccmnc` supplies the one substitution the client
+ * cannot make itself, and may be NULL. */
+GByteArray *mm_sit_client_build_parity_request (MMSitClient              *self,
+                                                const MMSitParityRequest *req,
+                                                const gchar              *mccmnc,
+                                                GError                  **error);
+
 void     mm_sit_client_setup_data_call        (MMSitClient        *self,
                                                const gchar        *apn,
                                                MMSitPdpType        pdp,

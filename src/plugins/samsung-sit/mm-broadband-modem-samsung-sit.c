@@ -106,7 +106,7 @@ struct _MMBroadbandModemSamsungSitPrivate {
      * profile per round trip, before the radio goes on. */
     GPtrArray   *boot_apns;
     guint        boot_apn_index;
-    /* Cursor into mm_sit_parity_requests[] for the walk in progress. */
+    /* Cursor into this stack's parity table for the walk in progress. */
     guint        parity_index;
 
     /* Reach the SIT ports through sit-proxy rather than owning the device
@@ -1775,8 +1775,11 @@ sim_inventory_indication (MMSitClient *client,
                           const MMSitMessage *message,
                           MMBroadbandModemSamsungSit *self)
 {
-    if (message->id == MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED)
+    if (message->id == MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED) {
+        /* The cached inventory load_sim_slots() reads is now stale. */
+        mm_sit_cp_forget_sim_slot_status (self->priv->cp);
         schedule_sim_check (self);
+    }
 }
 
 static void
@@ -1855,8 +1858,10 @@ sit_indication (MMSitClient              *client,
     if (message->id == MM_SIT_MESSAGE_SIM_STATUS_CHANGED) {
         invalidate_carrier_config (self);
         schedule_sim_check (self);
-    } else if (message->id == MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED)
+    } else if (message->id == MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED) {
+        mm_sit_cp_forget_sim_slot_status (self->priv->cp);
         schedule_sim_check (self);
+    }
     else if (message->id == MM_SIT_MESSAGE_CARRIER_CONFIG_STATUS) {
         gboolean applied = FALSE;
 
@@ -3330,12 +3335,27 @@ load_enabled_facility_locks_ready (MMSitClient  *client,
     g_object_unref (task);
 }
 
-/* Stock's first facility query. Its answer is not something ModemManager
- * reports, so it is consumed and the real query follows either way. */
+/*
+ * Stock's facility-lock pass: 0x10 then 0x03, once per application the card
+ * names. Measured on identical firmware -- four requests on the stack whose
+ * SIM carries an ISIM (AID ...87 10 04...) and two on the one that does not,
+ * the second pair differing only in the AID. Only the last 0x03 feeds anything
+ * ModemManager reports; the rest are consumed.
+ *
+ * `aid_index` walks the applications. 0x10 is written as a literal because
+ * nothing we have names it, and inventing a name would be worse.
+ */
+typedef struct {
+    guint aid_index;
+    guint aid_count;
+} FacilityLockContext;
+
+static void facility_lock_step (GTask *task, gboolean want_pin);
+
 static void
-facility_lock_parity_probe_ready (MMSitClient  *client,
-                                  GAsyncResult *res,
-                                  GTask        *task)
+facility_lock_probe_ready (MMSitClient  *client,
+                           GAsyncResult *res,
+                           GTask        *task)
 {
     MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
     g_autoptr(GError)           error = NULL;
@@ -3343,10 +3363,45 @@ facility_lock_parity_probe_ready (MMSitClient  *client,
 
     if (!mm_sit_client_get_facility_lock_finish (client, res, &locked, &error))
         mm_obj_dbg (self, "facility 0x10 query failed: %s", error->message);
+    facility_lock_step (task, TRUE);
+}
 
-    mm_sit_client_get_facility_lock (client, MM_SIT_FACILITY_SIM_PIN, NULL,
-                                     (GAsyncReadyCallback) load_enabled_facility_locks_ready,
-                                     task);
+static void
+facility_lock_pin_ready (MMSitClient  *client,
+                         GAsyncResult *res,
+                         GTask        *task)
+{
+    FacilityLockContext *ctx = g_task_get_task_data (task);
+
+    /* The last application's answer is the one that counts; earlier ones are
+     * stock's parity traffic and are consumed. */
+    if (++ctx->aid_index >= ctx->aid_count) {
+        load_enabled_facility_locks_ready (client, res, task);
+        return;
+    }
+    facility_lock_step (task, FALSE);
+}
+
+static void
+facility_lock_step (GTask *task, gboolean want_pin)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    FacilityLockContext        *ctx = g_task_get_task_data (task);
+    MMSitClient                *client = mm_broadband_modem_samsung_sit_peek_client (self, NULL);
+
+    if (!client) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED, "no SIT client");
+        g_object_unref (task);
+        return;
+    }
+    if (want_pin)
+        mm_sit_client_get_facility_lock_for_aid (client, MM_SIT_FACILITY_SIM_PIN, ctx->aid_index,
+                                                 NULL, (GAsyncReadyCallback) facility_lock_pin_ready,
+                                                 task);
+    else
+        mm_sit_client_get_facility_lock_for_aid (client, 0x10, ctx->aid_index,
+                                                 NULL, (GAsyncReadyCallback) facility_lock_probe_ready,
+                                                 task);
 }
 
 static void
@@ -3355,6 +3410,7 @@ load_enabled_facility_locks (MMIfaceModem3gpp   *iface,
                              gpointer            user_data)
 {
     MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
+    FacilityLockContext        *ctx;
     MMSitClient                *client;
     GError                     *error = NULL;
     GTask                      *task;
@@ -3366,20 +3422,11 @@ load_enabled_facility_locks (MMIfaceModem3gpp   *iface,
         g_object_unref (task);
         return;
     }
-    /*
-     * Stock asks twice per application, in this order: facility 0x10, then
-     * 0x03 (SIM PIN). Measured on baseband g5400c-260604-260807-B-16035863 --
-     * four requests on the stack whose SIM has an ISIM, two on the other. Only
-     * 0x03 feeds anything ModemManager reports, so the first is a parity probe
-     * whose answer is discarded. 0x10 is written as a literal because nothing
-     * we have names it, and inventing a name would be worse.
-     *
-     * Still short of stock on a SIM with an ISIM: it repeats the pair for the
-     * ISIM AID, and the client caches only the subscription application.
-     */
-    mm_sit_client_get_facility_lock (client, 0x10, NULL,
-                                     (GAsyncReadyCallback) facility_lock_parity_probe_ready,
-                                     task);
+    /* One 0x10/0x03 pair per application; see facility_lock_step(). */
+    ctx = g_new0 (FacilityLockContext, 1);
+    ctx->aid_count = MAX (mm_sit_client_get_aid_count (client), 1);
+    g_task_set_task_data (task, ctx, g_free);
+    facility_lock_step (task, FALSE);
 }
 
 static GList *
@@ -3745,7 +3792,7 @@ power_up_retry_chain (GTask *task)
 }
 
 /*
- * Replay one phase of mm_sit_parity_requests[]: the traffic this modem's own
+ * Replay one phase of this stack's parity table: the traffic this modem's own
  * Android puts on a control stack before it asks for an IMS PDN, and this
  * plugin did not.
  *
@@ -3770,98 +3817,16 @@ parity_build (MMBroadbandModemSamsungSit *self,
               const MMSitParityRequest   *req,
               GError                    **error)
 {
-    g_autofree guint8 *body = NULL;
-    gsize              len = 4 + req->len;
+    g_autoptr(MMBaseSim)  sim = NULL;
+    const gchar          *mccmnc = NULL;
 
-    body = g_malloc0 (len);
-    if (req->payload)
-        memcpy (body + 4, req->payload, req->len);
-
-    switch (req->sub) {
-    case MM_SIT_PARITY_SUB_MCCMNC: {
-        g_autoptr(MMBaseSim)  sim = NULL;
-        const gchar          *mccmnc;
-
+    /* The client does every substitution but this one, which needs the SIM. */
+    if (req->sub == MM_SIT_PARITY_SUB_MCCMNC) {
         g_object_get (self, MM_IFACE_MODEM_SIM, &sim, NULL);
         mccmnc = sim ? mm_gdbus_sim_get_operator_identifier (MM_GDBUS_SIM (sim)) : NULL;
-        /* Nothing to name the subscription with yet; the CP gets it next time. */
-        if (!mccmnc || !mccmnc[0] || strlen (mccmnc) >= req->len)
-            return NULL;
-        memset (body + 4, 0, req->len);
-        memcpy (body + 4, mccmnc, strlen (mccmnc));
-        break;
-    }
-    case MM_SIT_PARITY_SUB_STACK:
-        if (req->len < 1)
-            return NULL;
-        body[4] = (guint8) mm_sit_client_get_stack (client);
-        break;
-    case MM_SIT_PARITY_SUB_WALLCLOCK: {
-        /*
-         * Six bytes of UTC at payload+9: yy mm dd HH MM SS, yy = year - 2000,
-         * each a plain byte rather than BCD.
-         *
-         * Stock's advances every frame (22:23:30, :31, :34, :35 across one
-         * boot). The table is a verbatim replay, so before this it sent the
-         * capture's own clock -- 2026-10-11 04:59:48, identical on every boot
-         * and both stacks, which is what the CP was being told the time was.
-         */
-        g_autoptr(GDateTime) now = g_date_time_new_now_utc ();
-
-        if (req->len < 15 || !now)
-            return NULL;
-        body[4 + 9]  = (guint8) (g_date_time_get_year (now) - 2000);
-        body[4 + 10] = (guint8) g_date_time_get_month (now);
-        body[4 + 11] = (guint8) g_date_time_get_day_of_month (now);
-        body[4 + 12] = (guint8) g_date_time_get_hour (now);
-        body[4 + 13] = (guint8) g_date_time_get_minute (now);
-        body[4 + 14] = (guint8) g_date_time_get_second (now);
-        break;
-    }
-    case MM_SIT_PARITY_SUB_NONE:
-    default:
-        break;
     }
 
-    /*
-     * The AIMS stack requests name their stack in payload byte 1, 1-based, and
-     * the table does not cover it.
-     *
-     * mm-sit-boot-parity.h is a verbatim replay of one cold boot captured on
-     * **one stack**, and its own header says so -- it substitutes the two rows
-     * it knew named a subscription (SET_OPEN_CARRIER_INFO's MCCMNC and
-     * SET_MOBILE_DATA_STATE's stack) and leaves the rest byte-for-byte. But
-     * STACK_START (0x0d39), STACK_STOP (0x0d3a), 0x0d3b and 0x0d3c also carry
-     * the stack, so replaying them unmodified sent stack 0's index on both
-     * stacks: on ch 0xf6 we were starting, stopping and configuring the IMS
-     * stack of the *other* subscription.
-     *
-     * Confirmed against komodo's own Android, 2026-11-03: across every AP->CP
-     * request in the capture, exactly these four ids have payload byte 1 equal
-     * to 1 on ch 0xf5 and 2 on ch 0xf6, and no others do. In particular
-     * **0x0d0b is 2 on both channels** -- it is not a stack index and must not
-     * be touched. Our own wire showed the damage as a mixture, because the IMS
-     * sequence in mm-sit-ims.c gets it right (port_index + 1) while the parity
-     * replay did not: `01 02` from one path and `01 01` from the other on the
-     * same channel.
-     *
-     * Done here rather than in the table so it survives regeneration.
-     */
-    switch (req->id) {
-    case 0x0d39:
-    case 0x0d3a:
-    case 0x0d3b:
-    case 0x0d3c:
-        if (req->len < 2)
-            return NULL;
-        body[4 + 1] = (guint8) (mm_sit_client_get_stack (client) + 1);
-        break;
-    default:
-        break;
-    }
-
-    return mm_sit_request_new (req->id, mm_sit_client_next_token (client),
-                               body, len, error);
+    return mm_sit_client_build_parity_request (client, req, mccmnc, error);
 }
 
 static void
@@ -3873,13 +3838,16 @@ parity_ready (MMSitClient  *client,
     g_autoptr(MMSitMessage)     message = NULL;
     g_autoptr(GError)           error = NULL;
     MMSitParityPhase            phase;
+    const MMSitParityRequest   *table;
+    gsize                       n_table = 0;
 
-    phase = mm_sit_parity_requests[self->priv->parity_index].phase;
+    table = mm_sit_parity_requests_for_stack (mm_sit_client_get_stack (client), &n_table);
+    g_assert (self->priv->parity_index < n_table);
+    phase = table[self->priv->parity_index].phase;
     message = mm_sit_client_command_finish (client, res, &error);
     if (!message)
         mm_obj_dbg (self, "boot parity: 0x%04x refused: %s",
-                    mm_sit_parity_requests[self->priv->parity_index].id,
-                    error->message);
+                    table[self->priv->parity_index].id, error->message);
 
     self->priv->parity_index++;
     parity_step (task, phase);
@@ -3892,10 +3860,14 @@ parity_step (GTask *task, MMSitParityPhase phase)
     g_autoptr(GByteArray)       request = NULL;
     g_autoptr(GError)           error = NULL;
     MMSitClient                *client;
+    const MMSitParityRequest   *table = NULL;
+    gsize                       n_table = 0;
 
     client = mm_broadband_modem_samsung_sit_peek_client (self, NULL);
-    while (client && self->priv->parity_index < G_N_ELEMENTS (mm_sit_parity_requests)) {
-        const MMSitParityRequest *req = &mm_sit_parity_requests[self->priv->parity_index];
+    if (client)
+        table = mm_sit_parity_requests_for_stack (mm_sit_client_get_stack (client), &n_table);
+    while (client && self->priv->parity_index < n_table) {
+        const MMSitParityRequest *req = &table[self->priv->parity_index];
 
         if (req->phase != phase) {
             self->priv->parity_index++;
@@ -4329,22 +4301,35 @@ load_sim_slots_retry (GTask *task)
     return G_SOURCE_REMOVE;
 }
 
+static void load_sim_slots_apply (MMBroadbandModemSamsungSit *self,
+                                  GTask                      *task,
+                                  const MMSitSimSlotStatus   *in_status);
+
 static void
-load_sim_slots_ready (MMSitClient *client,
+load_sim_slots_ready (MMSitClient  *client,
                       GAsyncResult *res,
                       GTask        *task)
 {
     MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
-    LoadSimSlotsContext        *ctx = g_task_get_task_data (task);
     MMSitSimSlotStatus          status;
     GError                     *error = NULL;
-    guint                       i;
 
     if (!mm_sit_client_get_sim_slot_status_finish (client, res, &status, &error)) {
         g_task_return_error (task, error);
         g_object_unref (task);
         return;
     }
+    load_sim_slots_apply (self, task, &status);
+}
+
+static void
+load_sim_slots_apply (MMBroadbandModemSamsungSit *self,
+                      GTask                      *task,
+                      const MMSitSimSlotStatus   *in_status)
+{
+    LoadSimSlotsContext        *ctx = g_task_get_task_data (task);
+    MMSitSimSlotStatus          status = *in_status;
+    guint                       i;
 
     ctx->sim_slots = g_ptr_array_new_full (status.slot_count, (GDestroyNotify) sim_slot_free);
     for (i = 0; i < status.slot_count; i++) {
@@ -4454,6 +4439,7 @@ load_sim_slots (MMIfaceModem        *iface,
     MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (iface);
     LoadSimSlotsContext        *ctx;
     MMSitClient                *client;
+    MMSitSimSlotStatus          cached;
     GError                     *error = NULL;
     GTask                      *task;
 
@@ -4468,6 +4454,19 @@ load_sim_slots (MMIfaceModem        *iface,
     ctx = g_new0 (LoadSimSlotsContext, 1);
     ctx->attempts_left = LOAD_SIM_SLOTS_ATTEMPTS;
     g_task_set_task_data (task, ctx, (GDestroyNotify) load_sim_slots_context_free);
+
+    /*
+     * Reuse the inventory mm_sit_cp_prepare() already polled rather than ask
+     * again. Stock reads the slot status once per boot; we read it three times
+     * inside 40 ms -- there plus once per modem from here. The cache is dropped
+     * on SIM_SLOT_STATUS_CHANGED, so a hot-swap still re-reads.
+     */
+    if (mm_sit_cp_peek_sim_slot_status (self->priv->cp, &cached)) {
+        mm_obj_dbg (self, "using the slot inventory the CP already polled");
+        load_sim_slots_apply (self, task, &cached);
+        return;
+    }
+
     mm_sit_client_get_sim_slot_status (client, NULL,
                                        (GAsyncReadyCallback) load_sim_slots_ready,
                                        task);

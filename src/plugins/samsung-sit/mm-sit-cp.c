@@ -11,6 +11,16 @@ struct _MMSitCp {
     gboolean mapping_sent;
     gint data_pref;        /* stack last named to the CP, -1 if never */
     gboolean secondary_off;
+    gboolean primary_off;
+    /*
+     * The slot inventory this object already polled, shared with the modems.
+     * Stock reads it once per boot; we read it three times inside 40 ms -- once
+     * here and once per modem from load_sim_slots(). prepare() polls until both
+     * logical stacks are mapped, so it holds the authoritative answer by the
+     * time either modem gets that far. Dropped on SIM_SLOT_STATUS_CHANGED.
+     */
+    gboolean slot_status_valid;
+    MMSitSimSlotStatus slot_status;
     guint attempts;
     MMSitLogicalSlotMapping mapping[2];
 };
@@ -129,6 +139,22 @@ mm_sit_cp_peek_client (MMSitCp *self, guint stack)
  * Fire and forget. If the CP refuses there is nothing useful to do about it
  * here, and the caller is in the middle of something else.
  */
+gboolean
+mm_sit_cp_peek_sim_slot_status (MMSitCp *self, MMSitSimSlotStatus *out)
+{
+    if (!self || !self->slot_status_valid)
+        return FALSE;
+    *out = self->slot_status;
+    return TRUE;
+}
+
+void
+mm_sit_cp_forget_sim_slot_status (MMSitCp *self)
+{
+    if (self)
+        self->slot_status_valid = FALSE;
+}
+
 void
 mm_sit_cp_prefer_data_stack (MMSitCp *self, guint stack)
 {
@@ -164,6 +190,7 @@ prepare_complete (MMSitCp *self, const GError *error)
 
 static gboolean query_slots (MMSitCp *self);
 static void second_radio_off (MMSitClient *client, GAsyncResult *res, MMSitCp *self);
+static void first_radio_off (MMSitClient *client, GAsyncResult *res, MMSitCp *self);
 
 static void
 mapping_ready (MMSitClient *client, GAsyncResult *res, MMSitCp *self)
@@ -196,6 +223,8 @@ slots_ready (MMSitClient *client, GAsyncResult *res, MMSitCp *self)
         prepare_complete (self, error);
         return;
     }
+    self->slot_status = status;
+    self->slot_status_valid = TRUE;
     for (i = 0; i < status.slot_count; i++) {
         for (j = 0; j < status.slots[i].port_count; j++) {
             const MMSitSimPort *port = &status.slots[i].ports[j];
@@ -214,11 +243,6 @@ slots_ready (MMSitClient *client, GAsyncResult *res, MMSitCp *self)
             }
         }
     }
-    if (found[1] && !self->secondary_off) {
-        mm_sit_client_set_radio_state (self->clients[1], MM_SIT_RADIO_STATE_OFF, NULL,
-                                       (GAsyncReadyCallback) second_radio_off, self);
-        return;
-    }
     if (found[0] && found[1]) {
         prepare_complete (self, NULL);
         return;
@@ -230,6 +254,19 @@ slots_ready (MMSitClient *client, GAsyncResult *res, MMSitCp *self)
     if (!self->mapping_sent && self->attempts >= 5 && found[0] != found[1]) {
         guint missing = found[0] ? 1 : 0;
         guint present = 1 - missing;
+
+        /* The mapping setter needs both radios down, and this is the only
+         * place that needs them down at all; see boot_ready(). */
+        if (!self->secondary_off) {
+            mm_sit_client_set_radio_state (self->clients[1], MM_SIT_RADIO_STATE_OFF, NULL,
+                                           (GAsyncReadyCallback) second_radio_off, self);
+            return;
+        }
+        if (!self->primary_off) {
+            mm_sit_client_set_radio_state (self->clients[0], MM_SIT_RADIO_STATE_OFF, NULL,
+                                           (GAsyncReadyCallback) first_radio_off, self);
+            return;
+        }
 
         for (i = 0; i < status.slot_count; i++) {
             if (i == self->mapping[present].physical_slot_id)
@@ -291,6 +328,7 @@ first_radio_off (MMSitClient *client, GAsyncResult *res, MMSitCp *self)
         prepare_complete (self, error);
         return;
     }
+    self->primary_off = TRUE;
     query_slots (self);
 }
 
@@ -303,10 +341,16 @@ boot_ready (MMSitClient *client, GAsyncResult *res, MMSitCp *self)
         prepare_complete (self, error);
         return;
     }
-    /* Starting the experiment deliberately drops contexts inherited from a
-     * previous MM process. They cannot be trusted by a fresh ownership table. */
-    mm_sit_client_set_radio_state (self->clients[0], MM_SIT_RADIO_STATE_OFF, NULL,
-                                   (GAsyncReadyCallback) first_radio_off, self);
+    /*
+     * Straight to the inventory. This used to take stack 0's radio down first,
+     * to drop contexts inherited from a previous MM process -- but stock never
+     * sends SET_RADIO_POWER OFF at all. Measured on identical firmware, its
+     * whole boot is one request per stack, `02 00 00 00 00 00`, and nothing
+     * else for the life of the capture; we sent `01` then `02`. The radios only
+     * have to be down to *write* a slot mapping, so that cost moved to the one
+     * branch that writes one.
+     */
+    query_slots (self);
 }
 
 void

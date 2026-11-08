@@ -65,6 +65,14 @@ typedef enum {
     MM_SIT_MESSAGE_IMS_NEW_SMS                = 0x0d1e,
     MM_SIT_MESSAGE_GET_SIM_STATUS             = 0x0200,
     MM_SIT_MESSAGE_SIM_IO                     = 0x0208,
+    /*
+     * The UICC access-control triple. Stock opens a logical channel by AID to
+     * look for the GSMA access-control applets, falls back to reading EF_DIR,
+     * and closes the channel again; see mm_sit_client_probe_uicc_access_rules().
+     */
+    MM_SIT_MESSAGE_OPEN_LOGICAL_CHANNEL        = 0x0247,
+    MM_SIT_MESSAGE_CLOSE_LOGICAL_CHANNEL       = 0x020e,
+    MM_SIT_MESSAGE_TRANSMIT_APDU_CHANNEL       = 0x020f,
     MM_SIT_MESSAGE_GET_FACILITY_LOCK          = 0x0209,
     MM_SIT_MESSAGE_SIM_STATUS_CHANGED         = 0x0210,
     MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS        = 0x024d,
@@ -132,7 +140,15 @@ typedef enum {
     MM_SIT_INDICATION_FILTER_PHYSICAL_CHANNEL     = 1 << 4,
     MM_SIT_INDICATION_FILTER_REGISTRATION_FAILURE = 1 << 5,
     MM_SIT_INDICATION_FILTER_BARRING_INFO         = 1 << 6,
-    MM_SIT_INDICATION_FILTER_ALL                   = 0x7f,
+    /*
+     * Stock sends 0xff, not 0x7f -- measured on identical firmware, every
+     * SET_INDICATION_FILTER in the capture is `ff 00 00 00` on both stacks.
+     * Six named bits plus bit 7, whose meaning the vendor headers do not give
+     * a name; enabling it is what stock does, and an indication we do not
+     * understand is ignored rather than harmful.
+     */
+    MM_SIT_INDICATION_FILTER_UNKNOWN_BIT7         = 1 << 7,
+    MM_SIT_INDICATION_FILTER_ALL                   = 0xff,
 } MMSitIndicationFilter;
 
 /* Address families to ask the network for in a data context. The CP's own

@@ -6,6 +6,7 @@
 
 #include "mm-log-object.h"
 #include "mm-sit-client.h"
+#include "mm-sit-boot-parity.h"
 #include "mm-sit-cp.h"
 
 enum {
@@ -82,6 +83,15 @@ struct _MMSitClientPrivate {
      * file reads can address it the way the downstream RIL does. */
     guint8               sim_aid[MM_SIT_MAX_AID_LENGTH];
     gsize                sim_aid_len;
+    /*
+     * Every application the card reports, not just the subscription one.
+     * Stock queries the facility-lock pair once per application: four requests
+     * on the stack whose SIM has an ISIM (AID ...871004...), two on the one
+     * that does not. Caching only apps[0] made that impossible.
+     */
+    guint8               sim_aids[MM_SIT_MAX_SIM_APPS][MM_SIT_MAX_AID_LENGTH];
+    gsize                sim_aid_lens[MM_SIT_MAX_SIM_APPS];
+    guint                sim_aid_count;
     /* Service centre the CP reports, cached on first use: the downstream RIL
      * puts it in every send and this CP answers a send that lacks one with an
      * empty response. */
@@ -127,6 +137,7 @@ port_indication (MMPortSerialSit    *port,
          * state before notifying their users. */
         self->priv->has_carrier_sim_info = FALSE;
         self->priv->sim_aid_len = 0;
+        self->priv->sim_aid_count = 0;
         self->priv->smsc_len = 0;
     }
     if (message->id == MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO) {
@@ -360,6 +371,7 @@ mm_sit_client_invalidate_sim (MMSitClient *self)
     self->priv->has_carrier_sim_info = FALSE;
     self->priv->sim_iccid_len = 0;
     self->priv->sim_aid_len = 0;
+    self->priv->sim_aid_count = 0;
     self->priv->smsc_len = 0;
     self->priv->radio_state_trusted = FALSE;
 }
@@ -807,10 +819,19 @@ get_sim_ready (MMSitClient *self,
             memcpy (self->priv->sim_iccid, status->iccid, status->iccid_len);
         }
         if (status->app_count) {
+            guint a;
+
             self->priv->sim_aid_len = MIN (status->apps[0].aid_len, MM_SIT_MAX_AID_LENGTH);
             memcpy (self->priv->sim_aid, status->apps[0].aid, self->priv->sim_aid_len);
-        } else
+            self->priv->sim_aid_count = MIN (status->app_count, MM_SIT_MAX_SIM_APPS);
+            for (a = 0; a < self->priv->sim_aid_count; a++) {
+                self->priv->sim_aid_lens[a] = MIN (status->apps[a].aid_len, MM_SIT_MAX_AID_LENGTH);
+                memcpy (self->priv->sim_aids[a], status->apps[a].aid, self->priv->sim_aid_lens[a]);
+            }
+        } else {
             self->priv->sim_aid_len = 0;
+            self->priv->sim_aid_count = 0;
+        }
         g_task_return_pointer (task, status, g_free);
     } else {
         g_free (status);
@@ -2395,6 +2416,7 @@ typedef enum {
     BOOT_CONFIG_STEP_SOFTWARE_VERSION,
     BOOT_CONFIG_STEP_OEM_CONFIG,
     BOOT_CONFIG_STEP_MODEM_CONFIG,
+    BOOT_CONFIG_STEP_UICC_RULES,
     BOOT_CONFIG_STEP_LAST,
 } BootConfigStep;
 
@@ -2499,6 +2521,20 @@ boot_config_software_version_ready (MMSitClient  *self,
     boot_config_step (task);
 }
 
+static void boot_config_step (GTask *task);
+
+static void
+boot_config_uicc_ready (MMSitClient  *self,
+                        GAsyncResult *res,
+                        GTask        *task)
+{
+    BootConfigContext *ctx = g_task_get_task_data (task);
+
+    mm_sit_client_probe_uicc_access_rules_finish (self, res, NULL);
+    ctx->step++;
+    boot_config_step (task);
+}
+
 static void
 boot_config_step (GTask *task)
 {
@@ -2514,8 +2550,19 @@ boot_config_step (GTask *task)
 
     switch (ctx->step) {
     case BOOT_CONFIG_STEP_AP_TIME: {
-        g_autoptr(GDateTime) now = g_date_time_new_now_local ();
+        g_autoptr(GDateTime) now = NULL;
 
+        /*
+         * The AP's clock is the AP's, not a subscription's, and stock tells the
+         * CP once: SET_AP_SYSTEM_TIME is its very first frame of the boot, on
+         * ch 0xf5 with token 0, and never appears on 0xf6. We sent it on both.
+         */
+        if (self->priv->stack != 0) {
+            ctx->step++;
+            boot_config_step (task);
+            return;
+        }
+        now = g_date_time_new_now_local ();
         request = mm_sit_request_new_set_ap_system_time (mm_sit_client_next_token (self), now, &error);
         break;
     }
@@ -2548,6 +2595,12 @@ boot_config_step (GTask *task)
          */
         const gchar *version = self->priv->cp_sw_version ?: ctx->software_version;
 
+        /* One CP, one software version: stock sends 0x4605 on ch 0xf5 only. */
+        if (self->priv->stack != 0) {
+            ctx->step++;
+            boot_config_step (task);
+            return;
+        }
         if (!version) {
             ctx->step++;
             boot_config_step (task);
@@ -2565,6 +2618,13 @@ boot_config_step (GTask *task)
         request = mm_sit_request_new_set_modem_config_count (
             mm_sit_client_next_token (self), self->priv->cp ? 2 : 1);
         break;
+    case BOOT_CONFIG_STEP_UICC_RULES:
+        /* Stock's carrier-privilege discovery; see
+         * mm_sit_client_probe_uicc_access_rules(). It cannot fail the boot. */
+        mm_sit_client_probe_uicc_access_rules (self, g_task_get_cancellable (task),
+                                               (GAsyncReadyCallback) boot_config_uicc_ready,
+                                               task);
+        return;
     case BOOT_CONFIG_STEP_LAST:
         self->priv->boot_config_done = TRUE;
         g_task_return_boolean (task, TRUE);
@@ -3429,6 +3489,193 @@ setup_reattach_ready (MMSitClient  *self,
     setup_send_profile (self, task);
 }
 
+/*
+ * Build one boot-parity row into a frame.
+ *
+ * Lives here, not in the modem, because two callers need it now: the boot
+ * replay and the PRE_PDN preamble that runs from the IMS sequence, which only
+ * ever has a client. `mccmnc` is the one substitution the client cannot make
+ * on its own -- the modem passes it, NULL otherwise.
+ */
+GByteArray *
+mm_sit_client_build_parity_request (MMSitClient              *self,
+                                    const MMSitParityRequest *req,
+                                    const gchar              *mccmnc,
+                                    GError                  **error)
+{
+    g_autofree guint8 *body = NULL;
+    gsize              len = 4 + req->len;
+
+    body = g_malloc0 (len);
+    if (req->payload)
+        memcpy (body + 4, req->payload, req->len);
+
+    switch (req->sub) {
+    case MM_SIT_PARITY_SUB_MCCMNC:
+        /* Nothing to name the subscription with yet; the CP gets it next time. */
+        if (!mccmnc || !mccmnc[0] || strlen (mccmnc) >= req->len)
+            return NULL;
+        memset (body + 4, 0, req->len);
+        memcpy (body + 4, mccmnc, strlen (mccmnc));
+        break;
+    case MM_SIT_PARITY_SUB_STACK:
+        if (req->len < 1)
+            return NULL;
+        body[4] = (guint8) self->priv->stack;
+        break;
+    case MM_SIT_PARITY_SUB_WALLCLOCK: {
+        /*
+         * Six bytes of UTC at payload+9: yy mm dd HH MM SS, yy = year - 2000,
+         * each a plain byte rather than BCD.
+         *
+         * Stock's advances every frame (22:23:30, :31, :34, :35 across one
+         * boot). The table is a verbatim replay, so before this it sent the
+         * capture's own clock -- 2026-10-11 04:59:48, identical on every boot
+         * and both stacks, which is what the CP was being told the time was.
+         */
+        g_autoptr(GDateTime) now = g_date_time_new_now_utc ();
+
+        if (req->len < 15 || !now)
+            return NULL;
+        body[4 + 9]  = (guint8) (g_date_time_get_year (now) - 2000);
+        body[4 + 10] = (guint8) g_date_time_get_month (now);
+        body[4 + 11] = (guint8) g_date_time_get_day_of_month (now);
+        body[4 + 12] = (guint8) g_date_time_get_hour (now);
+        body[4 + 13] = (guint8) g_date_time_get_minute (now);
+        body[4 + 14] = (guint8) g_date_time_get_second (now);
+        break;
+    }
+    case MM_SIT_PARITY_SUB_NONE:
+    default:
+        break;
+    }
+
+    /*
+     * The AIMS stack requests name their stack in payload byte 1, 1-based, and
+     * the table does not cover it.
+     *
+     * mm-sit-boot-parity.h is a verbatim replay of one cold boot captured on
+     * **one stack**, and its own header says so. STACK_START (0x0d39),
+     * STACK_STOP (0x0d3a), 0x0d3b and 0x0d3c all carry the stack, so replaying
+     * them unmodified sent stack 0's index on both stacks: on ch 0xf6 we were
+     * starting, stopping and configuring the IMS stack of the *other*
+     * subscription.
+     *
+     * Confirmed against komodo's own Android, 2026-11-03: across every AP->CP
+     * request in the capture, exactly these four ids have payload byte 1 equal
+     * to 1 on ch 0xf5 and 2 on ch 0xf6, and no others do. In particular
+     * **0x0d0b is 2 on both channels** -- it is not a stack index and must not
+     * be touched.
+     *
+     * Done here rather than in the table so it survives regeneration.
+     */
+    switch (req->id) {
+    case 0x0d39:
+    case 0x0d3a:
+    case 0x0d3b:
+    case 0x0d3c:
+        if (req->len < 2)
+            return NULL;
+        body[4 + 1] = (guint8) (self->priv->stack + 1);
+        break;
+    default:
+        break;
+    }
+
+    return mm_sit_request_new (req->id, mm_sit_client_next_token (self),
+                               body, len, error);
+}
+
+/*
+ * Replay the PRE_PDN rows: the block stock runs between its last
+ * SET_DATA_PROFILE and its IMS SETUP_DATA_CALL.
+ *
+ * Every row is advisory. The point is the traffic the CP sees immediately
+ * before the request, so a refused row is still a row the CP saw, and nothing
+ * here may fail the context that follows.
+ */
+typedef struct {
+    guint index;
+} PreambleContext;
+
+static void preamble_step (GTask *task);
+
+static void
+preamble_ready (MMSitClient  *self,
+                GAsyncResult *res,
+                GTask        *task)
+{
+    g_autoptr(MMSitMessage) message = NULL;
+    g_autoptr(GError)       error = NULL;
+
+    message = mm_sit_client_command_finish (self, res, &error);
+    if (!message)
+        mm_obj_dbg (self->priv->port, "pdn preamble: a row was refused (%s); continuing",
+                    error ? error->message : "no response");
+    preamble_step (task);
+}
+
+static void
+preamble_step (GTask *task)
+{
+    MMSitClient              *self = g_task_get_source_object (task);
+    PreambleContext          *ctx = g_task_get_task_data (task);
+    g_autoptr(GByteArray)     request = NULL;
+    g_autoptr(GError)         error = NULL;
+    const MMSitParityRequest *table;
+    gsize                     n_table = 0;
+
+    table = mm_sit_parity_requests_for_stack (self->priv->stack, &n_table);
+    while (ctx->index < n_table) {
+        const MMSitParityRequest *req = &table[ctx->index];
+
+        if (req->phase != MM_SIT_PARITY_PHASE_PRE_PDN) {
+            ctx->index++;
+            continue;
+        }
+        request = mm_sit_client_build_parity_request (self, req, NULL, &error);
+        ctx->index++;
+        if (request)
+            break;
+        if (error) {
+            mm_obj_dbg (self->priv->port, "pdn preamble: couldn't build 0x%04x: %s",
+                        req->id, error->message);
+            g_clear_error (&error);
+        }
+    }
+
+    if (!request) {
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+
+    mm_sit_client_command (self, request, 10, g_task_get_cancellable (task),
+                           (GAsyncReadyCallback) preamble_ready, task);
+}
+
+void
+mm_sit_client_run_pdn_preamble (MMSitClient        *self,
+                                GCancellable       *cancellable,
+                                GAsyncReadyCallback callback,
+                                gpointer            user_data)
+{
+    GTask *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    g_task_set_task_data (task, g_new0 (PreambleContext, 1), g_free);
+    preamble_step (task);
+}
+
+gboolean
+mm_sit_client_run_pdn_preamble_finish (MMSitClient  *self,
+                                       GAsyncResult *res,
+                                       GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
 void
 mm_sit_client_setup_data_call (MMSitClient        *self,
                                const gchar        *apn,
@@ -3476,22 +3723,19 @@ mm_sit_client_setup_data_call (MMSitClient        *self,
     g_task_set_task_data (task, ctx, (GDestroyNotify) setup_context_free);
 
     /*
-     * Re-assert the attach APN first, once per attach epoch, and only when
-     * this context *is* the attach APN's own; see the `attach_apn` comment on
-     * MMSitClientPrivate.
+     * Re-assert the attach APN before the first context of this attach epoch;
+     * see the `attach_apn` comment on MMSitClientPrivate. Stock does this on
+     * both stacks and does not scope it to the attach APN's own context -- its
+     * ch 0xf5 re-assert is followed 1306 ms later by a context for `ims`.
      *
-     * The wider form -- re-assert before whatever context came first -- was
-     * tried and is wrong. It put the attach 9 ms ahead of an IMS context for a
-     * foreign APN, which stock never does, and the CP answered 2250 after 19 s
-     * where the identical request without it was granted in 288 ms. Two boots
-     * granted it with no re-assert and the one boot that re-asserted was
-     * refused; within that same boot the later context, past the epoch and so
-     * without one, was granted. Stock's own re-assert on the data stack is
-     * followed 29 ms later by the attach APN's own context, which is what this
-     * reproduces.
+     * It was scoped that way for one revision, on the theory that re-asserting
+     * ahead of a foreign APN had cost a grant. That was a false attribution:
+     * measured across three boots an attach went out just before ch 0xf6's
+     * first attempt every time -- once granted, twice refused -- so it does not
+     * discriminate. Narrowing it only lost the parity, because ch 0xf5 never
+     * asks for a context on its own attach APN at all.
      */
-    if (self->priv->attach_apn && !self->priv->attach_reasserted &&
-        g_strcmp0 (self->priv->attach_apn, apn) == 0) {
+    if (self->priv->attach_apn && !self->priv->attach_reasserted) {
         g_autoptr(GByteArray) reattach = NULL;
         MMSitApnAuth          attach_auth = { 0 };
 
@@ -3705,6 +3949,278 @@ mm_sit_client_get_facility_lock (MMSitClient        *self,
     request = mm_sit_request_new_get_facility_lock (mm_sit_client_next_token (self), facility,
                                                     self->priv->sim_aid_len ? self->priv->sim_aid : NULL,
                                                     self->priv->sim_aid_len);
+    mm_sit_client_command (self, request, 5, cancellable,
+                           (GAsyncReadyCallback) get_facility_lock_ready, task);
+}
+
+/*
+ * The UICC access-control probe, reproduced from stock.
+ *
+ * Measured on identical firmware, ch 0xf5, 5.74-5.86 s -- a block we sent none
+ * of at all, and the largest single content gap left against the capture
+ * (seven 0x0247, three 0x020f and one 0x020e on stack 0; nine, two and two on
+ * stack 1):
+ *
+ *   0x0247 open by AID A0000001514143 4C ("..QACL", GSMA ARA-M) -> ffffffff 6a82
+ *   0x0247 open by AID A000000063 "PKCS-15"      (ARF)          -> ffffffff 6a82
+ *   0x0247 open by AID A000000018 "GPAC-15"                     -> ffffffff 6a82
+ *   0x0247 open with NO AID                                     -> channel 1, 9000
+ *   0x020f SELECT 3F00 (MF) on that channel
+ *   0x020f SELECT 2F00 (EF_DIR)
+ *   0x020f READ RECORD 1                        -> 4f 10 a0 00 00 00 87 10 02 ...
+ *   0x020e close the channel
+ *
+ * It is carrier-privilege discovery: look for the access-rule applets, and
+ * when they are absent read EF_DIR to enumerate the card's applications. All
+ * reads, nothing written to the card.
+ *
+ * This cannot be a boot-parity table row, which is why it was missing for so
+ * long: the channel number is handed back in the open response and every later
+ * frame has to carry it, so a verbatim replay would transmit on a channel the
+ * CP never gave us and leak the one it did. Hence the explicit sequence, which
+ * always closes what it opened -- including on error.
+ *
+ * Request layouts, from the capture:
+ *   0x0247  [u8 aid_len][aid, 16 bytes zero-padded][u8 pad]            = 18
+ *   0x020f  [u32 ch][u32 cla][u32 ins][u32 p1][u32 p2][u32 p3]
+ *           [u16 data_len][data...]
+ *   0x020e  [u32 ch]                                                   = 4
+ */
+#define UICC_NO_CHANNEL 0xffffffffu
+
+static const guint8 uicc_aid_ara_m[]  = { 0xa0, 0x00, 0x00, 0x01, 0x51, 0x41, 0x43, 0x4c };
+static const guint8 uicc_aid_pkcs15[] = { 0xa0, 0x00, 0x00, 0x00, 0x63, 0x50, 0x4b, 0x43,
+                                          0x53, 0x2d, 0x31, 0x35 };
+static const guint8 uicc_aid_gpac[]   = { 0xa0, 0x00, 0x00, 0x00, 0x18, 0x47, 0x50, 0x41,
+                                          0x43, 0x2d, 0x31, 0x35 };
+
+typedef enum {
+    UICC_STEP_OPEN_ARA_M,
+    UICC_STEP_OPEN_PKCS15,
+    UICC_STEP_OPEN_GPAC,
+    UICC_STEP_OPEN_PLAIN,
+    UICC_STEP_SELECT_MF,
+    UICC_STEP_SELECT_EF_DIR,
+    UICC_STEP_READ_RECORD,
+    UICC_STEP_CLOSE,
+    UICC_STEP_DONE,
+} UiccStep;
+
+typedef struct {
+    UiccStep step;
+    guint32  channel;
+} UiccProbeContext;
+
+static void uicc_probe_step (GTask *task);
+
+static GByteArray *
+uicc_build_open (MMSitClient *self, const guint8 *aid, gsize aid_len, GError **error)
+{
+    guint8 body[18] = { 0 };
+
+    if (aid && aid_len) {
+        body[0] = (guint8) aid_len;
+        memcpy (&body[1], aid, MIN (aid_len, 16));
+    }
+    return mm_sit_request_new (MM_SIT_MESSAGE_OPEN_LOGICAL_CHANNEL,
+                               mm_sit_client_next_token (self), body, sizeof (body), error);
+}
+
+static GByteArray *
+uicc_build_apdu (MMSitClient *self, guint32 channel, guint8 ins, guint8 p1, guint8 p2,
+                 guint8 p3, const guint8 *data, gsize data_len, GError **error)
+{
+    guint8 body[32] = { 0 };
+    gsize  len = 26;
+
+    memcpy (&body[0],  &channel, 4);
+    body[4]  = 1;      /* the class byte stock uses on this channel */
+    body[8]  = ins;
+    body[12] = p1;
+    body[16] = p2;
+    body[20] = p3;
+    body[24] = (guint8) data_len;
+    if (data && data_len) {
+        memcpy (&body[26], data, MIN (data_len, 4));
+        len = 26 + MIN (data_len, 4);
+    }
+    return mm_sit_request_new (MM_SIT_MESSAGE_TRANSMIT_APDU_CHANNEL,
+                               mm_sit_client_next_token (self), body, len, error);
+}
+
+static void
+uicc_probe_ready (MMSitClient  *self,
+                  GAsyncResult *res,
+                  GTask        *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    g_autoptr(GError)       error = NULL;
+    UiccProbeContext       *ctx = g_task_get_task_data (task);
+
+    response = mm_sit_client_command_finish (self, res, &error);
+
+    if (ctx->step == UICC_STEP_OPEN_PLAIN) {
+        /* The only answer this sequence reads: the channel to work on. The
+         * named-AID opens before it are expected to fail with 6a82 on a card
+         * that carries no access-rule applet, which is both of ours. */
+        const guint8 *payload = NULL;
+        gsize         payload_len = 0;
+
+        if (response)
+            payload = mm_sit_message_get_payload (response, &payload_len);
+        /* get_payload() is frame+8, so the four status bytes come first and
+         * the channel the CP assigned sits at +4, its SW at +8. */
+        if (payload && payload_len >= 10) {
+            guint32 channel;
+            guint16 sw;
+
+            memcpy (&channel, payload + 4, 4);
+            memcpy (&sw, payload + 8, 2);
+            if (channel != UICC_NO_CHANNEL && sw == 0x0090) {
+                ctx->channel = channel;
+                mm_obj_dbg (self->priv->port, "UICC access rules: reading EF_DIR on channel %u",
+                            channel);
+            } else {
+                mm_obj_dbg (self->priv->port, "UICC access rules: no channel (sw %04x); done",
+                            sw);
+                ctx->step = UICC_STEP_DONE;
+            }
+        } else {
+            ctx->step = UICC_STEP_DONE;
+        }
+    } else if (!response && ctx->channel != UICC_NO_CHANNEL && ctx->step < UICC_STEP_CLOSE) {
+        /* Never leave a channel open because a read failed. */
+        mm_obj_dbg (self->priv->port, "UICC access rules: step %d failed (%s); closing the channel",
+                    (int) ctx->step, error ? error->message : "no response");
+        ctx->step = UICC_STEP_CLOSE;
+        uicc_probe_step (task);
+        return;
+    }
+
+    ctx->step++;
+    uicc_probe_step (task);
+}
+
+static void
+uicc_probe_step (GTask *task)
+{
+    MMSitClient           *self = g_task_get_source_object (task);
+    UiccProbeContext      *ctx = g_task_get_task_data (task);
+    g_autoptr(GByteArray)  request = NULL;
+    g_autoptr(GError)      error = NULL;
+    static const guint8    ef_mf[2]  = { 0x3f, 0x00 };
+    static const guint8    ef_dir[2] = { 0x2f, 0x00 };
+
+    /* Nothing here is reported to anyone, so a step that cannot even be built
+     * is skipped rather than failed -- except the close, which matters. */
+    switch (ctx->step) {
+    case UICC_STEP_OPEN_ARA_M:
+        request = uicc_build_open (self, uicc_aid_ara_m, sizeof (uicc_aid_ara_m), &error);
+        break;
+    case UICC_STEP_OPEN_PKCS15:
+        request = uicc_build_open (self, uicc_aid_pkcs15, sizeof (uicc_aid_pkcs15), &error);
+        break;
+    case UICC_STEP_OPEN_GPAC:
+        request = uicc_build_open (self, uicc_aid_gpac, sizeof (uicc_aid_gpac), &error);
+        break;
+    case UICC_STEP_OPEN_PLAIN:
+        request = uicc_build_open (self, NULL, 0, &error);
+        break;
+    case UICC_STEP_SELECT_MF:
+        request = uicc_build_apdu (self, ctx->channel, 0xa4, 0x00, 0x04, 0x02,
+                                   ef_mf, sizeof (ef_mf), &error);
+        break;
+    case UICC_STEP_SELECT_EF_DIR:
+        request = uicc_build_apdu (self, ctx->channel, 0xa4, 0x00, 0x04, 0x02,
+                                   ef_dir, sizeof (ef_dir), &error);
+        break;
+    case UICC_STEP_READ_RECORD:
+        request = uicc_build_apdu (self, ctx->channel, 0xb2, 0x01, 0x04, 0x26,
+                                   NULL, 0, &error);
+        break;
+    case UICC_STEP_CLOSE:
+        if (ctx->channel == UICC_NO_CHANNEL)
+            break;
+        request = mm_sit_request_new (MM_SIT_MESSAGE_CLOSE_LOGICAL_CHANNEL,
+                                      mm_sit_client_next_token (self),
+                                      (const guint8 *) &ctx->channel, 4, &error);
+        ctx->channel = UICC_NO_CHANNEL;
+        break;
+    case UICC_STEP_DONE:
+    default:
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+
+    if (!request) {
+        if (error)
+            mm_obj_dbg (self->priv->port, "UICC access rules: couldn't build step %d: %s",
+                        (int) ctx->step, error->message);
+        ctx->step++;
+        uicc_probe_step (task);
+        return;
+    }
+
+    mm_sit_client_command (self, request, 10, g_task_get_cancellable (task),
+                           (GAsyncReadyCallback) uicc_probe_ready, task);
+}
+
+void
+mm_sit_client_probe_uicc_access_rules (MMSitClient        *self,
+                                       GCancellable       *cancellable,
+                                       GAsyncReadyCallback callback,
+                                       gpointer            user_data)
+{
+    UiccProbeContext *ctx;
+    GTask            *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    ctx = g_new0 (UiccProbeContext, 1);
+    ctx->channel = UICC_NO_CHANNEL;
+    g_task_set_task_data (task, ctx, g_free);
+    uicc_probe_step (task);
+}
+
+gboolean
+mm_sit_client_probe_uicc_access_rules_finish (MMSitClient  *self,
+                                              GAsyncResult *res,
+                                              GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+guint
+mm_sit_client_get_aid_count (MMSitClient *self)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), 0);
+    return self->priv->sim_aid_count;
+}
+
+/* The same query against one named application, for the per-AID pass stock
+ * makes. Out-of-range falls back to whatever the card named first. */
+void
+mm_sit_client_get_facility_lock_for_aid (MMSitClient        *self,
+                                         guint8              facility,
+                                         guint               aid_index,
+                                         GCancellable       *cancellable,
+                                         GAsyncReadyCallback callback,
+                                         gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+    const guint8         *aid = self->priv->sim_aid_len ? self->priv->sim_aid : NULL;
+    gsize                 aid_len = self->priv->sim_aid_len;
+
+    if (aid_index < self->priv->sim_aid_count && self->priv->sim_aid_lens[aid_index]) {
+        aid = self->priv->sim_aids[aid_index];
+        aid_len = self->priv->sim_aid_lens[aid_index];
+    }
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_get_facility_lock (mm_sit_client_next_token (self), facility,
+                                                    aid, aid_len);
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_facility_lock_ready, task);
 }

@@ -367,7 +367,9 @@ typedef enum {
      */
     STEP_STACK_START,
     STEP_PROFILES,
+    STEP_PREAMBLE,
     STEP_PDN,
+    STEP_REASSERT_FILTER,
     STEP_HIDDEN_MENU,
     STEP_ADD_PDN_INFO,
     STEP_DONE,
@@ -383,6 +385,9 @@ typedef struct {
     /* The carrier's whole profile set, re-pushed before the PDN. */
     GPtrArray      *apns;
     guint           apn_sent;
+    /* This run established the context rather than inheriting one. Only then
+     * is the indication filter re-asserted, as stock does. */
+    gboolean        pdn_fresh;
 } SequenceContext;
 
 static void
@@ -473,6 +478,7 @@ pdn_ready (MMSitClient  *client,
         return;
     }
 
+    ctx->pdn_fresh = TRUE;
     self->priv->pdn_up = TRUE;
     self->priv->pdn_cid = ctx->call.cid;
     self->priv->pdn = ctx->call;
@@ -487,6 +493,46 @@ pdn_ready (MMSitClient  *client,
         mm_obj_warn (self, "the network granted no P-CSCF addresses; "
                            "the CP has nowhere to register");
 
+    ctx->step++;
+    sequence_step (task);
+}
+
+static void
+reassert_screen_ready (MMSitClient  *client,
+                       GAsyncResult *res,
+                       GTask        *task)
+{
+    SequenceContext *ctx = g_task_get_task_data (task);
+
+    /* Advisory: the context is already up and nothing here may undo it. */
+    mm_sit_client_set_screen_state_finish (client, res, NULL);
+    ctx->step++;
+    sequence_step (task);
+}
+
+static void
+reassert_filter_ready (MMSitClient  *client,
+                       GAsyncResult *res,
+                       GTask        *task)
+{
+    MMSitIms *self = g_task_get_source_object (task);
+
+    mm_sit_client_set_indication_filter_finish (client, res, NULL);
+    mm_sit_client_set_screen_state (self->priv->client, TRUE,
+                                    g_task_get_cancellable (task),
+                                    (GAsyncReadyCallback) reassert_screen_ready,
+                                    task);
+}
+
+static void
+preamble_ready (MMSitClient  *client,
+                GAsyncResult *res,
+                GTask        *task)
+{
+    SequenceContext *ctx = g_task_get_task_data (task);
+
+    /* It cannot fail, but read the result so a future one is not swallowed. */
+    mm_sit_client_run_pdn_preamble_finish (client, res, NULL);
     ctx->step++;
     sequence_step (task);
 }
@@ -518,8 +564,17 @@ sequence_step (GTask *task)
          * what its route selection matches a requested DNN against, so hand it
          * the full table, in the vendor's own order, immediately beforehand.
          */
-        if (ctx->apns && ctx->apn_sent < ctx->apns->len) {
-            const MMSitApn *apn = g_ptr_array_index (ctx->apns, ctx->apn_sent);
+        /*
+         * Twice, back to back, which is what stock does: it pushes its whole
+         * set at 9930 ms, again at 10709 ms and a third time at 10720 ms,
+         * 11 ms apart and 518 ms before its context. We pushed it once here
+         * plus the single profile mm_sit_client_setup_data_call() registers for
+         * the APN it is about to ask for -- so the last profile frame the CP
+         * saw was a lone `ims` where stock's was the complete table.
+         */
+        if (ctx->apns && ctx->apn_sent < ctx->apns->len * 2) {
+            const MMSitApn *apn = g_ptr_array_index (ctx->apns,
+                                                     ctx->apn_sent % ctx->apns->len);
             MMSitApnAuth    auth = { 0 };
 
             ctx->apn_sent++;
@@ -533,6 +588,27 @@ sequence_step (GTask *task)
         }
         ctx->step++;
         sequence_step (task);
+        return;
+
+    case STEP_PREAMBLE:
+        /*
+         * Stock's last act before asking for the context is a short block, not
+         * the profile push: 0x0d39, 0x0d0b, 0x0d3b, 0x091a, 0x0d0b and two
+         * queries, inside the 518 ms (ch 0xf5) / 618 ms (0xf6) between its last
+         * SET_DATA_PROFILE and its SETUP_DATA_CALL.
+         *
+         * We send those same ids -- at radio-on, twenty seconds early. Aligning
+         * our AP->CP stream against stock's on identical firmware left this as
+         * the divergence at the point of the request: 59% of stock's order on
+         * ch 0xf5 and 31% on 0xf6, with the tail of both missing exactly this
+         * block. See MM_SIT_PARITY_PHASE_PRE_PDN.
+         *
+         * Advisory: a refused row is still a row the CP saw, so this cannot
+         * fail the context.
+         */
+        mm_sit_client_run_pdn_preamble (self->priv->client,
+                                        g_task_get_cancellable (task),
+                                        (GAsyncReadyCallback) preamble_ready, task);
         return;
 
     case STEP_PDN:
@@ -562,6 +638,39 @@ sequence_step (GTask *task)
                                                  (guint8) (self->priv->port_index + 1),
                                                  &frame, &len);
         break;
+
+    case STEP_REASSERT_FILTER:
+        /*
+         * Stock re-asserts the indication filter and the display state once the
+         * IMS context is answered -- a third pair, after the two it sends at
+         * radio-on. Captured on identical firmware, and it is an AP-wide event:
+         * both stacks fire within 3 ms of each other, ch 0xf6 just 2 ms after
+         * its own SETUP_DATA_CALL response.
+         *
+         *   f6  13917 RSP SETUP_DATA_CALL granted
+         *       13919 REQ SET_INDICATION_FILTER 7f000000
+         *       13921 REQ SET_SCREEN_STATE      01000000
+         *   f5  12789 RSP SETUP_DATA_CALL granted
+         *       13759 IND AIMS_REGISTRATION
+         *       13918 REQ SET_INDICATION_FILTER 7f000000
+         *
+         * Stock sends the pair three times per stack where we sent two. Both
+         * bodies are already byte-identical to stock's, so this is only the
+         * missing occurrence, placed where ch 0xf6 puts it. Skipped when the
+         * context was inherited from an earlier attempt, since stock sends it
+         * once.
+         */
+        if (!ctx->pdn_fresh) {
+            ctx->step++;
+            sequence_step (task);
+            return;
+        }
+        mm_sit_client_set_indication_filter (self->priv->client,
+                                             MM_SIT_INDICATION_FILTER_ALL,
+                                             g_task_get_cancellable (task),
+                                             (GAsyncReadyCallback) reassert_filter_ready,
+                                             task);
+        return;
 
     case STEP_HIDDEN_MENU:
         send_frame (task,

@@ -2421,7 +2421,23 @@ client_boot_config_test_peer (ClientTestContext *ctx)
         MM_SIT_MESSAGE_GET_IMEISV,
         MM_SIT_MESSAGE_OEM_CONFIG,
         MM_SIT_MESSAGE_SET_MODEM_CONFIG,
+        /*
+         * The UICC access-control probe that closes the boot batch: three
+         * opens by AID that the card refuses, one with no AID that yields a
+         * channel, the three EF_DIR reads on it, and the close. Asserting the
+         * exact order is the point -- the channel has to come from the open
+         * response and the close has to happen.
+         */
+        MM_SIT_MESSAGE_OPEN_LOGICAL_CHANNEL,
+        MM_SIT_MESSAGE_OPEN_LOGICAL_CHANNEL,
+        MM_SIT_MESSAGE_OPEN_LOGICAL_CHANNEL,
+        MM_SIT_MESSAGE_OPEN_LOGICAL_CHANNEL,
+        MM_SIT_MESSAGE_TRANSMIT_APDU_CHANNEL,
+        MM_SIT_MESSAGE_TRANSMIT_APDU_CHANNEL,
+        MM_SIT_MESSAGE_TRANSMIT_APDU_CHANNEL,
+        MM_SIT_MESSAGE_CLOSE_LOGICAL_CHANNEL,
     };
+    guint opens = 0, apdus = 0;
     /* A GET_IMEISV payload of the captured shape -- a length byte and 17
      * digits -- with a test identity, so the software version the batch then
      * sends can be checked against its tail. */
@@ -2440,6 +2456,7 @@ client_boot_config_test_peer (ClientTestContext *ctx)
         guint8  response[12 + sizeof (versions_payload)] = { 0 };
         gsize   response_len = 12;
         guint16 request_len;
+        guint32 body_channel = 0;
 
         G_STATIC_ASSERT (sizeof (versions_payload) > sizeof (imeisv_payload));
 
@@ -2456,6 +2473,9 @@ client_boot_config_test_peer (ClientTestContext *ctx)
                 g_assert_cmpuint (body[0xda - MM_SIT_HEADER_SIZE], ==, MM_SIT_PDP_TYPE_IPV4V6);
             if (expected_ids[i] == MM_SIT_MESSAGE_SET_MODEM_CONFIG)
                 g_assert_cmpuint (body[4], ==, ctx->dsds ? 1 : 0);
+            if (expected_ids[i] == MM_SIT_MESSAGE_TRANSMIT_APDU_CHANNEL ||
+                expected_ids[i] == MM_SIT_MESSAGE_CLOSE_LOGICAL_CHANNEL)
+                memcpy (&body_channel, body, 4);
             /* And the software version has to be the one the CP just gave,
              * not a constant: @12 of the frame, ASCII. */
             if (expected_ids[i] == MM_SIT_MESSAGE_OEM_CONFIG) {
@@ -2465,7 +2485,30 @@ client_boot_config_test_peer (ClientTestContext *ctx)
             }
         }
 
-        if (expected_ids[i] == MM_SIT_MESSAGE_GET_IMEISV) {
+        if (expected_ids[i] == MM_SIT_MESSAGE_OPEN_LOGICAL_CHANNEL) {
+            /* Channel at frame+12, its SW at +16. The first three opens name
+             * an applet this card does not have (6a82); the fourth names none
+             * and gets channel 1. */
+            response_len = 18;
+            /* SW as the capture has it: `6a 82` for an absent applet and
+             * `90 00` for success, i.e. 0x826a and 0x0090 read little-endian. */
+            if (++opens < 4) {
+                memset (&response[12], 0xff, 4);
+                response[16] = 0x6a;
+                response[17] = 0x82;
+            } else {
+                response[12] = 1;
+                response[16] = 0x90;
+                response[17] = 0x00;
+            }
+        } else if (expected_ids[i] == MM_SIT_MESSAGE_TRANSMIT_APDU_CHANNEL) {
+            /* Every APDU has to carry the channel the open handed back. */
+            g_assert_cmpuint (body_channel, ==, 1);
+            apdus++;
+        } else if (expected_ids[i] == MM_SIT_MESSAGE_CLOSE_LOGICAL_CHANNEL) {
+            g_assert_cmpuint (apdus, ==, 3);
+            g_assert_cmpuint (body_channel, ==, 1);
+        } else if (expected_ids[i] == MM_SIT_MESSAGE_GET_IMEISV) {
             memcpy (&response[12], imeisv_payload, sizeof (imeisv_payload));
             response_len = 12 + sizeof (imeisv_payload);
         } else if (expected_ids[i] == MM_SIT_MESSAGE_DEVICE_INFO) {
@@ -2541,28 +2584,39 @@ cp_prepare_peer (ClientTestContext *ctx)
             memset (&slot[54], 0, 10);
         }
     }
-    reply_request (ctx->peer_fd, MM_SIT_MESSAGE_SET_RADIO_POWER, ack, sizeof (ack));
-    reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_RADIO_POWER, radio, sizeof (radio));
     if (ctx->add_mapping) {
         slots[13 + 64] = 0xff;
         slots[13 + 65] = 0;
     }
+    /*
+     * The inventory is the first thing after the boot config now. The radios
+     * used to be taken down here unconditionally -- stock never sends
+     * SET_RADIO_POWER OFF at all, so that cost moved to the one branch that
+     * needs it, writing a slot mapping. A boot whose stacks are already mapped
+     * sends one GET_SIM_SLOT_STATUS and is done.
+     */
     reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS, slots, sizeof (slots));
+    if (ctx->add_mapping == 1) {
+        /* Five more inventories before the mapping branch opens, then both
+         * radios down -- stack 1 first, then stack 0 -- each followed by the
+         * re-query that reaches the branch again. */
+        for (i = 0; i < 5; i++)
+            reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS, slots, sizeof (slots));
+        reply_request (ctx->control_fd, MM_SIT_MESSAGE_SET_RADIO_POWER, ack, sizeof (ack));
+        reply_request (ctx->control_fd, MM_SIT_MESSAGE_GET_RADIO_POWER, radio, sizeof (radio));
+        reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS, slots, sizeof (slots));
+        reply_request (ctx->peer_fd, MM_SIT_MESSAGE_SET_RADIO_POWER, ack, sizeof (ack));
+        reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_RADIO_POWER, radio, sizeof (radio));
+        reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS, slots, sizeof (slots));
+        ack[10] = 7; /* CP may reject a mapping that nevertheless appears. */
+        reply_request (ctx->peer_fd, MM_SIT_MESSAGE_SET_LOGICAL_SLOT_MAPPING, ack, sizeof (ack));
+        ack[10] = 0;
+    }
     if (ctx->add_mapping) {
-        if (ctx->add_mapping == 1) {
-            for (i = 0; i < 5; i++)
-                reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS, slots, sizeof (slots));
-            ack[10] = 7; /* CP may reject a mapping that nevertheless appears. */
-            reply_request (ctx->peer_fd, MM_SIT_MESSAGE_SET_LOGICAL_SLOT_MAPPING, ack, sizeof (ack));
-            ack[10] = 0;
-        }
         slots[13 + 64] = 1;
         slots[13 + 65] = 1;
         reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS, slots, sizeof (slots));
     }
-    reply_request (ctx->control_fd, MM_SIT_MESSAGE_SET_RADIO_POWER, ack, sizeof (ack));
-    reply_request (ctx->control_fd, MM_SIT_MESSAGE_GET_RADIO_POWER, radio, sizeof (radio));
-    reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_SIM_SLOT_STATUS, slots, sizeof (slots));
     return NULL;
 }
 
@@ -2879,6 +2933,23 @@ ims_retry_peer_ready (gint fd, GIOCondition condition, ImsRetryPeer *peer)
     case 0x0d06: /* AIMS_DEREGISTRATION */
     case 0x0d39: /* AIMS_STACK_START_REQ */
     case 0x0d07: /* AIMS_HIDDEN_MENU */
+        break;
+    /*
+     * The boot-parity PRE_PDN preamble, replayed from STEP_PREAMBLE, and the
+     * indication filter and display state re-asserted from
+     * STEP_REASSERT_FILTER once the context is up. Both are advisory in the
+     * plugin and this test is about the retry ladder, so a plain success is
+     * all they need -- but they do reach the peer, and without these the
+     * default arm trips.
+     */
+    case 0x0d0b:
+    case 0x0d3b:
+    case 0x0d3c:
+    case 0x091a:
+    case MM_SIT_MESSAGE_QUERY_NETWORK_SELECTION_MODE:
+    case MM_SIT_MESSAGE_GET_VOICE_REGISTRATION:
+    case MM_SIT_MESSAGE_SET_INDICATION_FILTER:
+    case MM_SIT_MESSAGE_SET_SCREEN_STATE:
         break;
     case 0x0d3a: /* AIMS_STACK_STOP_REQ */
         peer->stops++;

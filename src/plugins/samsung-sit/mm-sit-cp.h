@@ -20,6 +20,11 @@ gboolean mm_sit_cp_prepare_finish (MMSitCp *self, GAsyncResult *res, GError **er
  * Internal IMS setup does not claim the internet-data preference. */
 gboolean mm_sit_cp_claim_data (MMSitCp *self, guint stack, guint8 cid, GError **error);
 /* Name the stack that owns mobile data to the CP; a no-op if unchanged. */
+/* The inventory prepare() already polled, so the modems need not ask again;
+ * FALSE when nothing is cached. Dropped on SIM_SLOT_STATUS_CHANGED. */
+gboolean mm_sit_cp_peek_sim_slot_status (MMSitCp *self, MMSitSimSlotStatus *out);
+void mm_sit_cp_forget_sim_slot_status (MMSitCp *self);
+
 void mm_sit_cp_prefer_data_stack (MMSitCp *self, guint stack);
 gboolean mm_sit_cp_data_reserved (MMSitCp *self, guint8 cid);
 void mm_sit_cp_commit_data (MMSitCp *self, guint8 cid);
