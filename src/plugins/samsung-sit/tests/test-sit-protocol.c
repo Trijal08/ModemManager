@@ -2531,9 +2531,13 @@ client_boot_config_test_peer (ClientTestContext *ctx)
                 g_assert_cmpuint (body[0xda - MM_SIT_HEADER_SIZE], ==, MM_SIT_PDP_TYPE_IPV4V6);
             if (expected_ids[i] == MM_SIT_MESSAGE_SET_MODEM_CONFIG)
                 g_assert_cmpuint (body[4], ==, ctx->dsds ? 1 : 0);
+            /* The channel is the first u32 of the *payload*, which is
+             * frame+12 -- body[0] is frame+8, the reserved field. Reading it
+             * from body[0] is what let the four-byte-early build of these
+             * frames pass this test. */
             if (expected_ids[i] == MM_SIT_MESSAGE_TRANSMIT_APDU_CHANNEL ||
                 expected_ids[i] == MM_SIT_MESSAGE_CLOSE_LOGICAL_CHANNEL)
-                memcpy (&body_channel, body, 4);
+                memcpy (&body_channel, body + (12 - MM_SIT_HEADER_SIZE), 4);
             /* And the software version has to be the one the CP just gave,
              * not a constant: @12 of the frame, ASCII. */
             if (expected_ids[i] == MM_SIT_MESSAGE_OEM_CONFIG) {
