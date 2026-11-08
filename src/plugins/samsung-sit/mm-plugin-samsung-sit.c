@@ -86,7 +86,11 @@ create_modem (MMPlugin      *self,
  * than leave it usable. Doing it here and not only in a udev rule makes it a
  * property of the plugin: nothing about this modem needs an AT port, on any
  * system, whatever the packaging ships. peek_client already skips ignored
- * ports, and MMBaseModem tolerates a modem whose only control port is SIT. */
+ * ports, and MMBaseModem tolerates a modem whose only control port is SIT.
+ *
+ * The same applies to the CP's other channels (OEM, RFS, GNSS boot). Those
+ * carry their own framing and mm-port-probe.c ignores them on the wwan type
+ * attribute, but a driver that does not set one would land them here. */
 static gboolean
 grab_port (MMPlugin     *self,
            MMBaseModem  *modem,
@@ -99,8 +103,15 @@ grab_port (MMPlugin     *self,
     ptype  = mm_port_probe_get_port_type  (probe);
     pgroup = mm_port_probe_get_port_group (probe);
 
-    if (ptype == MM_PORT_TYPE_AT && pgroup != MM_PORT_GROUP_IGNORED) {
-        mm_obj_dbg (self, "ignoring AT port %s: this modem is driven over SIT",
+    /* SIT drives every interface and the net port carries the data call; a port
+     * that is neither is of no use to us. Test the type rather than AT alone so
+     * that a port whose probing was inconclusive -- an AT probe that timed out
+     * leaves MM_PORT_TYPE_UNKNOWN -- is ignored too, instead of being offered
+     * to mm_base_modem_grab_port() which rejects it as an unhandled type and
+     * fails the whole modem with "Couldn't get primary port". */
+    if (ptype != MM_PORT_TYPE_SIT && ptype != MM_PORT_TYPE_NET &&
+        pgroup != MM_PORT_GROUP_IGNORED) {
+        mm_obj_dbg (self, "ignoring port %s: this modem is driven over SIT",
                     mm_port_probe_get_port_name (probe));
         pgroup = MM_PORT_GROUP_IGNORED;
     }

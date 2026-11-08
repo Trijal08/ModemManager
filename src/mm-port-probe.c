@@ -2301,6 +2301,18 @@ initialize_port_type_hints (MMPortProbe *self)
             } else if (!g_strcmp0 (type, "FASTBOOT")) {
                 mm_obj_dbg (self, "port may be FASTBOOT based on the wwan type attribute");
                 auto_ignored = TRUE;
+            } else if (!g_strcmp0 (type, "OEM") ||
+                       !g_strcmp0 (type, "RFS") ||
+                       !g_strcmp0 (type, "GNSS")) {
+                /* Vendor control channels carrying their own framing (protobuf
+                 * on the Samsung OEM ports, a file-server protocol on RFS, a
+                 * firmware boot conversation on GNSS -- not NMEA, which the
+                 * kernel exports through the gnss subsystem instead). Without a
+                 * hint these fall through to generic AT probing, which writes
+                 * 'AT<CR>' into them and leaves the port UNKNOWN so it cannot
+                 * be grabbed at all. */
+                mm_obj_dbg (self, "port is ignored based on the wwan type attribute: %s", type);
+                auto_ignored = TRUE;
             }
         }
         /* Linux 5.13 does not have 'type' attribute yet, match kernel name instead */
