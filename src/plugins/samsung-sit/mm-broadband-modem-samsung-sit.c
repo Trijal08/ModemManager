@@ -90,6 +90,11 @@ struct _MMBroadbandModemSamsungSitPrivate {
      * is what load reports, and in turn what the core compares a new request
      * against to decide whether it is a change worth a power cycle. */
     MMBearerProperties *initial_eps_bearer_settings;
+    /* The last network time the CP pushed, so the Time interface can be
+     * answered without asking for one. */
+    MMSitNitzTime        nitz;
+    gboolean             have_nitz;
+
     /* ims.db, cached from the carrier-config mapping at construction: the
      * pre-radio-on path needs the carrier's APN list from it, and by then the
      * mapping property is no longer convenient to re-derive. */
@@ -809,6 +814,10 @@ handle_nitz_time (MMBroadbandModemSamsungSit *self,
         return;
     }
     mm_obj_dbg (self, "CP pushed a network time: %s", iso8601);
+    /* Keep it: the Time interface is then answered from here rather than by
+     * asking the CP, which is what stock does. See modem_time_load_network_time(). */
+    self->priv->nitz = time;
+    self->priv->have_nitz = TRUE;
     mm_iface_modem_time_update_network_time (MM_IFACE_MODEM_TIME (self), iso8601);
 
     tz = mm_network_timezone_new ();
@@ -6256,6 +6265,26 @@ modem_time_load_network_time (MMIfaceModemTime    *iface,
     GTask                      *task;
 
     task = g_task_new (iface, NULL, callback, user_data);
+
+    /*
+     * Answer from the last pushed NITZ when there is one. The CP sends
+     * NITZ_TIME_RECEIVED (0x0905) on every arrival and handle_nitz_time()
+     * keeps it, so the query adds nothing but a frame -- and stock never
+     * sends GET_NITZ_TIME at all, where we were putting one on each stack a
+     * couple of seconds after its IMS grant, inside the window stock uses to
+     * register.
+     */
+    if (self->priv->have_nitz) {
+        g_autofree gchar *iso8601 = mm_sit_nitz_time_to_iso8601 (&self->priv->nitz, &error);
+
+        if (iso8601) {
+            g_task_return_pointer (task, g_steal_pointer (&iso8601), g_free);
+            g_object_unref (task);
+            return;
+        }
+        g_clear_error (&error);
+    }
+
     client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
     if (!client) {
         g_task_return_error (task, error);
@@ -6308,6 +6337,19 @@ modem_time_load_network_timezone (MMIfaceModemTime    *iface,
     GTask                      *task;
 
     task = g_task_new (iface, NULL, callback, user_data);
+
+    /* As modem_time_load_network_time(): the pushed NITZ carries the offset
+     * too, so the query is only for a CP that has not pushed one yet. */
+    if (self->priv->have_nitz) {
+        MMNetworkTimezone *tz = mm_network_timezone_new ();
+
+        mm_network_timezone_set_offset (tz, self->priv->nitz.timezone_quarter_hours * 15);
+        mm_network_timezone_set_dst_offset (tz, self->priv->nitz.daylight_saving_hours * 60);
+        g_task_return_pointer (task, tz, g_object_unref);
+        g_object_unref (task);
+        return;
+    }
+
     client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
     if (!client) {
         g_task_return_error (task, error);

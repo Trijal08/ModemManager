@@ -26,6 +26,9 @@ gboolean mm_sit_cp_peek_sim_slot_status (MMSitCp *self, MMSitSimSlotStatus *out)
 void mm_sit_cp_forget_sim_slot_status (MMSitCp *self);
 
 void mm_sit_cp_prefer_data_stack (MMSitCp *self, guint stack);
+
+/* Whether the CP already believes @stack owns mobile data. */
+gboolean mm_sit_cp_data_stack_is (MMSitCp *self, guint stack);
 void mm_sit_cp_note_data_stack   (MMSitCp *self, guint stack);
 gboolean mm_sit_cp_data_reserved (MMSitCp *self, guint8 cid);
 void mm_sit_cp_commit_data (MMSitCp *self, guint8 cid);

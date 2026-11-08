@@ -186,6 +186,13 @@ mm_sit_cp_note_data_stack (MMSitCp *self, guint stack)
     self->data_pref = (gint) stack;
 }
 
+/* Whether the CP has already been told that @stack owns mobile data. */
+gboolean
+mm_sit_cp_data_stack_is (MMSitCp *self, guint stack)
+{
+    return self && stack < 2 && self->data_pref == (gint) stack;
+}
+
 static void
 prepare_complete (MMSitCp *self, const GError *error)
 {

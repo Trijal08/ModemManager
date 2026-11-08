@@ -3526,6 +3526,23 @@ connect_step (GTask *task)
         return;
     }
 
+    /*
+     * Naming the data stack again when the CP already holds that answer is
+     * not free. Stock sends SET_PREFERRED_DATA_MODEM two or three times, all
+     * of them inside the first seven seconds of a boot, and never again --
+     * in particular never once an IMS context exists. We sent it as the
+     * unconditional first step of every bearer connect, which on both
+     * captured boots put one on stack 0 within 50 ms of that stack's IMS
+     * grant, at the head of a 13-14 s wait for a registration stock answers
+     * in 0.7-2.5 s.
+     *
+     * So it is sent on a change and skipped otherwise, which is what
+     * mm_sit_cp_prefer_data_stack() has always done for the other sender.
+     */
+    if (ctx->step == CONNECT_STEP_PREFERRED_MODEM &&
+        mm_sit_cp_data_stack_is (self->priv->cp, self->priv->stack))
+        ctx->step++;
+
     /* The IMS context is the attach context; re-pointing it would tear down
      * the very PDN this connect is for. */
     if (ctx->cp && ctx->step == CONNECT_STEP_ATTACH_APN)
