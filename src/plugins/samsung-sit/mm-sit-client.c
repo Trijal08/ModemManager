@@ -3604,7 +3604,9 @@ mm_sit_client_get_facility_lock (MMSitClient        *self,
     GTask                *task;
 
     task = g_task_new (self, cancellable, callback, user_data);
-    request = mm_sit_request_new_get_facility_lock (mm_sit_client_next_token (self), facility);
+    request = mm_sit_request_new_get_facility_lock (mm_sit_client_next_token (self), facility,
+                                                    self->priv->sim_aid_len ? self->priv->sim_aid : NULL,
+                                                    self->priv->sim_aid_len);
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_facility_lock_ready, task);
 }

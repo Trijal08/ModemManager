@@ -2052,14 +2052,19 @@ mm_sit_message_parse_nr_cell_info_list (const MMSitMessage *message,
 }
 
 GByteArray *
-mm_sit_request_new_get_facility_lock (guint16 token,
-                                      guint8  facility)
+mm_sit_request_new_get_facility_lock (guint16       token,
+                                      guint8        facility,
+                                      const guint8 *aid,
+                                      gsize         aid_len)
 {
     guint8          *buffer = NULL;
     gsize            len = 0;
     SamsungSitStatus status;
 
-    status = samsung_sit_build_get_facility_lock (token, facility, &buffer, &len);
+    /* The payload names the application it asks about; stock never leaves it
+     * zero. _aid with aid_len 0 is the old all-zero field. */
+    status = samsung_sit_build_get_facility_lock_aid (token, facility, aid, aid_len,
+                                                      &buffer, &len);
     return finish_build (status, buffer, len, NULL);
 }
 

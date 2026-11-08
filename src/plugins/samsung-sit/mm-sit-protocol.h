@@ -687,8 +687,10 @@ GByteArray *mm_sit_request_new_set_network_selection_manual
                                                        GError               **error);
 GByteArray *mm_sit_request_new_start_network_scan      (guint16                token);
 GByteArray *mm_sit_request_new_stop_network_scan       (guint16                token);
-GByteArray *mm_sit_request_new_get_facility_lock       (guint16                token,
-                                                       guint8                 facility);
+GByteArray *mm_sit_request_new_get_facility_lock     (guint16                token,
+                                                      guint8                 facility,
+                                                      const guint8          *aid,
+                                                      gsize                  aid_len);
 GByteArray *mm_sit_request_new_get_allowed_network_types
                                                       (guint16                token);
 GByteArray *mm_sit_request_new_set_allowed_network_types

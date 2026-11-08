@@ -3330,6 +3330,25 @@ load_enabled_facility_locks_ready (MMSitClient  *client,
     g_object_unref (task);
 }
 
+/* Stock's first facility query. Its answer is not something ModemManager
+ * reports, so it is consumed and the real query follows either way. */
+static void
+facility_lock_parity_probe_ready (MMSitClient  *client,
+                                  GAsyncResult *res,
+                                  GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    g_autoptr(GError)           error = NULL;
+    gboolean                    locked = FALSE;
+
+    if (!mm_sit_client_get_facility_lock_finish (client, res, &locked, &error))
+        mm_obj_dbg (self, "facility 0x10 query failed: %s", error->message);
+
+    mm_sit_client_get_facility_lock (client, MM_SIT_FACILITY_SIM_PIN, NULL,
+                                     (GAsyncReadyCallback) load_enabled_facility_locks_ready,
+                                     task);
+}
+
 static void
 load_enabled_facility_locks (MMIfaceModem3gpp   *iface,
                              GAsyncReadyCallback callback,
@@ -3347,8 +3366,19 @@ load_enabled_facility_locks (MMIfaceModem3gpp   *iface,
         g_object_unref (task);
         return;
     }
-    mm_sit_client_get_facility_lock (client, MM_SIT_FACILITY_SIM_PIN, NULL,
-                                     (GAsyncReadyCallback) load_enabled_facility_locks_ready,
+    /*
+     * Stock asks twice per application, in this order: facility 0x10, then
+     * 0x03 (SIM PIN). Measured on baseband g5400c-260604-260807-B-16035863 --
+     * four requests on the stack whose SIM has an ISIM, two on the other. Only
+     * 0x03 feeds anything ModemManager reports, so the first is a parity probe
+     * whose answer is discarded. 0x10 is written as a literal because nothing
+     * we have names it, and inventing a name would be worse.
+     *
+     * Still short of stock on a SIM with an ISIM: it repeats the pair for the
+     * ISIM AID, and the client caches only the subscription application.
+     */
+    mm_sit_client_get_facility_lock (client, 0x10, NULL,
+                                     (GAsyncReadyCallback) facility_lock_parity_probe_ready,
                                      task);
 }
 
