@@ -25,6 +25,31 @@ struct _MMSitClientPrivate {
      * were told to talk to the node directly in the first place. */
     gchar               *proxy_fallback_device;
     guint                unsolicited_handler_id;
+    /*
+     * The last attach APN handed to the CP, kept so it can be re-asserted.
+     *
+     * Stock re-sends SET_INITIAL_ATTACH_APN, unchanged, immediately before the
+     * first SETUP_DATA_CALL it makes on a stack -- captured on both stacks of
+     * the same boot: Telus attach at 2896 ms, re-sent at 9932 ms, context
+     * asked for at 11238 ms; Fizz attach at 2820 ms, re-sent at 10358 ms,
+     * context asked for 29 ms later. Both were granted. We sent the attach
+     * once at radio-on and never again, and the stack whose context came
+     * latest was refused with cause 168 twelve milliseconds in -- a local
+     * refusal, before any air interface. The attach request is what populates
+     * the CP's per-context tables, and they do not survive the registration
+     * that happens in between.
+     *
+     * Re-asserted once per attach epoch, which is what stock does: the second
+     * context on a stack follows the first without another attach. No radio
+     * cycle goes with it -- stock's only SET_RADIO_POWER was at radio-on.
+     */
+    gchar               *attach_apn;
+    MMSitPdpType         attach_pdp;
+    guint8               attach_pcscf;
+    MMSitAuthType        attach_auth_type;
+    gchar               *attach_auth_user;
+    gchar               *attach_auth_password;
+    gboolean             attach_reasserted;
     gboolean             has_carrier_sim_info;
     MMSitCarrierSimInfo  carrier_sim_info;
     gboolean             boot_config_done;
@@ -3360,6 +3385,50 @@ setup_data_call_ready (MMSitClient  *self,
     g_object_unref (task);
 }
 
+/* Register the profile, then ask for the context; see setup_profile_ready. */
+static void
+setup_send_profile (MMSitClient *self,
+                    GTask       *task)
+{
+    g_autoptr(GByteArray)  request = NULL;
+    SetupContext          *ctx = g_task_get_task_data (task);
+    MMSitApnAuth           auth = { 0 };
+    GError                *error = NULL;
+
+    request = mm_sit_request_new_set_data_profile (mm_sit_client_next_token (self), ctx->apn,
+                                                   ctx->pdp, ctx->apn_types, ctx->bearers,
+                                                   &auth, &error);
+    if (!request) {
+        cid_release (self, ctx->cid);
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    mm_sit_client_command (self, request, 10, g_task_get_cancellable (task),
+                           (GAsyncReadyCallback) setup_profile_ready, task);
+}
+
+static void
+setup_reattach_ready (MMSitClient  *self,
+                      GAsyncResult *res,
+                      GTask        *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    GError                 *error = NULL;
+
+    /* Advisory. A CP that will not take the attach again is no reason not to
+     * ask for the context -- that is exactly the state we were in before. */
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (!response || !message_check_success (response, &error)) {
+        mm_obj_dbg (self->priv->port, "the CP refused the re-asserted attach APN (%s); "
+                    "asking for the context anyway", error ? error->message : "no response");
+        g_clear_error (&error);
+    }
+
+    setup_send_profile (self, task);
+}
+
 void
 mm_sit_client_setup_data_call (MMSitClient        *self,
                                const gchar        *apn,
@@ -3370,10 +3439,8 @@ mm_sit_client_setup_data_call (MMSitClient        *self,
                                GAsyncReadyCallback callback,
                                gpointer            user_data)
 {
-    g_autoptr(GByteArray)  request = NULL;
     SetupContext          *ctx;
     GTask                 *task;
-    MMSitApnAuth           auth = { 0 };
     GError                *error = NULL;
     guint8                 cid;
 
@@ -3408,18 +3475,49 @@ mm_sit_client_setup_data_call (MMSitClient        *self,
     ctx->bearers = bearers;
     g_task_set_task_data (task, ctx, (GDestroyNotify) setup_context_free);
 
-    /* Register the profile before asking for the context; see setup_profile_ready. */
-    request = mm_sit_request_new_set_data_profile (mm_sit_client_next_token (self), apn, pdp,
-                                                   apn_types, bearers, &auth, &error);
-    if (!request) {
-        cid_release (self, cid);
-        g_task_return_error (task, error);
-        g_object_unref (task);
-        return;
+    /*
+     * Re-assert the attach APN first, once per attach epoch, and only when
+     * this context *is* the attach APN's own; see the `attach_apn` comment on
+     * MMSitClientPrivate.
+     *
+     * The wider form -- re-assert before whatever context came first -- was
+     * tried and is wrong. It put the attach 9 ms ahead of an IMS context for a
+     * foreign APN, which stock never does, and the CP answered 2250 after 19 s
+     * where the identical request without it was granted in 288 ms. Two boots
+     * granted it with no re-assert and the one boot that re-asserted was
+     * refused; within that same boot the later context, past the epoch and so
+     * without one, was granted. Stock's own re-assert on the data stack is
+     * followed 29 ms later by the attach APN's own context, which is what this
+     * reproduces.
+     */
+    if (self->priv->attach_apn && !self->priv->attach_reasserted &&
+        g_strcmp0 (self->priv->attach_apn, apn) == 0) {
+        g_autoptr(GByteArray) reattach = NULL;
+        MMSitApnAuth          attach_auth = { 0 };
+
+        attach_auth.auth     = self->priv->attach_auth_type;
+        attach_auth.user     = self->priv->attach_auth_user;
+        attach_auth.password = self->priv->attach_auth_password;
+
+        self->priv->attach_reasserted = TRUE;
+        reattach = mm_sit_request_new_set_initial_attach_apn_for_stack (
+            mm_sit_client_next_token (self), self->priv->stack, self->priv->attach_apn,
+            self->priv->attach_pdp, self->priv->attach_pcscf, &attach_auth, &error);
+        if (reattach) {
+            mm_obj_dbg (self->priv->port,
+                        "re-asserting the attach APN '%s' before the context for '%s'",
+                        self->priv->attach_apn, apn);
+            mm_sit_client_command (self, reattach, 10, cancellable,
+                                   (GAsyncReadyCallback) setup_reattach_ready, task);
+            return;
+        }
+        /* Not worth failing the context over; the CP already has an attach. */
+        mm_obj_dbg (self->priv->port, "could not rebuild the attach APN request (%s); "
+                    "asking for the context anyway", error ? error->message : "unknown");
+        g_clear_error (&error);
     }
 
-    mm_sit_client_command (self, request, 10, cancellable,
-                           (GAsyncReadyCallback) setup_profile_ready, task);
+    setup_send_profile (self, task);
 }
 
 gboolean
@@ -3707,6 +3805,19 @@ mm_sit_client_set_initial_attach_apn (MMSitClient        *self,
     g_autoptr(GByteArray) request = NULL;
     g_autoptr(GError)     error = NULL;
 
+    /* Remember it verbatim: setup_data_call() re-asserts it before the first
+     * context of this attach epoch, which is what stock does. */
+    g_free (self->priv->attach_apn);
+    g_free (self->priv->attach_auth_user);
+    g_free (self->priv->attach_auth_password);
+    self->priv->attach_apn = g_strdup (apn);
+    self->priv->attach_pdp = pdp;
+    self->priv->attach_pcscf = pcscf;
+    self->priv->attach_auth_type = auth ? auth->auth : MM_SIT_AUTH_TYPE_NONE;
+    self->priv->attach_auth_user = auth ? g_strdup (auth->user) : NULL;
+    self->priv->attach_auth_password = auth ? g_strdup (auth->password) : NULL;
+    self->priv->attach_reasserted = FALSE;
+
     request = mm_sit_request_new_set_initial_attach_apn_for_stack (
         mm_sit_client_next_token (self), self->priv->stack, apn, pdp, pcscf, auth, &error);
     if (!request) {
@@ -3993,6 +4104,9 @@ finalize (GObject *object)
     g_free (self->priv->device_manufacturer);
     g_free (self->priv->device_os_name);
     g_free (self->priv->device_os_version);
+    g_free (self->priv->attach_apn);
+    g_free (self->priv->attach_auth_user);
+    g_free (self->priv->attach_auth_password);
     g_clear_pointer (&self->priv->cids, g_hash_table_unref);
     G_OBJECT_CLASS (mm_sit_client_parent_class)->finalize (object);
 }
