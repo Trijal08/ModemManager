@@ -302,7 +302,9 @@ gboolean mm_sit_client_get_network_time_finish (MMSitClient        *self,
 void     mm_sit_client_set_device_info (MMSitClient *self,
                                         const gchar *model,
                                         const gchar *build,
-                                        const gchar *codename);
+                                        const gchar *codename,
+                                        const gchar *sw_version,
+                                        const gchar *cp_sw_version);
 
 /* Reads which radio generations the modem has. */
 void     mm_sit_client_get_radio_capability        (MMSitClient        *self,

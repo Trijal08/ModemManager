@@ -2351,7 +2351,9 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
                 self->priv->client,
                 mm_kernel_device_get_property (mm_port_peek_kernel_device (port), "ID_MM_SIT_DEVICE_MODEL"),
                 mm_kernel_device_get_property (mm_port_peek_kernel_device (port), "ID_MM_SIT_DEVICE_BUILD"),
-                mm_kernel_device_get_property (mm_port_peek_kernel_device (port), "ID_MM_SIT_DEVICE_CODENAME"));
+                mm_kernel_device_get_property (mm_port_peek_kernel_device (port), "ID_MM_SIT_DEVICE_CODENAME"),
+                mm_kernel_device_get_property (mm_port_peek_kernel_device (port), "ID_MM_SIT_DEVICE_SW_VERSION"),
+                mm_kernel_device_get_property (mm_port_peek_kernel_device (port), "ID_MM_SIT_CP_SW_VERSION"));
             self->priv->escalate_attach_to_ims = escalate_property (port);
             mm_obj_info (self, "DSDS logical stack %d on %s", self->priv->logical_stack,
                          mm_port_get_device (port));
@@ -2387,7 +2389,11 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
             mm_kernel_device_get_property (mm_port_peek_kernel_device (port),
                                            "ID_MM_SIT_DEVICE_BUILD"),
             mm_kernel_device_get_property (mm_port_peek_kernel_device (port),
-                                           "ID_MM_SIT_DEVICE_CODENAME"));
+                                           "ID_MM_SIT_DEVICE_CODENAME"),
+            mm_kernel_device_get_property (mm_port_peek_kernel_device (port),
+                                           "ID_MM_SIT_DEVICE_SW_VERSION"),
+            mm_kernel_device_get_property (mm_port_peek_kernel_device (port),
+                                           "ID_MM_SIT_CP_SW_VERSION"));
         if (escalate_property (port))
             self->priv->escalate_attach_to_ims = TRUE;
         if (!mm_sit_client_open (client, error)) {
@@ -5226,10 +5232,24 @@ set_indication_filter_ready (MMSitClient *client,
         return;
     }
 
-    /* Android pairs the indication filter with the display state. ModemManager
-     * has no display-state integration, so keep the modem in its screen-off
-     * policy and use explicit signal queries while the system is awake. */
-    mm_sit_client_set_screen_state (client, FALSE, NULL,
+    /*
+     * Android pairs the indication filter with the display state and reports
+     * the screen ON: `01 00 00 00` on both stacks, every time. We reported OFF.
+     *
+     * That one byte is also why we polled: with the screen reported off the CP
+     * withholds unsolicited measurement indications, so the plugin fell back to
+     * explicit queries. Measured on identical firmware (Android B-16035863 vs
+     * pmOS r32, per-boot AP->CP request counts):
+     *
+     *     GET_SIGNAL_STRENGTH      android 1    pmOS 58
+     *     GET_VOICE_REGISTRATION   android 15   pmOS 62
+     *     GET_DATA_REGISTRATION    android 17   pmOS 34
+     *
+     * So report ON, like stock, and let the CP push 0x0906/0x070e instead --
+     * the plugin already consumes both. ModemManager still has no display-state
+     * integration; this is a constant, which is exactly what stock sends.
+     */
+    mm_sit_client_set_screen_state (client, TRUE, NULL,
                                     (GAsyncReadyCallback) set_screen_state_ready,
                                     task);
 }

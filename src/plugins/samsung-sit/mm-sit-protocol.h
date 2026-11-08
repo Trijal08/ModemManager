@@ -667,6 +667,7 @@ GByteArray *mm_sit_request_new_device_info            (guint16                to
                                                        const gchar           *model,
                                                        const gchar           *build,
                                                        const gchar           *codename,
+                                                      const gchar           *sw_version,
                                                        GError               **error);
 GByteArray *mm_sit_request_new_carrier_manifest       (guint16                token,
                                                        const gchar           *directory,

@@ -362,10 +362,12 @@ test_build_config_requests (void)
     g_autoptr(GByteArray) screen_state = NULL;
     g_autoptr(GError)     error = NULL;
 
-    info = mm_sit_request_new_device_info (2, "Pixel 9a", "TEST.BUILD", "tegu", &error);
+    info = mm_sit_request_new_device_info (2, "Pixel 9a", "TEST.BUILD", "tegu", "17", &error);
     g_assert_no_error (error);
     g_assert_cmpuint (info->len, ==, 140);
     g_assert_cmpmem (&info->data[12], 8, "Pixel 9a", 8);
+    /* Field 4 sits at body+100 == frame+108. */
+    g_assert_cmpmem (&info->data[108], 2, "17", 2);
     g_assert_cmpmem (&info->data[44], 10, "TEST.BUILD", 10);
 
     manifest = mm_sit_request_new_carrier_manifest (3, "/vendor/firmware/carrierconfig", sha1, &error);

@@ -723,8 +723,10 @@ run_initialize (MMSitClient *client,
             return FALSE;
         }
         g_clear_pointer (&request, g_byte_array_unref);
+        /* Field 4 of 0x0922 is a vendor software-version string; the tool has
+         * no option for it, so send it empty. */
         request = mm_sit_request_new_device_info (1, opt_model, opt_build_id,
-                                                 opt_codename ?: "", error);
+                                                 opt_codename ?: "", "", error);
         if (!request || !run_request (client, request, 5, error))
             return FALSE;
     }

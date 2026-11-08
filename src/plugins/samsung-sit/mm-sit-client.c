@@ -38,6 +38,13 @@ struct _MMSitClientPrivate {
     gchar               *device_model;
     gchar               *device_build;
     gchar               *device_codename;
+    /* 0x0922 field 4, and the value 0x4605 carries. Both are vendor constants
+     * with no counterpart on a mainline system, so they come from the device
+     * package (ID_MM_SIT_DEVICE_SW_VERSION / ID_MM_SIT_CP_SW_VERSION). Unset
+     * keeps the old behaviour: an empty field 4, and 0x4605 echoing the SV
+     * digits of GET_IMEISV. */
+    gchar               *device_sw_version;
+    gchar               *cp_sw_version;
     /* Resolved alongside the above, for the SIP User-Agent rather than for
      * SET_DEVICE_INFO -- same facts, second consumer. */
     gchar               *device_manufacturer;
@@ -2350,7 +2357,9 @@ mm_sit_client_set_carrier_manifest_finish (MMSitClient  *self,
 static void set_device_info (MMSitClient *self,
                              const gchar *model,
                              const gchar *build,
-                             const gchar *codename);
+                             const gchar *codename,
+                             const gchar *sw_version,
+                             const gchar *cp_sw_version);
 
 #define BOOT_CONFIG_DEVICE_MODEL_FALLBACK "Linux"
 #define BOOT_CONFIG_DEVICE_BUILD_FALLBACK "unknown"
@@ -2487,11 +2496,12 @@ boot_config_step (GTask *task)
     }
     case BOOT_CONFIG_STEP_DEVICE_INFO:
         if (!self->priv->device_model)
-            set_device_info (self, NULL, NULL, NULL);
+            set_device_info (self, NULL, NULL, NULL, NULL, NULL);
         request = mm_sit_request_new_device_info (mm_sit_client_next_token (self),
                                                   self->priv->device_model,
                                                   self->priv->device_build,
                                                   self->priv->device_codename,
+                                                  self->priv->device_sw_version,
                                                   &error);
         if (!request)
             break;
@@ -2503,14 +2513,24 @@ boot_config_step (GTask *task)
         mm_sit_client_command (self, request, 5, g_task_get_cancellable (task),
                                (GAsyncReadyCallback) boot_config_software_version_ready, task);
         return;
-    case BOOT_CONFIG_STEP_OEM_CONFIG:
-        if (!ctx->software_version) {
+    case BOOT_CONFIG_STEP_OEM_CONFIG: {
+        /*
+         * Stock sends "67"; the SV digits of our GET_IMEISV are "64", so
+         * echoing the modem back is right for the modem and wrong for parity.
+         * Measured on identical firmware: IMEISV 35077975117992564 -> "64",
+         * Android 0x4605 -> "67". A pinned value wins when the device package
+         * supplies one; otherwise keep echoing the CP.
+         */
+        const gchar *version = self->priv->cp_sw_version ?: ctx->software_version;
+
+        if (!version) {
             ctx->step++;
             boot_config_step (task);
             return;
         }
-        request = mm_sit_request_new_oem_config (mm_sit_client_next_token (self), ctx->software_version, &error);
+        request = mm_sit_request_new_oem_config (mm_sit_client_next_token (self), version, &error);
         break;
+    }
     case BOOT_CONFIG_STEP_MODEM_CONFIG:
         if (self->priv->cp && self->priv->stack == 1) {
             ctx->step++;
@@ -3966,6 +3986,8 @@ finalize (GObject *object)
     g_free (self->priv->device_model);
     g_free (self->priv->device_build);
     g_free (self->priv->device_codename);
+    g_free (self->priv->device_sw_version);
+    g_free (self->priv->cp_sw_version);
     g_free (self->priv->device_manufacturer);
     g_free (self->priv->device_os_name);
     g_free (self->priv->device_os_version);
@@ -3997,11 +4019,22 @@ read_board_codename (void)
 {
     g_autofree gchar *compatible = NULL;
     const gchar      *dash;
+    const gchar      *comma;
 
     compatible = read_first_line ("/proc/device-tree/compatible");
     if (!compatible)
         return NULL;
+    /*
+     * The first compatible is "<vendor>,<board>", so the board name is what
+     * follows the last ',' or '-' -- whichever comes later. Splitting on '-'
+     * alone left komodo's "google,komodo" whole and we told the CP
+     * "google,komodo" where stock says "komodo" (measured, DEVICE_INFO field 3,
+     * Android B-16035863 vs pmOS r32).
+     */
     dash = strrchr (compatible, '-');
+    comma = strrchr (compatible, ',');
+    if (comma && (!dash || comma > dash))
+        dash = comma;
     return g_strdup (dash ? dash + 1 : compatible);
 }
 
@@ -4115,11 +4148,17 @@ static void
 set_device_info (MMSitClient *self,
                  const gchar *model,
                  const gchar *build,
-                 const gchar *codename)
+                 const gchar *codename,
+                 const gchar *sw_version,
+                 const gchar *cp_sw_version)
 {
     g_free (self->priv->device_model);
     g_free (self->priv->device_build);
     g_free (self->priv->device_codename);
+    g_free (self->priv->device_sw_version);
+    g_free (self->priv->cp_sw_version);
+    self->priv->device_sw_version = sw_version && sw_version[0] ? g_strdup (sw_version) : NULL;
+    self->priv->cp_sw_version = cp_sw_version && cp_sw_version[0] ? g_strdup (cp_sw_version) : NULL;
 
     self->priv->device_model = model && model[0] ? g_strdup (model)
         : read_first_line ("/proc/device-tree/model");
@@ -4158,11 +4197,13 @@ void
 mm_sit_client_set_device_info (MMSitClient *self,
                                const gchar *model,
                                const gchar *build,
-                               const gchar *codename)
+                               const gchar *codename,
+                               const gchar *sw_version,
+                               const gchar *cp_sw_version)
 {
     g_return_if_fail (MM_IS_SIT_CLIENT (self));
 
-    set_device_info (self, model, build, codename);
+    set_device_info (self, model, build, codename, sw_version, cp_sw_version);
 }
 
 /* The client is its own log object rather than borrowing the port's. The port

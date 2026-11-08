@@ -782,13 +782,18 @@ mm_sit_request_new_device_info (guint16      token,
                                 const gchar *model,
                                 const gchar *build,
                                 const gchar *codename,
+                                const gchar *sw_version,
                                 GError     **error)
 {
     guint8          *buffer = NULL;
     gsize            len = 0;
     SamsungSitStatus status;
 
-    status = samsung_sit_build_device_info (token, model, build, codename, &buffer, &len);
+    /* 0x0922 carries four 32-byte fields; the fourth is a vendor
+     * software-version string. _sw is a separate entry point so an older
+     * libsamsung-sit-ffi keeps the three-field symbol. */
+    status = samsung_sit_build_device_info_sw (token, model, build, codename,
+                                               sw_version ?: "", &buffer, &len);
     return finish_build (status, buffer, len, error);
 }
 
