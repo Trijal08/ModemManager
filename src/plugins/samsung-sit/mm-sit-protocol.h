@@ -314,6 +314,9 @@ typedef struct {
 /* The registration responses' radio-technology numbering (distinct from the
  * scan's, see MM_SIT_SCAN_RAT_LTE). */
 #define MM_SIT_REGISTRATION_RAT_LTE 14
+/* Standalone 5G. An NSA carrier stays registered as LTE, which is what IMS
+ * cares about anyway: the anchor is the LTE leg either way. */
+#define MM_SIT_REGISTRATION_RAT_NR5G 20
 
 typedef enum {
     MM_SIT_VOPS_SUPPORT_UNKNOWN,
