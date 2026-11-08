@@ -1567,6 +1567,136 @@ port_test_stale_ready (MMPortSerialSit *port,
     g_main_loop_quit (ctx->loop);
 }
 
+/*
+ * Cancelling a command that is still in flight. Both halves of this used to
+ * take the daemon down.
+ *
+ * The cancelled handler completes the request, which retires the token and so
+ * frees the Pending, and pending_free() called g_cancellable_disconnect() --
+ * which waits for the cancelled handlers to return. Called from inside one,
+ * that is a self-deadlock on whichever thread cancelled: with the main loop
+ * there, ModemManager stops answering D-Bus entirely while systemd still
+ * reports it active. Seen on hardware when the IMS stack cancelled its
+ * pending work after 60 s without a supporting RAT.
+ *
+ * Nothing is asserted about a deadlock directly -- the loop simply never
+ * returns and the suite's own timeout is what reports it.
+ */
+static void
+port_test_cancel_ready (MMPortSerialSit *port,
+                        GAsyncResult    *res,
+                        PortTestContext *ctx)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    g_autoptr(GError)       error = NULL;
+
+    response = mm_port_serial_sit_command_finish (port, res, &error);
+    g_assert_error (error, G_IO_ERROR, G_IO_ERROR_CANCELLED);
+    g_assert_null (response);
+    ctx->command_completed = TRUE;
+    g_main_loop_quit (ctx->loop);
+}
+
+static gboolean
+port_test_cancel_now (GCancellable *cancellable)
+{
+    g_cancellable_cancel (cancellable);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+test_port_cancelled_command (void)
+{
+    PortTestContext            ctx = { 0 };
+    gint                       sockets[2];
+    guint                      timeout_id;
+    g_autoptr(GCancellable)    cancellable = NULL;
+    g_autoptr(MMPortSerialSit) port = NULL;
+    g_autoptr(GByteArray)      request = NULL;
+    g_autoptr(GError)          error = NULL;
+
+    g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    ctx.peer_fd = sockets[1];
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+
+    port = MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+                                             MM_PORT_DEVICE, "test-sit-cancel",
+                                             MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+                                             MM_PORT_TYPE, MM_PORT_TYPE_SIT,
+                                             MM_PORT_SERIAL_FD, sockets[0],
+                                             NULL));
+    g_assert_true (mm_port_serial_open (MM_PORT_SERIAL (port), &error));
+    g_assert_no_error (error);
+
+    /* Nobody answers, so the request is still outstanding when it is cancelled. */
+    cancellable = g_cancellable_new ();
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_SIM_STATUS,
+                                        mm_port_serial_sit_next_token (port));
+    mm_port_serial_sit_command (port, request, 30, cancellable,
+                                (GAsyncReadyCallback) port_test_cancel_ready, &ctx);
+    g_idle_add ((GSourceFunc) port_test_cancel_now, cancellable);
+    timeout_id = g_timeout_add_seconds (5, (GSourceFunc) port_test_timeout, &ctx);
+    g_main_loop_run (ctx.loop);
+
+    if (!ctx.timed_out)
+        g_source_remove (timeout_id);
+    mm_port_serial_close (MM_PORT_SERIAL (port));
+    close (ctx.peer_fd);
+    g_main_loop_unref (ctx.loop);
+
+    g_assert_false (ctx.timed_out);
+    g_assert_true (ctx.command_completed);
+}
+
+/*
+ * A cancellable that is *already* cancelled. g_cancellable_connect() then runs
+ * the handler synchronously and returns 0, so the Pending is freed before the
+ * submit path returns -- it must neither store the id into it nor write the
+ * request.
+ */
+static void
+test_port_command_with_a_cancelled_cancellable (void)
+{
+    PortTestContext            ctx = { 0 };
+    gint                       sockets[2];
+    guint                      timeout_id;
+    g_autoptr(GCancellable)    cancellable = NULL;
+    g_autoptr(MMPortSerialSit) port = NULL;
+    g_autoptr(GByteArray)      request = NULL;
+    g_autoptr(GError)          error = NULL;
+
+    g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    ctx.peer_fd = sockets[1];
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+
+    port = MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+                                             MM_PORT_DEVICE, "test-sit-precancel",
+                                             MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+                                             MM_PORT_TYPE, MM_PORT_TYPE_SIT,
+                                             MM_PORT_SERIAL_FD, sockets[0],
+                                             NULL));
+    g_assert_true (mm_port_serial_open (MM_PORT_SERIAL (port), &error));
+    g_assert_no_error (error);
+
+    cancellable = g_cancellable_new ();
+    g_cancellable_cancel (cancellable);
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_SIM_STATUS,
+                                        mm_port_serial_sit_next_token (port));
+    mm_port_serial_sit_command (port, request, 30, cancellable,
+                                (GAsyncReadyCallback) port_test_cancel_ready, &ctx);
+    timeout_id = g_timeout_add_seconds (5, (GSourceFunc) port_test_timeout, &ctx);
+    g_main_loop_run (ctx.loop);
+
+    if (!ctx.timed_out)
+        g_source_remove (timeout_id);
+    mm_port_serial_close (MM_PORT_SERIAL (port));
+    close (ctx.peer_fd);
+    g_main_loop_unref (ctx.loop);
+
+    g_assert_false (ctx.timed_out);
+    g_assert_true (ctx.command_completed);
+}
+
 static void
 test_port_drops_a_stale_response (void)
 {
@@ -3590,6 +3720,9 @@ main (int argc,
     g_test_add_func ("/MM/sit/port/command-and-indication", test_port_command_and_indication);
     g_test_add_func ("/MM/sit/port/stale-response", test_port_drops_a_stale_response);
     g_test_add_func ("/MM/sit/port/queued-commands", test_port_answers_queued_commands);
+    g_test_add_func ("/MM/sit/port/cancelled-command", test_port_cancelled_command);
+    g_test_add_func ("/MM/sit/port/precancelled-command",
+                     test_port_command_with_a_cancelled_cancellable);
     g_test_add_func ("/MM/sit/client/connect-sequence", test_client_connect_sequence);
     g_test_add_func ("/MM/sit/client/sim-cache-refresh", test_client_sim_cache_refresh);
     g_test_add_func ("/MM/sit/ims/config-defaults", test_ims_config_defaults);

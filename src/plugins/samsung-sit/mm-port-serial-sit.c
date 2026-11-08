@@ -161,6 +161,24 @@ pending_timed_out (Pending *pending)
 static void
 pending_cancelled (GCancellable *cancellable, Pending *pending)
 {
+    /*
+     * This runs inside the cancellable's own "cancelled" emission, and
+     * completing the request retires the token, which frees the Pending.
+     * g_cancellable_disconnect() waits for the cancelled handlers to return,
+     * so pending_free() must not be allowed to reach it from here or the
+     * thread deadlocks against itself -- main loop included, which takes the
+     * whole daemon down with it: no D-Bus, no modems, and a live process that
+     * systemd still calls active.
+     *
+     * Drop the handler the non-blocking way instead and clear the id so
+     * pending_free() leaves it alone. The id is zero when g_cancellable_connect()
+     * ran us synchronously because the cancellable was already cancelled.
+     */
+    if (pending->cancelled_id) {
+        g_signal_handler_disconnect (cancellable, pending->cancelled_id);
+        pending->cancelled_id = 0;
+    }
+
     pending_complete (pending, NULL,
                       g_error_new (G_IO_ERROR, G_IO_ERROR_CANCELLED,
                                    "SIT request cancelled"));
@@ -336,17 +354,33 @@ mm_port_serial_sit_command (MMPortSerialSit     *self,
     pending->timeout_id = g_timeout_add_seconds (timeout_seconds,
                                                  (GSourceFunc) pending_timed_out,
                                                  pending);
+    g_hash_table_insert (self->priv->pending, GUINT_TO_POINTER ((guint) token), pending);
+
     /*
      * The cancellable is held here rather than given to the GTask, because
      * cancelling has to retire the token as well and only this knows how.
+     *
+     * Connected *after* the insert, and the result is checked rather than
+     * stored blindly: if the cancellable is already cancelled,
+     * g_cancellable_connect() runs pending_cancelled() synchronously and
+     * returns 0. That completes the request and retires the token, so the
+     * Pending is already freed when it returns -- assigning to it, or sending
+     * the request, would be a use-after-free. Connecting before the insert
+     * was worse still: the remove found nothing, so pending_free() never ran
+     * and the request went out anyway with a completed task and a live
+     * timeout behind it.
      */
     if (cancellable) {
+        gulong cancelled_id;
+
         pending->cancellable = g_object_ref (cancellable);
-        pending->cancelled_id = g_cancellable_connect (cancellable,
-                                                       (GCallback) pending_cancelled,
-                                                       pending, NULL);
+        cancelled_id = g_cancellable_connect (cancellable,
+                                              (GCallback) pending_cancelled,
+                                              pending, NULL);
+        if (!cancelled_id)
+            return;
+        pending->cancelled_id = cancelled_id;
     }
-    g_hash_table_insert (self->priv->pending, GUINT_TO_POINTER ((guint) token), pending);
 
     /* mm_port_serial_send() still logs the write through the debug_log vfunc
      * below, so the request lines read exactly as they did before. */
