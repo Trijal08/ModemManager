@@ -756,7 +756,7 @@ sequence_step (GTask *task)
          * our AP->CP stream against stock's on identical firmware left this as
          * the divergence at the point of the request: 59% of stock's order on
          * ch 0xf5 and 31% on 0xf6, with the tail of both missing exactly this
-         * block. See MM_SIT_PARITY_PHASE_PRE_PDN.
+         * block. See MM_SIT_BOOT_PHASE_PRE_PDN.
          *
          * Advisory: a refused row is still a row the CP saw, so this cannot
          * fail the context.

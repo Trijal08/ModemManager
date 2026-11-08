@@ -49,7 +49,8 @@ if enable_tests and plugins_options['samsung-sit']
     'test-samsung-sit-protocol',
     sources: files(
       'samsung-sit/mm-sit-protocol.c',
-      'samsung-sit/mm-sit-carrier-config.c',
+      'samsung-sit/mm-sit-boot-config.c',
+    'samsung-sit/mm-sit-carrier-config.c',
       'samsung-sit/mm-port-serial-sit.c',
       'samsung-sit/mm-sit-client.c',
       'samsung-sit/mm-sit-cp.c',
@@ -979,6 +980,7 @@ if plugins_options['samsung-sit']
     'samsung-sit/mm-call-samsung-sit.c',
     'samsung-sit/mm-port-serial-sit.c',
     'samsung-sit/mm-plugin-samsung-sit.c',
+    'samsung-sit/mm-sit-boot-config.c',
     'samsung-sit/mm-sit-carrier-config.c',
     'samsung-sit/mm-sit-client.c',
       'samsung-sit/mm-sit-cp.c',

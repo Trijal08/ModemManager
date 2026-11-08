@@ -6,7 +6,7 @@
 
 #include "mm-log-object.h"
 #include "mm-sit-client.h"
-#include "mm-sit-boot-parity.h"
+#include "mm-sit-boot-config.h"
 #include "mm-sit-cp.h"
 
 enum {
@@ -3584,32 +3584,44 @@ setup_reattach_ready (MMSitClient  *self,
  * on its own -- the modem passes it, NULL otherwise.
  */
 GByteArray *
-mm_sit_client_build_parity_request (MMSitClient              *self,
-                                    const MMSitParityRequest *req,
+mm_sit_client_build_boot_request (MMSitClient              *self,
+                                    const MMSitBootRequest *req,
                                     const gchar              *mccmnc,
                                     GError                  **error)
 {
     g_autofree guint8 *body = NULL;
-    gsize              len = 4 + req->len;
+    g_autofree guint8 *built = NULL;
+    gsize              payload_len = req->len;
+    gsize              len;
 
+    /* A request whose payload is derived rather than stated. */
+    if (req->sub == MM_SIT_BOOT_SUB_BUILD) {
+        built = mm_sit_boot_build_payload (req, &payload_len);
+        if (!built)
+            return NULL;
+    }
+
+    len = 4 + payload_len;
     body = g_malloc0 (len);
-    if (req->payload)
+    if (built)
+        memcpy (body + 4, built, payload_len);
+    else if (req->payload)
         memcpy (body + 4, req->payload, req->len);
 
     switch (req->sub) {
-    case MM_SIT_PARITY_SUB_MCCMNC:
+    case MM_SIT_BOOT_SUB_MCCMNC:
         /* Nothing to name the subscription with yet; the CP gets it next time. */
         if (!mccmnc || !mccmnc[0] || strlen (mccmnc) >= req->len)
             return NULL;
         memset (body + 4, 0, req->len);
         memcpy (body + 4, mccmnc, strlen (mccmnc));
         break;
-    case MM_SIT_PARITY_SUB_STACK:
+    case MM_SIT_BOOT_SUB_STACK:
         if (req->len < 1)
             return NULL;
         body[4] = (guint8) self->priv->stack;
         break;
-    case MM_SIT_PARITY_SUB_WALLCLOCK: {
+    case MM_SIT_BOOT_SUB_WALLCLOCK: {
         /*
          * Six bytes of UTC at payload+9: yy mm dd HH MM SS, yy = year - 2000,
          * each a plain byte rather than BCD.
@@ -3631,7 +3643,8 @@ mm_sit_client_build_parity_request (MMSitClient              *self,
         body[4 + 14] = (guint8) g_date_time_get_second (now);
         break;
     }
-    case MM_SIT_PARITY_SUB_NONE:
+    case MM_SIT_BOOT_SUB_BUILD:
+    case MM_SIT_BOOT_SUB_NONE:
     default:
         break;
     }
@@ -3640,7 +3653,7 @@ mm_sit_client_build_parity_request (MMSitClient              *self,
      * The AIMS stack requests name their stack in payload byte 1, 1-based, and
      * the table does not cover it.
      *
-     * mm-sit-boot-parity.h is a verbatim replay of one cold boot captured on
+     * mm-sit-boot-config.h is a verbatim replay of one cold boot captured on
      * **one stack**, and its own header says so. STACK_START (0x0d39),
      * STACK_STOP (0x0d3a), 0x0d3b and 0x0d3c all carry the stack, so replaying
      * them unmodified sent stack 0's index on both stacks: on ch 0xf6 we were
@@ -3719,10 +3732,10 @@ preamble_step (GTask *task)
     PreambleContext          *ctx = g_task_get_task_data (task);
     g_autoptr(GByteArray)     request = NULL;
     g_autoptr(GError)         error = NULL;
-    const MMSitParityRequest *table;
+    const MMSitBootRequest *table;
     gsize                     n_table = 0;
 
-    table = mm_sit_parity_requests_for_stack (self->priv->stack, &n_table);
+    table = mm_sit_boot_requests (&n_table);
     if (g_get_monotonic_time () >= ctx->deadline_us) {
         mm_obj_dbg (self->priv->port, "pdn preamble: out of budget after %u ms with "
                     "%u row(s) to go; going on to the context",
@@ -3732,13 +3745,14 @@ preamble_step (GTask *task)
         return;
     }
     while (ctx->index < n_table) {
-        const MMSitParityRequest *req = &table[ctx->index];
+        const MMSitBootRequest *req = &table[ctx->index];
 
-        if (req->phase != MM_SIT_PARITY_PHASE_PRE_PDN) {
+        if (req->phase != MM_SIT_BOOT_PHASE_PRE_PDN ||
+            !mm_sit_boot_request_wanted (req, self->priv->stack)) {
             ctx->index++;
             continue;
         }
-        request = mm_sit_client_build_parity_request (self, req, NULL, &error);
+        request = mm_sit_client_build_boot_request (self, req, NULL, &error);
         ctx->index++;
         if (request)
             break;

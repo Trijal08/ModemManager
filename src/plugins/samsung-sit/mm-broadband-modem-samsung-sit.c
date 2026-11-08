@@ -28,7 +28,7 @@
 #include "mm-sit-ims-config.h"
 #include "mm-sit-ims.h"
 #include "mm-sit-cp.h"
-#include "mm-sit-boot-parity.h"
+#include "mm-sit-boot-config.h"
 #include "mm-utils.h"
 
 static void iface_modem_init      (MMIfaceModemInterface     *iface);
@@ -3809,24 +3809,24 @@ power_up_retry_chain (GTask *task)
  * its own init, and none of them is worth failing a power-up over.
  */
 static void apply_attach_apn (GTask *task);
-static void parity_step (GTask *task, MMSitParityPhase phase);
+static void parity_step (GTask *task, MMSitBootPhase phase);
 
 static GByteArray *
 parity_build (MMBroadbandModemSamsungSit *self,
               MMSitClient                *client,
-              const MMSitParityRequest   *req,
+              const MMSitBootRequest   *req,
               GError                    **error)
 {
     g_autoptr(MMBaseSim)  sim = NULL;
     const gchar          *mccmnc = NULL;
 
     /* The client does every substitution but this one, which needs the SIM. */
-    if (req->sub == MM_SIT_PARITY_SUB_MCCMNC) {
+    if (req->sub == MM_SIT_BOOT_SUB_MCCMNC) {
         g_object_get (self, MM_IFACE_MODEM_SIM, &sim, NULL);
         mccmnc = sim ? mm_gdbus_sim_get_operator_identifier (MM_GDBUS_SIM (sim)) : NULL;
     }
 
-    return mm_sit_client_build_parity_request (client, req, mccmnc, error);
+    return mm_sit_client_build_boot_request (client, req, mccmnc, error);
 }
 
 static void
@@ -3837,16 +3837,16 @@ parity_ready (MMSitClient  *client,
     MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
     g_autoptr(MMSitMessage)     message = NULL;
     g_autoptr(GError)           error = NULL;
-    MMSitParityPhase            phase;
-    const MMSitParityRequest   *table;
+    MMSitBootPhase            phase;
+    const MMSitBootRequest   *table;
     gsize                       n_table = 0;
 
-    table = mm_sit_parity_requests_for_stack (mm_sit_client_get_stack (client), &n_table);
+    table = mm_sit_boot_requests (&n_table);
     g_assert (self->priv->parity_index < n_table);
     phase = table[self->priv->parity_index].phase;
     message = mm_sit_client_command_finish (client, res, &error);
     if (!message)
-        mm_obj_dbg (self, "boot parity: 0x%04x refused: %s",
+        mm_obj_dbg (self, "boot config: 0x%04x refused: %s",
                     table[self->priv->parity_index].id, error->message);
 
     self->priv->parity_index++;
@@ -3854,22 +3854,23 @@ parity_ready (MMSitClient  *client,
 }
 
 static void
-parity_step (GTask *task, MMSitParityPhase phase)
+parity_step (GTask *task, MMSitBootPhase phase)
 {
     MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
     g_autoptr(GByteArray)       request = NULL;
     g_autoptr(GError)           error = NULL;
     MMSitClient                *client;
-    const MMSitParityRequest   *table = NULL;
+    const MMSitBootRequest   *table = NULL;
     gsize                       n_table = 0;
 
     client = mm_broadband_modem_samsung_sit_peek_client (self, NULL);
     if (client)
-        table = mm_sit_parity_requests_for_stack (mm_sit_client_get_stack (client), &n_table);
+        table = mm_sit_boot_requests (&n_table);
     while (client && self->priv->parity_index < n_table) {
-        const MMSitParityRequest *req = &table[self->priv->parity_index];
+        const MMSitBootRequest *req = &table[self->priv->parity_index];
 
-        if (req->phase != phase) {
+        if (req->phase != phase ||
+            !mm_sit_boot_request_wanted (req, mm_sit_client_get_stack (client))) {
             self->priv->parity_index++;
             continue;
         }
@@ -3877,7 +3878,7 @@ parity_step (GTask *task, MMSitParityPhase phase)
         if (request)
             break;
         if (error) {
-            mm_obj_dbg (self, "boot parity: couldn't build 0x%04x: %s",
+            mm_obj_dbg (self, "boot config: couldn't build 0x%04x: %s",
                         req->id, error->message);
             g_clear_error (&error);
         }
@@ -3885,7 +3886,7 @@ parity_step (GTask *task, MMSitParityPhase phase)
     }
 
     if (!request) {
-        if (phase == MM_SIT_PARITY_PHASE_BOOT) {
+        if (phase == MM_SIT_BOOT_PHASE_BOOT) {
             apply_attach_apn (task);
         } else {
             /* The stack's boot sequence is done; IMS provisioning waits on
@@ -3940,7 +3941,7 @@ modem_power_up_ready (MMSitClient  *client,
      * anything asks for a second PDN. arm_search_watchdog() and the task's
      * result move to the end of that walk. */
     self->priv->parity_index = 0;
-    parity_step (task, MM_SIT_PARITY_PHASE_RADIO);
+    parity_step (task, MM_SIT_BOOT_PHASE_RADIO);
 }
 
 static void
@@ -4072,7 +4073,7 @@ register_next_apn_profile (GTask *task)
 
     if (!self->priv->boot_apns || self->priv->boot_apn_index >= self->priv->boot_apns->len) {
         self->priv->parity_index = 0;
-        parity_step (task, MM_SIT_PARITY_PHASE_BOOT);
+        parity_step (task, MM_SIT_BOOT_PHASE_BOOT);
         return;
     }
     client = mm_broadband_modem_samsung_sit_peek_client (self, NULL);

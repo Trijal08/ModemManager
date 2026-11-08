@@ -5,7 +5,7 @@
 #define MM_SIT_CLIENT_H
 
 #include "mm-port-serial-sit.h"
-#include "mm-sit-boot-parity.h"
+#include "mm-sit-boot-config.h"
 
 /*
  * A data PDN the CP would not create, carrying the cause it gave. On this CP
@@ -591,7 +591,7 @@ gboolean mm_sit_client_connect_data_finish (MMSitClient        *self,
  * the same allocator, which is the part that must not be bypassed.
  */
 /*
- * Replay the boot-parity PRE_PDN block -- what stock sends between its last
+ * Replay the PRE_PDN block -- what stock sends between its last
  * data profile and its IMS context. Advisory throughout; it cannot fail.
  */
 void     mm_sit_client_run_pdn_preamble        (MMSitClient        *self,
@@ -604,8 +604,8 @@ gboolean mm_sit_client_run_pdn_preamble_finish (MMSitClient        *self,
 
 /* Build one boot-parity row; `mccmnc` supplies the one substitution the client
  * cannot make itself, and may be NULL. */
-GByteArray *mm_sit_client_build_parity_request (MMSitClient              *self,
-                                                const MMSitParityRequest *req,
+GByteArray *mm_sit_client_build_boot_request (MMSitClient              *self,
+                                                const MMSitBootRequest *req,
                                                 const gchar              *mccmnc,
                                                 GError                  **error);
 

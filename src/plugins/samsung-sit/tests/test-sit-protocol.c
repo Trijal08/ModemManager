@@ -10,6 +10,7 @@
 
 #include "mm-log.h"
 #include "mm-port-serial-sit.h"
+#include "mm-sit-boot-config.h"
 #include "mm-sit-carrier-config.h"
 #include "mm-sit-client.h"
 #include "mm-sit-cp.h"
@@ -2985,7 +2986,7 @@ ims_retry_peer_ready (gint fd, GIOCondition condition, ImsRetryPeer *peer)
     case 0x0d07: /* AIMS_HIDDEN_MENU */
         break;
     /*
-     * The boot-parity PRE_PDN preamble, replayed from STEP_PREAMBLE, and the
+     * The PRE_PDN preamble, replayed from STEP_PREAMBLE, and the
      * indication filter and display state re-asserted from
      * STEP_REASSERT_FILTER once the context is up. Both are advisory in the
      * plugin and this test is about the retry ladder, so a plain success is
@@ -3372,6 +3373,88 @@ test_ims_config_user_agent (void)
                      "Google Pixel9a Android 17 CP2A.260705.006");
 }
 
+/*
+ * The cell-broadcast request is built from the 3GPP TS 23.041 channel table
+ * rather than replayed, so that it is right in a country whose operator was
+ * never captured. These are the bytes stock sends, and the derivation has to
+ * reproduce them exactly: every channel carrying a real alert enabled, every
+ * test and exercise channel disabled.
+ */
+static void
+test_boot_cell_broadcast_is_derived (void)
+{
+    static const guint8 expected[] = {
+        0x08,
+        0x00, 0x11, 0x02, 0x11, 0x00, 0xff, 0x01,  /* 4352-4354 ETWS       on  */
+        0x03, 0x11, 0x03, 0x11, 0x00, 0xff, 0x00,  /* 4355      ETWS test  off */
+        0x04, 0x11, 0x04, 0x11, 0x00, 0xff, 0x01,  /* 4356      ETWS other on  */
+        0x12, 0x11, 0x1b, 0x11, 0x00, 0xff, 0x01,  /* 4370-4379 CMAS       on  */
+        0x1c, 0x11, 0x1e, 0x11, 0x00, 0xff, 0x00,  /* 4380-4382 test/exer  off */
+        0x1f, 0x11, 0x28, 0x11, 0x00, 0xff, 0x01,  /* 4383-4392 CMAS 2nd   on  */
+        0x29, 0x11, 0x2b, 0x11, 0x00, 0xff, 0x00,  /* 4393-4395 test 2nd   off */
+        0x2c, 0x11, 0x2f, 0x11, 0x00, 0xff, 0x01,  /* 4396-4399 CMAS more  on  */
+    };
+    const MMSitBootRequest *table;
+    gsize                   n_table = 0, i, len = 0;
+    g_autofree guint8      *built = NULL;
+
+    table = mm_sit_boot_requests (&n_table);
+    g_assert_nonnull (table);
+    g_assert_cmpuint (n_table, >, 0);
+
+    for (i = 0; i < n_table; i++) {
+        if (table[i].sub != MM_SIT_BOOT_SUB_BUILD)
+            continue;
+        built = mm_sit_boot_build_payload (&table[i], &len);
+        break;
+    }
+    g_assert_nonnull (built);
+    g_assert_cmpuint (len, ==, G_N_ELEMENTS (expected));
+    g_assert_cmpmem (built, len, expected, G_N_ELEMENTS (expected));
+}
+
+/* Three requests go to stack 0 only; stock does that in all five captures. */
+static void
+test_boot_primary_only_requests (void)
+{
+    const MMSitBootRequest *table;
+    gsize                   n_table = 0, i;
+    guint                   primary = 0;
+
+    table = mm_sit_boot_requests (&n_table);
+    for (i = 0; i < n_table; i++) {
+        if (table[i].stacks != MM_SIT_BOOT_STACKS_PRIMARY)
+            continue;
+        primary++;
+        g_assert_true (mm_sit_boot_request_wanted (&table[i], 0));
+        g_assert_false (mm_sit_boot_request_wanted (&table[i], 1));
+    }
+    g_assert_cmpuint (primary, ==, 3);
+
+    /* Everything else belongs on both. */
+    for (i = 0; i < n_table; i++) {
+        if (table[i].stacks == MM_SIT_BOOT_STACKS_PRIMARY)
+            continue;
+        g_assert_true (mm_sit_boot_request_wanted (&table[i], 0));
+        g_assert_true (mm_sit_boot_request_wanted (&table[i], 1));
+    }
+}
+
+/* Every entry says what it configures; an unnamed one is a replay again. */
+static void
+test_boot_requests_are_named (void)
+{
+    const MMSitBootRequest *table;
+    gsize                   n_table = 0, i;
+
+    table = mm_sit_boot_requests (&n_table);
+    for (i = 0; i < n_table; i++) {
+        g_assert_nonnull (table[i].what);
+        g_assert_cmpuint (strlen (table[i].what), >, 0);
+    }
+}
+
+
 int
 main (int argc,
       char **argv)
@@ -3418,6 +3501,9 @@ main (int argc,
     g_test_add_func ("/MM/sit/decode/carrier-sim-info", test_parse_carrier_sim_info);
     g_test_add_func ("/MM/sit/carrier-config/resolve", test_carrier_config_resolver);
     g_test_add_func ("/MM/sit/carrier-config/reference-database", test_carrier_config_reference_database);
+    g_test_add_func ("/MM/sit/boot/cell-broadcast-is-derived", test_boot_cell_broadcast_is_derived);
+    g_test_add_func ("/MM/sit/boot/primary-only-requests", test_boot_primary_only_requests);
+    g_test_add_func ("/MM/sit/boot/requests-are-named", test_boot_requests_are_named);
     g_test_add_func ("/MM/sit/port/command-and-indication", test_port_command_and_indication);
     g_test_add_func ("/MM/sit/port/stale-response", test_port_drops_a_stale_response);
     g_test_add_func ("/MM/sit/port/queued-commands", test_port_answers_queued_commands);

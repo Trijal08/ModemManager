@@ -48,6 +48,7 @@ if plugins_options['samsung-sit']
     sources: files(
       'mm-sit-tool.c',
       '../src/plugins/samsung-sit/mm-port-serial-sit.c',
+      '../src/plugins/samsung-sit/mm-sit-boot-config.c',
       '../src/plugins/samsung-sit/mm-sit-client.c',
       '../src/plugins/samsung-sit/mm-sit-cp.c',
       '../src/plugins/samsung-sit/mm-sit-protocol.c',
