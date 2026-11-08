@@ -17,7 +17,35 @@ enum {
 
 static guint signals[SIGNAL_LAST];
 
+/*
+ * A registration query in flight, and everyone waiting on its answer.
+ *
+ * Stock never has more than two registration queries outstanding -- one
+ * GET_VOICE_REGISTRATION and one GET_DATA_REGISTRATION -- in any of five
+ * captures, while sending *more* of them than we do: 33-50 and 34-52 in the
+ * first minute against our 23-27 and 30-31. We had no cap at all and peaked at
+ * nine, because several callers poll independently and nothing serialises them
+ * now that requests are pipelined.
+ *
+ * So the first caller of each kind issues the query and the rest share its
+ * answer. These are reads of the current state, so one round trip is the right
+ * answer for every caller that asked inside it, and the cap falls out at
+ * exactly stock's two.
+ */
+typedef enum {
+    REG_QUERY_DATA,
+    REG_QUERY_VOICE,
+    REG_QUERY_N,
+} RegQueryKind;
+
+typedef struct {
+    GAsyncReadyCallback callback;
+    gpointer            user_data;
+} RegWaiter;
+
 struct _MMSitClientPrivate {
+    /* Callers waiting on the query of each kind that is in flight. */
+    GPtrArray *reg_waiters[REG_QUERY_N];
     MMSitCp             *cp; /* weak; the CP owns its clients */
     guint                stack;
     gchar               *device;
@@ -1540,20 +1568,105 @@ get_registration_ready (MMSitClient *self,
                            task);
 }
 
+/*
+ * Registration queries written and still unanswered.
+ *
+ * Three call sites issue these and nothing serialises them, so with requests
+ * pipelined they overlap -- up to six at once on hardware. Stock never has one
+ * in flight at the moment it asks for an IMS context: across five captures its
+ * companions there are setters (SET_PREFERRED_DATA_MODEM,
+ * SET_FAST_DORMANCY_INFO) or nothing at all, and its answer comes back in
+ * 1.0-2.6s against our 2.9-10.9s.
+ *
+ * Whether the overlap is what makes the CP slow is not established -- ours is
+ * ~2.9s with two in flight and 10.9s with two in a different boot -- but
+ * asking with them outstanding is a divergence from stock either way, and six
+ * identical queries in flight is waste regardless.
+ */
+guint
+mm_sit_client_registration_queries_in_flight (MMSitClient *self)
+{
+    static const guint16 ids[] = {
+        MM_SIT_MESSAGE_GET_VOICE_REGISTRATION,
+        MM_SIT_MESSAGE_GET_DATA_REGISTRATION,
+    };
+
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), 0);
+    if (!self->priv->port)
+        return 0;
+    return mm_port_serial_sit_pending_count (self->priv->port, ids, G_N_ELEMENTS (ids));
+}
+
+static void
+reg_query_done (MMSitClient *self, GAsyncResult *res, gpointer kindp)
+{
+    RegQueryKind          kind = GPOINTER_TO_UINT (kindp);
+    g_autoptr(GPtrArray)  waiters = NULL;
+    g_autoptr(GError)     error = NULL;
+    MMSitRegistration     reg = { 0 };
+    gboolean              ok;
+    guint                 i;
+
+    ok = mm_sit_client_get_registration_finish (self, res, &reg, &error);
+
+    /* Taken before completing anyone: a callback may ask again, and that must
+     * start a fresh query rather than join the one that just finished. */
+    waiters = g_steal_pointer (&self->priv->reg_waiters[kind]);
+    if (!waiters)
+        return;
+
+    for (i = 0; i < waiters->len; i++) {
+        RegWaiter *w = g_ptr_array_index (waiters, i);
+        GTask     *task = g_task_new (self, NULL, w->callback, w->user_data);
+
+        if (ok)
+            g_task_return_pointer (task, g_memdup2 (&reg, sizeof (reg)), g_free);
+        else
+            g_task_return_error (task, g_error_copy (error));
+        g_object_unref (task);
+    }
+}
+
+/* See RegQueryKind: the first caller asks, the rest share the answer. */
+static void
+reg_query (MMSitClient        *self,
+           RegQueryKind        kind,
+           guint16             id,
+           GCancellable       *cancellable,
+           GAsyncReadyCallback callback,
+           gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    RegWaiter            *waiter;
+    gboolean              first;
+
+    waiter = g_new0 (RegWaiter, 1);
+    waiter->callback = callback;
+    waiter->user_data = user_data;
+
+    first = (self->priv->reg_waiters[kind] == NULL);
+    if (first)
+        self->priv->reg_waiters[kind] = g_ptr_array_new_with_free_func (g_free);
+    g_ptr_array_add (self->priv->reg_waiters[kind], waiter);
+    if (!first)
+        return;
+
+    request = mm_sit_request_new_query (id, mm_sit_client_next_token (self));
+    mm_sit_client_command (self, request, 5, cancellable,
+                           (GAsyncReadyCallback) get_registration_ready,
+                           g_task_new (self, cancellable,
+                                       (GAsyncReadyCallback) reg_query_done,
+                                       GUINT_TO_POINTER (kind)));
+}
+
 void
 mm_sit_client_get_registration (MMSitClient        *self,
                                 GCancellable       *cancellable,
                                 GAsyncReadyCallback callback,
                                 gpointer            user_data)
 {
-    g_autoptr(GByteArray) request = NULL;
-    GTask                *task;
-
-    task = g_task_new (self, cancellable, callback, user_data);
-    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_DATA_REGISTRATION,
-                                        mm_sit_client_next_token (self));
-    mm_sit_client_command (self, request, 5, cancellable,
-                           (GAsyncReadyCallback) get_registration_ready, task);
+    reg_query (self, REG_QUERY_DATA, MM_SIT_MESSAGE_GET_DATA_REGISTRATION,
+               cancellable, callback, user_data);
 }
 
 gboolean
@@ -1587,14 +1700,8 @@ mm_sit_client_get_voice_registration (MMSitClient        *self,
                                       GAsyncReadyCallback callback,
                                       gpointer            user_data)
 {
-    g_autoptr(GByteArray) request = NULL;
-    GTask                *task;
-
-    task = g_task_new (self, cancellable, callback, user_data);
-    request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_VOICE_REGISTRATION,
-                                        mm_sit_client_next_token (self));
-    mm_sit_client_command (self, request, 5, cancellable,
-                           (GAsyncReadyCallback) get_registration_ready, task);
+    reg_query (self, REG_QUERY_VOICE, MM_SIT_MESSAGE_GET_VOICE_REGISTRATION,
+               cancellable, callback, user_data);
 }
 
 gboolean
@@ -3425,6 +3532,9 @@ typedef struct {
     guint32       apn_types;
     guint32       bearers;
     MMSitDataCall call;
+    /* How long this setup has waited for the channel to go quiet; see
+     * SETUP_QUIESCE_MAX_MS. */
+    guint         quiesce_waited_ms;
 } SetupContext;
 
 static void
@@ -3459,6 +3569,19 @@ static void setup_data_call_ready (MMSitClient  *self,
  * connect_data) brought the same PDN up on the same CP seconds after the IMS
  * path had been refused, and the CP announced "IMS Registered" as it did.
  */
+/* See the quiesce comment in setup_profile_ready(). */
+#define SETUP_QUIESCE_POLL_MS  25
+#define SETUP_QUIESCE_MAX_MS  500
+
+static void setup_profile_ready (MMSitClient *self, GAsyncResult *res, GTask *task);
+
+static gboolean
+setup_quiesce_retry (GTask *task)
+{
+    setup_profile_ready (g_task_get_source_object (task), NULL, task);
+    return G_SOURCE_REMOVE;
+}
+
 static void
 setup_profile_ready (MMSitClient  *self,
                      GAsyncResult *res,
@@ -3469,12 +3592,38 @@ setup_profile_ready (MMSitClient  *self,
     SetupContext           *ctx = g_task_get_task_data (task);
     GError                 *error = NULL;
 
-    response = mm_sit_client_command_finish (self, res, &error);
-    if (!response || !message_check_success (response, &error)) {
-        mm_obj_dbg (self->priv->port,
-                    "data profile for APN '%s' rejected (%s); attempting data call setup",
-                    ctx->apn, error ? error->message : "no response");
-        g_clear_error (&error);
+    /* res is NULL when re-entered from setup_quiesce_retry(); the profile has
+     * already been dealt with in that case. */
+    if (res) {
+        response = mm_sit_client_command_finish (self, res, &error);
+        if (!response || !message_check_success (response, &error)) {
+            mm_obj_dbg (self->priv->port,
+                        "data profile for APN '%s' rejected (%s); attempting data call setup",
+                        ctx->apn, error ? error->message : "no response");
+            g_clear_error (&error);
+        }
+    }
+
+    /*
+     * Ask with the channel quiet, as stock does.
+     *
+     * Stock has no registration query in flight beside its SETUP_DATA_CALL for
+     * `ims` in any of five captures -- its companions are setters or nothing --
+     * and the CP answers in 1.0-2.6s against our 2.9-10.9s. Coalescing caps us
+     * at stock's two outstanding; this drains the last of them.
+     *
+     * It has to be here and not where the IMS sequence decides to ask: between
+     * that decision and this frame are a cid acquire, the data preference, the
+     * attach re-assert and the profile push, and other callers issue
+     * registration queries inside those tens of milliseconds. Gating earlier
+     * reads a moment that does not matter, which is exactly what r64 did and
+     * why it changed nothing.
+     */
+    if (mm_sit_client_registration_queries_in_flight (self) &&
+        ctx->quiesce_waited_ms < SETUP_QUIESCE_MAX_MS) {
+        ctx->quiesce_waited_ms += SETUP_QUIESCE_POLL_MS;
+        g_timeout_add (SETUP_QUIESCE_POLL_MS, (GSourceFunc) setup_quiesce_retry, task);
+        return;
     }
 
     request = mm_sit_request_new_setup_data_call (mm_sit_client_next_token (self), ctx->cid,

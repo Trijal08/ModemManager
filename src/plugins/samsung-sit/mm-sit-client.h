@@ -198,6 +198,8 @@ gboolean mm_sit_client_set_logical_slot_mapping_finish (MMSitClient             
                                                         GAsyncResult                 *res,
                                                         GError                      **error);
 
+guint    mm_sit_client_registration_queries_in_flight (MMSitClient *self);
+
 void     mm_sit_client_get_registration        (MMSitClient        *self,
                                                 GCancellable       *cancellable,
                                                 GAsyncReadyCallback callback,

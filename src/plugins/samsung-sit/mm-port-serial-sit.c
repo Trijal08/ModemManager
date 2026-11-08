@@ -353,6 +353,38 @@ mm_port_serial_sit_command (MMPortSerialSit     *self,
     tx_push (self, request);
 }
 
+/*
+ * How many of `ids` are written and still unanswered.
+ *
+ * Stock never has a registration query in flight when it asks for an IMS
+ * context; see mm_sit_client_registration_queries_in_flight().
+ */
+guint
+mm_port_serial_sit_pending_count (MMPortSerialSit *self,
+                                  const guint16   *ids,
+                                  gsize            n_ids)
+{
+    GHashTableIter iter;
+    gpointer       value;
+    guint          n = 0;
+
+    g_return_val_if_fail (MM_IS_PORT_SERIAL_SIT (self), 0);
+
+    g_hash_table_iter_init (&iter, self->priv->pending);
+    while (g_hash_table_iter_next (&iter, NULL, &value)) {
+        Pending *pending = value;
+        gsize    i;
+
+        for (i = 0; i < n_ids; i++) {
+            if (pending->expected_id == ids[i]) {
+                n++;
+                break;
+            }
+        }
+    }
+    return n;
+}
+
 MMSitMessage *
 mm_port_serial_sit_command_finish (MMPortSerialSit  *self,
                                    GAsyncResult     *res,

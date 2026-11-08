@@ -55,6 +55,10 @@ void          mm_port_serial_sit_command        (MMPortSerialSit     *self,
                                                  GCancellable        *cancellable,
                                                  GAsyncReadyCallback  callback,
                                                  gpointer             user_data);
+guint mm_port_serial_sit_pending_count (MMPortSerialSit *self,
+                                        const guint16   *ids,
+                                        gsize            n_ids);
+
 MMSitMessage *mm_port_serial_sit_command_finish (MMPortSerialSit     *self,
                                                  GAsyncResult        *res,
                                                  GError             **error);
