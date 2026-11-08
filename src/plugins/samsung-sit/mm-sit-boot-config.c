@@ -133,6 +133,13 @@ static const guint8 pre_aims_stack_stop_off[2]  = { 0x00, 0x01 };
 static const guint8 pre_aims_xcapm_stop_req[2]  = { 0x01, 0x01 };
 static const guint8 pre_aims_xcapm_stop_off[2]  = { 0x00, 0x01 };
 static const guint8 pre_aims_set_frame_time[10] = { 0x00, 0x02, 0x20, 0x04, 0xa9, 0xa8, 0xa1, 0x01, 0x00, 0x00 };
+/* 0x0400: filled in by MM_SIT_BOOT_SUB_SIM_AID, zero here so a stale replay
+ * would be obvious. */
+static const guint8 boot_sim_aid[17] = { 0 };
+static const guint8 boot_lpp_supl_ecid[2] = { 0x02, 0x05 };
+/* 0x0d96: one flag byte. Stock sends it once per stack at the tail of the
+ * AIMS block, after the hidden-menu pushes (+14.56s against +12.93s). */
+static const guint8 pre_aims_0d96[1] = { 0x01 };
 /*
  * AIMS_SET_CALL_WAITING. Two u32 ones, a zero, then six bytes of wall clock
  * at +9 (yy mm dd HH MM SS, yy = year - 2000, plain bytes not BCD) which
@@ -161,8 +168,16 @@ static const MMSitBootRequest boot_requests[] = {
      * three boot captures, and leaving them out was seven frames of divergence
      * per stack for no gain. The responses are still discarded.
      */
+        /*
+     * Stock names the application it wants the IMSI of: 17 bytes of
+     * [u8 aid_len][aid, 16], carrying this card's USIM AID (measured
+     * a0 00 00 00 87 10 02 ... , which differs per card). We sent an
+     * empty payload. The row is advisory -- the IMSI the plugin uses is
+     * read elsewhere -- so a card whose AID is not cached yet just
+     * skips it.
+     */
     { 0x0400, "get imsi",             MM_SIT_BOOT_PHASE_RADIO,
-      { 1, 1 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+      { 0, 0 }, MM_SIT_BOOT_SUB_SIM_AID, MM_SIT_BOOT_STACKS_ALL, 17, boot_sim_aid },
     { 0x0403, "get device id",        MM_SIT_BOOT_PHASE_RADIO,
       { 1, 1 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
     { 0x070c, "get cell info list",   MM_SIT_BOOT_PHASE_RADIO,
@@ -177,8 +192,9 @@ static const MMSitBootRequest boot_requests[] = {
       { 1, 1 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
     { 0x0957, "get device service",   MM_SIT_BOOT_PHASE_RADIO,
       { 1, 1 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+        /* Stock sends two bytes here, 02 05, where we sent none. */
     { 0x0c01, "get lpp supl ecid",    MM_SIT_BOOT_PHASE_RADIO,
-      { 2, 2 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+      { 2, 2 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, boot_lpp_supl_ecid },
     /*
      * Twice on the primary stack and never on the secondary, in all five
      * captures. We never sent it; it is in no name table.
@@ -412,6 +428,8 @@ static const MMSitBootRequest boot_requests[] = {
      */
     { 0x0d39, "aims stack start req", MM_SIT_BOOT_PHASE_PRE_PDN,
       { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_stack_start_req },
+    { 0x0d96, "aims unnamed 0d96",    MM_SIT_BOOT_PHASE_PRE_PDN,
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 1, pre_aims_0d96 },
     { 0x091a, "set voice operation", MM_SIT_BOOT_PHASE_PRE_PDN,
       { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 4, pre_set_voice_operation },
     { 0x0d0b, "aims set frame time", MM_SIT_BOOT_PHASE_PRE_PDN,

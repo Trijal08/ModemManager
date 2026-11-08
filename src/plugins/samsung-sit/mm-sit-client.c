@@ -3989,6 +3989,15 @@ mm_sit_client_build_boot_request (MMSitClient              *self,
         body[4 + 14] = (guint8) g_date_time_get_second (now);
         break;
     }
+    case MM_SIT_BOOT_SUB_SIM_AID:
+        /* Nothing to name the application with yet; stock asks after the SIM
+         * status, and a skipped advisory row costs nothing. */
+        if (!self->priv->sim_aid_len || req->len < 17)
+            return NULL;
+        body[4] = (guint8) self->priv->sim_aid_len;
+        memcpy (&body[4 + 1], self->priv->sim_aid,
+                MIN (self->priv->sim_aid_len, 16));
+        break;
     case MM_SIT_BOOT_SUB_FRAMETIME: {
         /*
          * Two bytes of millisecond clock at payload+2, little-endian, wrapping

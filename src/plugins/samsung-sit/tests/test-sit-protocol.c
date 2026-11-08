@@ -3026,6 +3026,7 @@ ims_retry_peer_ready (gint fd, GIOCondition condition, ImsRetryPeer *peer)
     case 0x0d17:
     case 0x0d3b:
     case 0x0d3c:
+    case 0x0d96:
     case 0x091a:
     case MM_SIT_MESSAGE_QUERY_NETWORK_SELECTION_MODE:
     case MM_SIT_MESSAGE_GET_VOICE_REGISTRATION:

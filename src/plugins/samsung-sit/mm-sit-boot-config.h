@@ -42,6 +42,12 @@ typedef enum {
      * 1000.0. A replayed constant tells the CP the same instant every frame.
      */
     MM_SIT_BOOT_SUB_FRAMETIME,
+    /*
+     * The card's own USIM AID, length-prefixed at payload+0:
+     * [u8 aid_len][aid, 16 zero-padded]. Skipped while the AID is unknown,
+     * the way MM_SIT_BOOT_SUB_MCCMNC is.
+     */
+    MM_SIT_BOOT_SUB_SIM_AID,
     /* The whole payload is built at run time; see mm_sit_boot_build_payload(). */
     MM_SIT_BOOT_SUB_BUILD,
 } MMSitBootSub;
