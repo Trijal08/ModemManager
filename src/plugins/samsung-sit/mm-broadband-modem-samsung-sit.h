@@ -17,11 +17,14 @@
  * exynos-modem's RFS server re-roots whatever the CP opens onto the real
  * files, so nothing has to exist at this path.
  *
- * LOCAL is where the plugin itself opens cfg.db, which it has to be able to
- * read directly. A udev rule may override it for a different layout.
+ * Where the plugin opens cfg.db is deliberately not here. That is a property
+ * of how a particular device packages its vendor blobs, so it comes from the
+ * port's ID_MM_SIT_CARRIER_CONFIG_DIRECTORY and nowhere else; the aport that
+ * ships the blobs is the one that knows where they landed. Without it the
+ * modem still comes up, and the carrier configuration reports that it needs a
+ * database.
  */
 #define MM_SIT_ANNOUNCED_CARRIER_CONFIG_DIRECTORY "/vendor/firmware/carrierconfig"
-#define MM_SIT_DEFAULT_CARRIER_CONFIG_DIRECTORY   "/lib/firmware/google/s5400/carrierconfig"
 
 #define MM_TYPE_BROADBAND_MODEM_SAMSUNG_SIT            (mm_broadband_modem_samsung_sit_get_type ())
 #define MM_BROADBAND_MODEM_SAMSUNG_SIT(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), MM_TYPE_BROADBAND_MODEM_SAMSUNG_SIT, MMBroadbandModemSamsungSit))

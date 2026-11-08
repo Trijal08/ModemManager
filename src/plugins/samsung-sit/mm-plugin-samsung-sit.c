@@ -25,7 +25,7 @@ create_modem (MMPlugin      *self,
               GError       **error)
 {
     g_autofree gchar *database = NULL;
-    const gchar      *directory = MM_SIT_DEFAULT_CARRIER_CONFIG_DIRECTORY;
+    const gchar      *directory = NULL;
     gboolean          use_proxy = FALSE;
     gint              logical_stack = -1;
     GList            *l;
@@ -44,6 +44,8 @@ create_modem (MMPlugin      *self,
         if (!mm_port_probe_is_sit (probe))
             continue;
         port = mm_port_probe_peek_port (probe);
+        /* The only source for this: no path to a device's vendor blobs is
+         * compiled in. */
         configured_directory = mm_kernel_device_get_property (
             port, "ID_MM_SIT_CARRIER_CONFIG_DIRECTORY");
         if (configured_directory && configured_directory[0])
@@ -67,7 +69,8 @@ create_modem (MMPlugin      *self,
         break;
     }
 
-    database = g_build_filename (directory, "cfg.db", NULL);
+    if (directory)
+        database = g_build_filename (directory, "cfg.db", NULL);
     return MM_BASE_MODEM (mm_broadband_modem_samsung_sit_new (
         uid, physdev, drivers, mm_plugin_get_name (self), vendor, product, database,
         use_proxy, logical_stack));
