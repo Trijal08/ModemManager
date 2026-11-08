@@ -89,6 +89,13 @@ struct _MMBroadbandModemSamsungSitPrivate {
      * and how many radio cycles it has spent trying to shake it loose. */
     guint        search_watchdog_id;
     guint        search_retries;
+    /* The access technology the last signal report measured, kept because the
+     * 5G the registration offers has to be published alongside it rather than
+     * instead of it. See publish_access_tech(). */
+    MMModemAccessTechnology signal_act;
+    /* The serving cell's 5G NSA offer, from the registration response. */
+    gboolean     endc_available;
+    gboolean     dcnr_restricted;
 };
 
 typedef struct {
@@ -360,6 +367,31 @@ sit_registration_state (const MMSitRegistration *registration)
     return state;
 }
 
+/*
+ * Android shows 5G from the network's EN-DC offer, not from an active NR
+ * carrier: NR_STATE_NOT_RESTRICTED means "this cell will give you 5G", and the
+ * indicator appears before any NR leg exists. The signal report's RAT mask only
+ * gains its NR bit once a secondary carrier is actually carrying something,
+ * which on a SIM with no data never happens -- so publishing the mask alone
+ * hides 5G everywhere Android would show it.
+ */
+static MMModemAccessTechnology
+decorate_access_tech (MMBroadbandModemSamsungSit *self,
+                      MMModemAccessTechnology     act)
+{
+    if (self->priv->endc_available && !self->priv->dcnr_restricted)
+        act |= MM_MODEM_ACCESS_TECHNOLOGY_5GNR;
+    return act;
+}
+
+static void
+publish_access_tech (MMBroadbandModemSamsungSit *self)
+{
+    mm_iface_modem_update_access_technologies (MM_IFACE_MODEM (self),
+                                               decorate_access_tech (self, self->priv->signal_act),
+                                               MM_MODEM_ACCESS_TECHNOLOGY_ANY);
+}
+
 /* 0x0701 covers the packet-switched domain only. The three states move together
  * because the CP reports one packet-service registration for whichever RAT it is
  * on, rather than separate GPRS/EPS/5GS views. */
@@ -373,6 +405,17 @@ update_ps_registration (MMBroadbandModemSamsungSit *self,
      * start IMS immediately, even before the next signal/RAT indication. */
     if (self->priv->ims)
         mm_sit_ims_update_registration (self->priv->ims, registration);
+
+    if (self->priv->endc_available != registration->endc_available ||
+        self->priv->dcnr_restricted != registration->dcnr_restricted) {
+        self->priv->endc_available  = registration->endc_available;
+        self->priv->dcnr_restricted = registration->dcnr_restricted;
+        mm_obj_info (self, "network 5G NSA (EN-DC) offer: %s",
+                     !registration->endc_available ? "not advertised" :
+                     registration->dcnr_restricted ? "advertised but restricted for this subscriber" :
+                     "available");
+        publish_access_tech (self);
+    }
 
     /* Registered again: forget the rejections, so a later one gets the full
      * retry budget rather than inheriting an exhausted one. */
@@ -1344,8 +1387,10 @@ sit_indication (MMSitClient              *client,
         if (sit_signal_get_quality (&signal, &quality))
             mm_iface_modem_update_signal_quality (MM_IFACE_MODEM (self), quality);
         act = sit_rat_mask_to_access_technology (signal.rat_mask);
-        mm_iface_modem_update_access_technologies (
-            MM_IFACE_MODEM (self), act, MM_MODEM_ACCESS_TECHNOLOGY_ANY);
+        self->priv->signal_act = act;
+        publish_access_tech (self);
+        /* IMS is gated on what the radio is measurably on, so it gets the mask
+         * itself rather than the 5G the network merely offers. */
         if (self->priv->ims)
             mm_sit_ims_update_access_tech (self->priv->ims, act);
     }
@@ -2238,6 +2283,7 @@ load_access_technologies_ready (MMSitClient  *client,
                                 GAsyncResult *res,
                                 GTask        *task)
 {
+    MMBroadbandModemSamsungSit *self;
     MMSitSignal signal;
     GError     *error = NULL;
 
@@ -2246,8 +2292,16 @@ load_access_technologies_ready (MMSitClient  *client,
         g_object_unref (task);
         return;
     }
+    /*
+     * This reports with a mask of ANY, so whatever it returns replaces the
+     * whole value -- including the 5G the registration offered. Decorate it
+     * the same way publish_access_tech() does, or the poll silently undoes the
+     * indication a few seconds later.
+     */
+    self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
+    self->priv->signal_act = sit_rat_mask_to_access_technology (signal.rat_mask);
     g_task_set_task_data (task,
-                          GUINT_TO_POINTER ((guint) sit_rat_mask_to_access_technology (signal.rat_mask)),
+                          GUINT_TO_POINTER ((guint) decorate_access_tech (self, self->priv->signal_act)),
                           NULL);
     g_task_return_boolean (task, TRUE);
     g_object_unref (task);

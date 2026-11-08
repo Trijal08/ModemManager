@@ -1376,6 +1376,18 @@ mm_sit_message_parse_carrier_sim_info (const MMSitMessage  *message,
     return TRUE;
 }
 
+/*
+ * Frame offsets of the 5G NSA bytes in a registration response; see
+ * mm_sit_message_parse_registration(). These are the vendor's payload offsets
+ * plus twelve, because mm_sit_message_get_data() hands out the whole frame --
+ * the eight-byte header and the reserved word included -- while the vendor's
+ * adapter indexes from the payload proper.
+ */
+#define REG_ENDC_AVAILABLE  51
+#define REG_DCNR_RESTRICTED 52
+#define REG_NR_AVAILABLE    53
+#define REG_NR_MIN_LEN      54
+
 gboolean
 mm_sit_message_parse_registration (const MMSitMessage *message,
                                    MMSitRegistration  *out_registration,
@@ -1399,6 +1411,27 @@ mm_sit_message_parse_registration (const MMSitMessage *message,
     out_registration->state            = reg.state;
     out_registration->radio_technology = reg.radio_technology;
     out_registration->registered       = reg.registered ? TRUE : FALSE;
+
+    /*
+     * The codec does not model the three 5G NSA bytes, so read them here.
+     * They come from ProtocolNetDataRegStateAdapter in the vendor's own
+     * vendor.radio.protocol.sit.stream.so -- IsEndcAvailable(),
+     * IsDcNrRestricted() and IsNrAvailable() each compare one byte against 1.
+     * Two sanity checks pin the offsets down, because the adapter counts from
+     * the payload while 'data' here is the whole frame: GetImsVops() reads the
+     * frame's byte 45, which is the VoPS this function already reports, and
+     * getChannelNumber() reads a 32-bit field twelve past its own base, which
+     * lands on the serving cell's EARFCN (900 on a B2 carrier, 3200 on B7).
+     */
+    out_registration->endc_available  = FALSE;
+    out_registration->dcnr_restricted = FALSE;
+    out_registration->nr_available    = FALSE;
+    if (data && len >= REG_NR_MIN_LEN) {
+        out_registration->endc_available  = (data[REG_ENDC_AVAILABLE] == 1);
+        out_registration->dcnr_restricted = (data[REG_DCNR_RESTRICTED] == 1);
+        out_registration->nr_available    = (data[REG_NR_AVAILABLE] == 1);
+    }
+
     switch (reg.vops_support) {
     case SAMSUNG_SIT_VOPS_SUPPORT_SUPPORTED:
         out_registration->vops_support = MM_SIT_VOPS_SUPPORT_SUPPORTED;

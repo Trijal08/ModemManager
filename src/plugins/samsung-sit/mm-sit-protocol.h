@@ -329,6 +329,17 @@ typedef struct {
     guint8   radio_technology;
     gboolean registered;
     MMSitVopsSupport vops_support;
+    /*
+     * What the serving cell offers for 5G NSA. 'endc_available' is the network
+     * advertising EN-DC -- the UE may add a secondary NR carrier here -- and
+     * 'dcnr_restricted' the network withdrawing it for this subscriber.
+     * 'nr_available' is the CP's own summary of the two. None of them says an
+     * NR carrier is actually up; that only shows in the signal report's RAT
+     * mask, and only once there is data to carry.
+     */
+    gboolean endc_available;
+    gboolean dcnr_restricted;
+    gboolean nr_available;
 } MMSitRegistration;
 
 /* Reported for a cause the CP says it does not have. */
