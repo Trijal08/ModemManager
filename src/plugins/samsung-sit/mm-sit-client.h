@@ -87,6 +87,9 @@ void          mm_sit_client_command        (MMSitClient        *self,
                                             GCancellable       *cancellable,
                                             GAsyncReadyCallback callback,
                                             gpointer            user_data);
+void     mm_sit_client_send_indication (MMSitClient *self,
+                                        GByteArray  *frame);
+
 MMSitMessage *mm_sit_client_command_finish (MMSitClient        *self,
                                             GAsyncResult       *res,
                                             GError            **error);

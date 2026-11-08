@@ -46,6 +46,9 @@ guint mm_port_serial_sit_add_unsolicited_handler (MMPortSerialSit               
 void  mm_port_serial_sit_remove_unsolicited_handler (MMPortSerialSit *self,
                                                       guint            handler_id);
 
+void          mm_port_serial_sit_send_indication (MMPortSerialSit *self,
+                                                 GByteArray      *frame);
+
 void          mm_port_serial_sit_command        (MMPortSerialSit     *self,
                                                  GByteArray          *request,
                                                  guint32              timeout_seconds,

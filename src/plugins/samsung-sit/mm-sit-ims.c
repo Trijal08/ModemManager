@@ -754,6 +754,117 @@ send_simple (MMSitIms            *self,
                            (GAsyncReadyCallback) send_ready, task);
 }
 
+/*
+ * `MEDIA_STATE_IND` (0x0d30) -- tell the CP what the call's media is doing.
+ *
+ * Android raises this at every call-state change and the CP answers nothing.
+ * We never sent it, and the CP never published the CallInfo block the AoC
+ * waits on to learn the call's codec, which is why a call could connect
+ * perfectly and still carry no audio.  The state values are the ones observed
+ * on this hardware: setup 2, alerting 4, connected 0, ended 6.
+ */
+static void
+fire_and_forget_ready (MMSitClient  *client,
+                       GAsyncResult *res,
+                       gpointer      user_data)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    g_autoptr(GError)       error = NULL;
+    g_autofree gchar       *what = user_data;
+
+    response = mm_sit_client_command_finish (client, res, &error);
+    if (error)
+        mm_obj_dbg (client, "IMS %s failed: %s", what, error->message);
+}
+
+/*
+ * Send a request whose answer we do not act on.  These exist because Android
+ * sends them and the CP's media pipeline does not start without them being
+ * tried; nothing in ModemManager consumes the response.
+ */
+static void
+send_media_request (MMSitIms    *self,
+                    guint8      *frame,
+                    gsize        len,
+                    SamsungSitStatus status,
+                    const gchar *what)
+{
+    g_autoptr(GByteArray) request = NULL;
+
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        mm_obj_dbg (self, "could not build IMS %s: %s", what,
+                    samsung_sit_status_name (status));
+        return;
+    }
+    request = g_byte_array_sized_new (len);
+    g_byte_array_append (request, frame, len);
+    samsung_sit_buf_free (frame, len);
+
+    mm_obj_dbg (self, "IMS %s", what);
+    mm_sit_client_command (self->priv->client, request, 10, NULL,
+                           (GAsyncReadyCallback) fire_and_forget_ready,
+                           g_strdup (what));
+}
+
+/*
+ * `SET_FRAME_TIME` (0x0d0b). Android sends this as the next frame after the
+ * dial, before the call connects, and the CP answers later with a FRAME_TIME
+ * indication -- which komodo never produces, one of the signs its media
+ * pipeline never starts.
+ */
+void
+mm_sit_ims_set_frame_time (MMSitIms *self)
+{
+    guint8          *frame = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    g_return_if_fail (MM_IS_SIT_IMS (self));
+    status = samsung_aims_build_set_frame_time (mm_sit_client_next_token (self->priv->client),
+                                                &frame, &len);
+    send_media_request (self, frame, len, status, "set frame time");
+}
+
+/* `SET_RTP_THRESHOLD` (0x0d72), sent as the call becomes active. */
+void
+mm_sit_ims_set_rtp_threshold (MMSitIms *self)
+{
+    guint8          *frame = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    g_return_if_fail (MM_IS_SIT_IMS (self));
+    status = samsung_aims_build_set_rtp_threshold (mm_sit_client_next_token (self->priv->client),
+                                                   &frame, &len);
+    send_media_request (self, frame, len, status, "set RTP threshold");
+}
+
+void
+mm_sit_ims_media_state (MMSitIms *self,
+                        guint8    state)
+{
+    g_autoptr(GByteArray)  frame_array = NULL;
+    guint8                *frame = NULL;
+    gsize                  len = 0;
+    SamsungSitStatus       status;
+
+    g_return_if_fail (MM_IS_SIT_IMS (self));
+
+    status = samsung_aims_build_media_state_ind (state, &frame, &len);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        mm_obj_dbg (self, "could not build IMS media state %u: %s",
+                    state, samsung_sit_status_name (status));
+        return;
+    }
+
+    frame_array = g_byte_array_sized_new (len);
+    g_byte_array_append (frame_array, frame, len);
+    samsung_sit_buf_free (frame, len);
+
+    mm_obj_dbg (self, "IMS media state %u", state);
+    mm_sit_client_send_indication (self->priv->client, frame_array);
+}
+
 void
 mm_sit_ims_dial (MMSitIms            *self,
                  const gchar         *number,

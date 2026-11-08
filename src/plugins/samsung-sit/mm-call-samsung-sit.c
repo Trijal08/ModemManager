@@ -161,11 +161,22 @@ call_start (MMBaseCall          *_self,
      * by number. */
     if (call_is_ims (self)) {
         mm_obj_dbg (self, "starting IMS call");
-        mm_sit_ims_dial (mm_broadband_modem_samsung_sit_peek_ims (MM_BROADBAND_MODEM_SAMSUNG_SIT (self->priv->modem)),
-                         mm_gdbus_call_get_number (MM_GDBUS_CALL (self)),
-                         cancellable,
-                         (GAsyncReadyCallback) ims_dial_ready,
-                         task);
+        {
+            MMSitIms *ims = mm_broadband_modem_samsung_sit_peek_ims (MM_BROADBAND_MODEM_SAMSUNG_SIT (self->priv->modem));
+
+            mm_sit_ims_dial (ims,
+                             mm_gdbus_call_get_number (MM_GDBUS_CALL (self)),
+                             cancellable,
+                             (GAsyncReadyCallback) ims_dial_ready,
+                             task);
+            /*
+             * Android's order after the dial: the frame time, then the setup
+             * media state.  Both go out behind the dial request because the
+             * SIT port serialises commands.
+             */
+            mm_sit_ims_set_frame_time (ims);
+            mm_sit_ims_media_state (ims, MM_SIT_IMS_MEDIA_SETUP);
+        }
         return;
     }
 
@@ -330,10 +341,77 @@ mm_call_samsung_sit_new (MMBaseModem     *modem,
     return call;
 }
 
+/*
+ * Tell the CP what the call's media is doing, at every state change.
+ *
+ * Android raises AIMS_MEDIA_STATE_IND throughout a call and the CP answers
+ * nothing; we never sent it at all.  Without it the CP publishes no CallInfo
+ * block, and the AoC -- which learns the call's codec, session and sample
+ * rate from that block and from nowhere else -- sits logging "Unknown codec
+ * type (0xffffffff)" for the whole call with the downlink silent.
+ *
+ * CS calls are left alone: this is an IMS message and the CP has no IMS
+ * session to describe for them.
+ */
+static void
+notify_media_state (MMCallSamsungSit *self)
+{
+    MMSitIms   *ims;
+    MMCallState state;
+    guint8      media;
+
+    if (!self->priv->modem || !call_is_ims (self))
+        return;
+
+    state = mm_gdbus_call_get_state (MM_GDBUS_CALL (self));
+    switch (state) {
+    case MM_CALL_STATE_DIALING:
+        /*
+         * Not from here: ModemManager marks the call dialing before the DIAL
+         * request goes out, so announcing it here describes a call's media to
+         * the CP before the call exists.  Android's order is DIAL, then the
+         * frame time, then the setup state -- so call_dial() sends it.
+         */
+        return;
+    case MM_CALL_STATE_RINGING_OUT:
+    case MM_CALL_STATE_RINGING_IN:
+        media = MM_SIT_IMS_MEDIA_ALERTING;
+        break;
+    case MM_CALL_STATE_ACTIVE:
+        media = MM_SIT_IMS_MEDIA_CONNECTED;
+        break;
+    case MM_CALL_STATE_TERMINATED:
+        media = MM_SIT_IMS_MEDIA_ENDED;
+        break;
+    default:
+        /* Nothing observed on the wire for the other states. */
+        return;
+    }
+
+    ims = mm_broadband_modem_samsung_sit_peek_ims (MM_BROADBAND_MODEM_SAMSUNG_SIT (self->priv->modem));
+    if (!ims)
+        return;
+
+    mm_sit_ims_media_state (ims, media);
+
+    /* Android gives the CP its RTP thresholds just after the connected state. */
+    if (media == MM_SIT_IMS_MEDIA_CONNECTED)
+        mm_sit_ims_set_rtp_threshold (ims);
+}
+
+static void
+state_changed (MMCallSamsungSit *self,
+               GParamSpec       *pspec,
+               gpointer          user_data)
+{
+    notify_media_state (self);
+}
+
 static void
 mm_call_samsung_sit_init (MMCallSamsungSit *self)
 {
     self->priv = G_TYPE_INSTANCE_GET_PRIVATE (self, MM_TYPE_CALL_SAMSUNG_SIT, MMCallSamsungSitPrivate);
+    g_signal_connect (self, "notify::state", G_CALLBACK (state_changed), NULL);
 }
 
 static void

@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Copyright (C) 2026 The ModemManager authors */
 
+#include <ModemManager.h>
+#include <mm-errors-types.h>
+
 #include "mm-log-object.h"
 #include "mm-port-serial-sit.h"
 
@@ -272,6 +275,53 @@ mm_port_serial_sit_command_finish (MMPortSerialSit  *self,
 {
     g_return_val_if_fail (MM_IS_PORT_SERIAL_SIT (self), NULL);
     return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+static void
+indication_sent (MMPortSerialSit *self,
+                 GAsyncResult    *res,
+                 gpointer         user_data)
+{
+    g_autoptr(GByteArray)  discard = NULL;
+    g_autoptr(GError)      error = NULL;
+
+    discard = mm_port_serial_command_finish (MM_PORT_SERIAL (self), res, &error);
+    /*
+     * An indication is answered by nothing, so the serial layer always ends
+     * in a timeout.  That is the expected outcome, not a failure; anything
+     * else is worth a line.
+     */
+    if (error && !g_error_matches (error, MM_SERIAL_ERROR, MM_SERIAL_ERROR_RESPONSE_TIMEOUT))
+        mm_obj_dbg (self, "could not send SIT indication: %s", error->message);
+}
+
+/*
+ * Send a frame the CP will not answer.
+ *
+ * Indications the AP raises at the CP (AIMS_MEDIA_STATE_IND is the one we
+ * need) carry no token and get no response, so they must not go through
+ * mm_port_serial_sit_command(): that pushes the frame's token onto
+ * pending_tokens, and a token of zero there would swallow the matching of a
+ * later real response.  The write itself still happens immediately; only the
+ * wait is pointless, so it is given the shortest timeout the serial layer
+ * takes and its result is dropped.
+ */
+void
+mm_port_serial_sit_send_indication (MMPortSerialSit *self,
+                                    GByteArray      *frame)
+{
+    g_return_if_fail (MM_IS_PORT_SERIAL_SIT (self));
+    g_return_if_fail (frame != NULL);
+    g_return_if_fail (frame->len >= MM_SIT_HEADER_SIZE);
+
+    mm_port_serial_command (MM_PORT_SERIAL (self),
+                            frame,
+                            1,
+                            FALSE,
+                            FALSE,
+                            NULL,
+                            (GAsyncReadyCallback) indication_sent,
+                            NULL);
 }
 
 void

@@ -121,6 +121,23 @@ const gchar *mm_sit_ims_get_associated_uris (MMSitIms *self);
  * protocol: different requests, different ids, its own call numbering. The
  * Voice interface picks between them on [`mm_sit_ims_is_registered`].
  */
+/*
+ * AIMS media states, as observed on this hardware across a VoLTE call:
+ * setup just after the dial, alerting before it connects, connected as it
+ * becomes active, ended at hangup.  Values are what the CP was sent, not
+ * names it told us.
+ */
+#define MM_SIT_IMS_MEDIA_SETUP     2
+#define MM_SIT_IMS_MEDIA_ALERTING  4
+#define MM_SIT_IMS_MEDIA_CONNECTED 0
+#define MM_SIT_IMS_MEDIA_ENDED     6
+
+void     mm_sit_ims_set_frame_time    (MMSitIms *self);
+void     mm_sit_ims_set_rtp_threshold (MMSitIms *self);
+
+void     mm_sit_ims_media_state   (MMSitIms            *self,
+                                   guint8               state);
+
 void     mm_sit_ims_dial          (MMSitIms            *self,
                                    const gchar         *number,
                                    GCancellable        *cancellable,

@@ -456,6 +456,15 @@ mm_sit_client_command (MMSitClient        *self,
                                 task);
 }
 
+/* Send a frame the CP does not answer; see the port layer for why. */
+void
+mm_sit_client_send_indication (MMSitClient *self,
+                               GByteArray  *frame)
+{
+    g_return_if_fail (MM_IS_SIT_CLIENT (self));
+    mm_port_serial_sit_send_indication (self->priv->port, frame);
+}
+
 MMSitMessage *
 mm_sit_client_command_finish (MMSitClient   *self,
                               GAsyncResult  *res,
