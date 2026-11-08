@@ -112,6 +112,7 @@ typedef enum {
     MM_SIT_MESSAGE_SET_AP_SYSTEM_TIME          = 0x0949,
     MM_SIT_MESSAGE_GET_NITZ_TIME               = 0x0955,
     MM_SIT_MESSAGE_CARRIER_CONFIG_MANIFEST     = 0x4600,
+    MM_SIT_MESSAGE_CARRIER_CONFIG_STATUS       = 0x4601,
     MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO     = 0x4602,
     MM_SIT_MESSAGE_OEM_CONFIG                  = 0x4605,
 } MMSitMessageId;
@@ -882,6 +883,24 @@ gboolean mm_sit_message_parse_allowed_network_types    (const MMSitMessage    *m
 gboolean mm_sit_message_parse_call_list               (const MMSitMessage    *message,
                                                        GArray               **out_calls,
                                                        GError               **error);
+/*
+ * The CP's verdict on the carrier configuration it was pointed at, pushed
+ * after every CARRIER_CONFIG_MANIFEST. @applied is the first word: non-zero
+ * once the CP has fetched and applied the manifest, zero while it has not.
+ *
+ * Reading it matters because nothing else reports this. The manifest request
+ * itself is answered "status 0" -- the request was well formed -- and the CP
+ * then says separately whether it did anything with it.
+ *
+ * Zero is not a failure: it means the CP already holds that manifest and had
+ * nothing to fetch, which is what it reports on every boot after the first.
+ * Handed a hash it does not have, it opens <dir>/manifests/<hash> over RFS
+ * within a second and then every confseq the manifest names.
+ */
+gboolean mm_sit_message_parse_carrier_config_status (const MMSitMessage *message,
+                                                     gboolean           *out_applied,
+                                                     GError            **error);
+
 gboolean mm_sit_message_parse_carrier_sim_info        (const MMSitMessage    *message,
                                                        MMSitCarrierSimInfo   *out_info,
                                                        GError               **error);

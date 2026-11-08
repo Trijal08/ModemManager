@@ -304,8 +304,14 @@ send_ready (MMSitClient  *client,
  * shared continuation moves to the next.
  */
 typedef enum {
-    STEP_PDN,
+    /*
+     * The stack comes up before the PDN is asked for, which is the order this
+     * modem's own Android uses: STACK_START and XCAPM_START go out three
+     * seconds before its SETUP_DATA_CALL, and ADD_PDN_INFO only afterwards.
+     * Asking for the context first was this plugin's own invention.
+     */
     STEP_STACK_START,
+    STEP_PDN,
     STEP_HIDDEN_MENU,
     STEP_ADD_PDN_INFO,
     STEP_DONE,
@@ -423,6 +429,12 @@ sequence_step (GTask *task)
 
     switch (ctx->step) {
     case STEP_PDN:
+        /* Kept from a previous attempt; do not ask for a second context. */
+        if (self->priv->pdn_up) {
+            ctx->step++;
+            sequence_step (task);
+            return;
+        }
         mm_sit_client_setup_data_call (self->priv->client,
                                        self->priv->ims_apn ?: IMS_APN,
                                        self->priv->ims_pdp ? (MMSitPdpType) self->priv->ims_pdp
@@ -583,9 +595,13 @@ start_sequence (MMSitIms *self)
                 mm_sit_ims_config_get_carrier (ctx->config), n_entries,
                 ctx->menu.count, mm_sit_ims_config_get_user_agent (ctx->config));
 
-    /* A PDN already up means this is a retry after a later step failed; keep it
-     * rather than asking the CP for a second context it would refuse. */
-    ctx->step = self->priv->pdn_up ? STEP_STACK_START : STEP_PDN;
+    /*
+     * A PDN already up means this is a retry after a later step failed; keep it
+     * rather than asking the CP for a second context it would refuse. The walk
+     * starts at the stack either way now, and STEP_PDN skips itself when the
+     * context is already in hand.
+     */
+    ctx->step = STEP_STACK_START;
     if (self->priv->pdn_up)
         ctx->call = self->priv->pdn;
 

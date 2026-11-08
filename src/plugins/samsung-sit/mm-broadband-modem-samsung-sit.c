@@ -28,6 +28,7 @@
 #include "mm-sit-ims-config.h"
 #include "mm-sit-ims.h"
 #include "mm-sit-cp.h"
+#include "mm-sit-boot-parity.h"
 #include "mm-utils.h"
 
 static void iface_modem_init      (MMIfaceModemInterface     *iface);
@@ -67,6 +68,8 @@ struct _MMBroadbandModemSamsungSitPrivate {
      * profile per round trip, before the radio goes on. */
     GPtrArray   *boot_apns;
     guint        boot_apn_index;
+    /* Cursor into mm_sit_parity_requests[] for the walk in progress. */
+    guint        parity_index;
 
     /* Reach the SIT ports through sit-proxy rather than owning the device
      * nodes, so mm-sit-tool and the IMS helper can share them. Set from
@@ -1333,6 +1336,24 @@ sit_indication (MMSitClient              *client,
         schedule_sim_check (self);
     } else if (message->id == MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED)
         schedule_sim_check (self);
+    else if (message->id == MM_SIT_MESSAGE_CARRIER_CONFIG_STATUS) {
+        gboolean applied = FALSE;
+
+        /*
+         * The CP's verdict on the configuration it was last pointed at: it
+         * fetched and applied it, or it already had that manifest and did
+         * nothing. Both are normal -- a CP that has the configuration reports
+         * nothing to do on every later boot -- so this is a debug line.
+         *
+         * Proven rather than assumed: handed a manifest hash it cannot have,
+         * the CP opens <dir>/manifests/<hash> over RFS within a second, and
+         * handed a different valid one it fetches that manifest and all of its
+         * confseqs. It is silent only for a hash it already holds.
+         */
+        if (mm_sit_message_parse_carrier_config_status (message, &applied, NULL))
+            mm_obj_dbg (self, "CP %s the carrier configuration",
+                        applied ? "applied" : "already had");
+    }
     else if (message->id == MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO) {
         MMSitCarrierSimInfo info;
 
@@ -3140,6 +3161,130 @@ power_up_retry_chain (GTask *task)
     return G_SOURCE_REMOVE;
 }
 
+/*
+ * Replay one phase of mm_sit_parity_requests[]: the traffic this modem's own
+ * Android puts on a control stack before it asks for an IMS PDN, and this
+ * plugin did not.
+ *
+ * It is replayed rather than modelled. Every field of the IMS context and of
+ * the whole carrier-configuration exchange was matched to Android byte for
+ * byte -- the 983-byte SETUP_DATA_CALL differs in zero bytes -- and the CP
+ * still refused every PDN but the one it attached with. What differed was the
+ * volume and order of everything around them: 419 requests in Android's first
+ * 22 seconds against this plugin's 89. The CP builds its state from that
+ * traffic, so the traffic is reproduced instead of guessed at.
+ *
+ * A refusal is informational. Most of these are advisory settings or plain
+ * reads, the CP answers some with "wrong state" depending on where it is in
+ * its own init, and none of them is worth failing a power-up over.
+ */
+static void apply_attach_apn (GTask *task);
+static void parity_step (GTask *task, MMSitParityPhase phase);
+
+static GByteArray *
+parity_build (MMBroadbandModemSamsungSit *self,
+              MMSitClient                *client,
+              const MMSitParityRequest   *req,
+              GError                    **error)
+{
+    g_autofree guint8 *body = NULL;
+    gsize              len = 4 + req->len;
+
+    body = g_malloc0 (len);
+    if (req->payload)
+        memcpy (body + 4, req->payload, req->len);
+
+    switch (req->sub) {
+    case MM_SIT_PARITY_SUB_MCCMNC: {
+        g_autoptr(MMBaseSim)  sim = NULL;
+        const gchar          *mccmnc;
+
+        g_object_get (self, MM_IFACE_MODEM_SIM, &sim, NULL);
+        mccmnc = sim ? mm_gdbus_sim_get_operator_identifier (MM_GDBUS_SIM (sim)) : NULL;
+        /* Nothing to name the subscription with yet; the CP gets it next time. */
+        if (!mccmnc || !mccmnc[0] || strlen (mccmnc) >= req->len)
+            return NULL;
+        memset (body + 4, 0, req->len);
+        memcpy (body + 4, mccmnc, strlen (mccmnc));
+        break;
+    }
+    case MM_SIT_PARITY_SUB_STACK:
+        if (req->len < 1)
+            return NULL;
+        body[4] = (guint8) mm_sit_client_get_stack (client);
+        break;
+    case MM_SIT_PARITY_SUB_NONE:
+    default:
+        break;
+    }
+
+    return mm_sit_request_new (req->id, mm_sit_client_next_token (client),
+                               body, len, error);
+}
+
+static void
+parity_ready (MMSitClient  *client,
+              GAsyncResult *res,
+              GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
+    g_autoptr(MMSitMessage)     message = NULL;
+    g_autoptr(GError)           error = NULL;
+    MMSitParityPhase            phase;
+
+    phase = mm_sit_parity_requests[self->priv->parity_index].phase;
+    message = mm_sit_client_command_finish (client, res, &error);
+    if (!message)
+        mm_obj_dbg (self, "boot parity: 0x%04x refused: %s",
+                    mm_sit_parity_requests[self->priv->parity_index].id,
+                    error->message);
+
+    self->priv->parity_index++;
+    parity_step (task, phase);
+}
+
+static void
+parity_step (GTask *task, MMSitParityPhase phase)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
+    g_autoptr(GByteArray)       request = NULL;
+    g_autoptr(GError)           error = NULL;
+    MMSitClient                *client;
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, NULL);
+    while (client && self->priv->parity_index < G_N_ELEMENTS (mm_sit_parity_requests)) {
+        const MMSitParityRequest *req = &mm_sit_parity_requests[self->priv->parity_index];
+
+        if (req->phase != phase) {
+            self->priv->parity_index++;
+            continue;
+        }
+        request = parity_build (self, client, req, &error);
+        if (request)
+            break;
+        if (error) {
+            mm_obj_dbg (self, "boot parity: couldn't build 0x%04x: %s",
+                        req->id, error->message);
+            g_clear_error (&error);
+        }
+        self->priv->parity_index++;
+    }
+
+    if (!request) {
+        if (phase == MM_SIT_PARITY_PHASE_BOOT) {
+            apply_attach_apn (task);
+        } else {
+            arm_search_watchdog (self);
+            g_task_return_boolean (task, TRUE);
+            g_object_unref (task);
+        }
+        return;
+    }
+
+    mm_sit_client_command (client, request, 10, NULL,
+                           (GAsyncReadyCallback) parity_ready, task);
+}
+
 static void
 modem_power_up_ready (MMSitClient  *client,
                       GAsyncResult *res,
@@ -3171,9 +3316,11 @@ modem_power_up_ready (MMSitClient  *client,
         mm_sit_client_assume_radio_state (client);
     }
 
-    arm_search_watchdog (self);
-    g_task_return_boolean (task, TRUE);
-    g_object_unref (task);
+    /* The radio is on; give the CP the rest of what Android tells it before
+     * anything asks for a second PDN. arm_search_watchdog() and the task's
+     * result move to the end of that walk. */
+    self->priv->parity_index = 0;
+    parity_step (task, MM_SIT_PARITY_PHASE_RADIO);
 }
 
 static void
@@ -3304,7 +3451,8 @@ register_next_apn_profile (GTask *task)
     MMSitClient                *client;
 
     if (!self->priv->boot_apns || self->priv->boot_apn_index >= self->priv->boot_apns->len) {
-        apply_attach_apn (task);
+        self->priv->parity_index = 0;
+        parity_step (task, MM_SIT_PARITY_PHASE_BOOT);
         return;
     }
     client = mm_broadband_modem_samsung_sit_peek_client (self, NULL);

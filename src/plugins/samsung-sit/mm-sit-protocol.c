@@ -28,6 +28,13 @@ read_le16 (const guint8 *data)
     return ((guint16) data[0]) | (((guint16) data[1]) << 8);
 }
 
+static guint32
+read_le32 (const guint8 *data)
+{
+    return ((guint32) data[0]) | (((guint32) data[1]) << 8) |
+           (((guint32) data[2]) << 16) | (((guint32) data[3]) << 24);
+}
+
 gboolean
 mm_sit_frame_peek_length (const guint8  *data,
                           gsize          data_len,
@@ -1348,6 +1355,34 @@ mm_sit_message_parse_sim_slot_status (const MMSitMessage *message,
             out_status->slots[i].ports[j].state           = s.slots[i].ports[j].state;
         }
     }
+    return TRUE;
+}
+
+gboolean
+mm_sit_message_parse_carrier_config_status (const MMSitMessage *message,
+                                            gboolean           *out_applied,
+                                            GError            **error)
+{
+    const guint8 *payload;
+    gsize         len;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_applied != NULL, FALSE);
+
+    /*
+     * Eight bytes: a verdict word, then one the CP leaves zero in every
+     * captured indication. Parsed here rather than in the codec because there
+     * is nothing to model -- one word read one way -- and the codec's parsers
+     * all exist to flatten structures that have a layout worth naming.
+     */
+    payload = mm_sit_message_get_payload (message, &len);
+    if (len < 4) {
+        g_set_error (error, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                     "SIT carrier-config status is %" G_GSIZE_FORMAT " bytes, need 4", len);
+        return FALSE;
+    }
+
+    *out_applied = (read_le32 (payload) != 0);
     return TRUE;
 }
 
