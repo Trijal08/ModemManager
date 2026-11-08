@@ -2461,7 +2461,7 @@ client_boot_config_test_peer (ClientTestContext *ctx)
          * after one data pass -- reading all records of all of them overshot
          * stock by 85 exchanges.
          */
-#define BOOT_EF_FILES 30
+#define BOOT_EF_FILES 29
         MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
         MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
         MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
@@ -2471,8 +2471,7 @@ client_boot_config_test_peer (ClientTestContext *ctx)
         MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
         MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
         MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
-        /* 0x6f61 EF_PLMNwAcT, which stock reads and we did not. */
-        MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
+        MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
         /*
          * The UICC access-control probe that closes the boot batch: three
          * opens by AID that the card refuses, one with no AID that yields a

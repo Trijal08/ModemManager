@@ -4510,9 +4510,7 @@ static const BootEf boot_ef_files[] = {
     { 0x6f38, FALSE }, { 0x6f16, FALSE }, { 0x6f15, FALSE }, { 0x6f62, FALSE },
     { 0x6fd9, FALSE }, { 0x6f7b, FALSE }, { 0x6f05, FALSE }, { 0x2f05, FALSE },
     { 0x6f3c, FALSE }, { 0x6fe5, FALSE }, { 0x6f43, FALSE }, { 0x6fe7, FALSE },
-    { 0x6fc7, FALSE }, { 0x6f14, FALSE }, { 0x6f18, FALSE }, { 0x6f3b, FALSE },
-    /* Stock reads this twice on both stacks in all three captures. */
-    { 0x6f61, FALSE },
+    { 0x6fc7, FALSE }, { 0x6f14, FALSE }, { 0x6f18, FALSE }, { 0x6f3b, TRUE  },
     { 0x6f02, FALSE }, { 0x6f04, FALSE }, { 0x6f03, FALSE }, { 0x6f09, FALSE },
 };
 
