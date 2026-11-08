@@ -133,6 +133,21 @@ static const guint8 pre_aims_stack_stop_off[2]  = { 0x00, 0x01 };
 static const guint8 pre_aims_xcapm_stop_req[2]  = { 0x01, 0x01 };
 static const guint8 pre_aims_xcapm_stop_off[2]  = { 0x00, 0x01 };
 static const guint8 pre_aims_set_frame_time[10] = { 0x00, 0x02, 0x20, 0x04, 0xa9, 0xa8, 0xa1, 0x01, 0x00, 0x00 };
+/*
+ * AIMS_SET_CALL_WAITING. Two u32 ones, a zero, then six bytes of wall clock
+ * at +9 (yy mm dd HH MM SS, yy = year - 2000, plain bytes not BCD) which
+ * MM_SIT_BOOT_SUB_WALLCLOCK fills in -- they are left zero here so a stale
+ * replay is obvious if the sub is ever dropped. The 0x03 at +17 is a constant
+ * stock always sends and we sent as zero.
+ */
+static const guint8 pre_aims_set_call_waiting[24] = {
+    0x01, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x00,
+    0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x03,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+};
 static const guint8 pre_aims_xcapm_start_req[2] = { 0x01, 0x01 };
 static const guint8 pre_set_voice_operation[4] = { 0x03, 0x00, 0x00, 0x00 };
 static const guint8 pre_aims_set_frame_time_02[10] = { 0x00, 0x02, 0xcd, 0x04, 0xa9, 0xa8, 0xa1, 0x01, 0x00, 0x00 };
@@ -369,7 +384,16 @@ static const MMSitBootRequest boot_requests[] = {
     { 0x0d3c, "aims xcapm stop req", MM_SIT_BOOT_PHASE_PRE_PDN,
       { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_xcapm_stop_req },
     { 0x0d0b, "aims set frame time", MM_SIT_BOOT_PHASE_PRE_PDN,
-      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 10, pre_aims_set_frame_time },
+      { 0, 0 }, MM_SIT_BOOT_SUB_FRAMETIME, MM_SIT_BOOT_STACKS_ALL, 10, pre_aims_set_frame_time },
+    /*
+     * Stock sends this immediately after a frame time, interleaved through the
+     * AIMS block: +10.38 0x0d0b, +10.47 0x0d0b, +10.57 0x0d17 on ch 0xf5. Its
+     * count is one of the ones that varies between captures (3 and 2 per stack
+     * in the long one), so this says nothing and sends it once -- the header's
+     * rule, and the opposite of what made the old replay table go stale.
+     */
+    { 0x0d17, "aims set call waiting", MM_SIT_BOOT_PHASE_PRE_PDN,
+      { 0, 0 }, MM_SIT_BOOT_SUB_WALLCLOCK, MM_SIT_BOOT_STACKS_ALL, 24, pre_aims_set_call_waiting },
     { 0x0d3b, "aims xcapm start req", MM_SIT_BOOT_PHASE_PRE_PDN,
       { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_xcapm_start_req },
     { 0x0d3a, "aims stack stop req (flag clear)", MM_SIT_BOOT_PHASE_PRE_PDN,
@@ -391,7 +415,7 @@ static const MMSitBootRequest boot_requests[] = {
     { 0x091a, "set voice operation", MM_SIT_BOOT_PHASE_PRE_PDN,
       { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 4, pre_set_voice_operation },
     { 0x0d0b, "aims set frame time", MM_SIT_BOOT_PHASE_PRE_PDN,
-      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 10, pre_aims_set_frame_time_02 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_FRAMETIME, MM_SIT_BOOT_STACKS_ALL, 10, pre_aims_set_frame_time_02 },
     { 0x0703, "query network selection mode", MM_SIT_BOOT_PHASE_PRE_PDN,
       { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
     { 0x0700, "get voice registration", MM_SIT_BOOT_PHASE_PRE_PDN,

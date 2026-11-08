@@ -3019,6 +3019,7 @@ ims_retry_peer_ready (gint fd, GIOCondition condition, ImsRetryPeer *peer)
      * default arm trips.
      */
     case 0x0d0b:
+    case 0x0d17:
     case 0x0d3b:
     case 0x0d3c:
     case 0x091a:

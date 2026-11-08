@@ -3989,6 +3989,22 @@ mm_sit_client_build_boot_request (MMSitClient              *self,
         body[4 + 14] = (guint8) g_date_time_get_second (now);
         break;
     }
+    case MM_SIT_BOOT_SUB_FRAMETIME: {
+        /*
+         * Two bytes of millisecond clock at payload+2, little-endian, wrapping
+         * at 65536. Stock's advances at 1000/s; the table replayed one frame's
+         * value (1056, and 1229 for the second row), so every boot told the CP
+         * the same instant twice.
+         */
+        guint64 ms;
+
+        if (req->len < 4)
+            return NULL;
+        ms = (guint64) (g_get_monotonic_time () / 1000);
+        body[4 + 2] = (guint8) (ms & 0xff);
+        body[4 + 3] = (guint8) ((ms >> 8) & 0xff);
+        break;
+    }
     case MM_SIT_BOOT_SUB_BUILD:
     case MM_SIT_BOOT_SUB_NONE:
     default:

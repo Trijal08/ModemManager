@@ -35,6 +35,13 @@ typedef enum {
     MM_SIT_BOOT_SUB_STACK,
     /* @0x09: the current time, as the CP's six-byte calendar. */
     MM_SIT_BOOT_SUB_WALLCLOCK,
+    /*
+     * A 16-bit millisecond counter at payload+2, little-endian. Stock's runs
+     * at exactly 1000/s and wraps at 65536 (~65s): across one capture it read
+     * 407 at +10.38s and 42577 at +52.55s, and (42577-407)/(52.55-10.38) is
+     * 1000.0. A replayed constant tells the CP the same instant every frame.
+     */
+    MM_SIT_BOOT_SUB_FRAMETIME,
     /* The whole payload is built at run time; see mm_sit_boot_build_payload(). */
     MM_SIT_BOOT_SUB_BUILD,
 } MMSitBootSub;
