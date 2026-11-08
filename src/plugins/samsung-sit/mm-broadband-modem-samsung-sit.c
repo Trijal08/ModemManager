@@ -3796,6 +3796,28 @@ parity_build (MMBroadbandModemSamsungSit *self,
             return NULL;
         body[4] = (guint8) mm_sit_client_get_stack (client);
         break;
+    case MM_SIT_PARITY_SUB_WALLCLOCK: {
+        /*
+         * Six bytes of UTC at payload+9: yy mm dd HH MM SS, yy = year - 2000,
+         * each a plain byte rather than BCD.
+         *
+         * Stock's advances every frame (22:23:30, :31, :34, :35 across one
+         * boot). The table is a verbatim replay, so before this it sent the
+         * capture's own clock -- 2026-10-11 04:59:48, identical on every boot
+         * and both stacks, which is what the CP was being told the time was.
+         */
+        g_autoptr(GDateTime) now = g_date_time_new_now_utc ();
+
+        if (req->len < 15 || !now)
+            return NULL;
+        body[4 + 9]  = (guint8) (g_date_time_get_year (now) - 2000);
+        body[4 + 10] = (guint8) g_date_time_get_month (now);
+        body[4 + 11] = (guint8) g_date_time_get_day_of_month (now);
+        body[4 + 12] = (guint8) g_date_time_get_hour (now);
+        body[4 + 13] = (guint8) g_date_time_get_minute (now);
+        body[4 + 14] = (guint8) g_date_time_get_second (now);
+        break;
+    }
     case MM_SIT_PARITY_SUB_NONE:
     default:
         break;
