@@ -3062,6 +3062,25 @@ mm_sit_client_send_boot_config_finish (MMSitClient  *self,
  * context for. If the IMS refusal is ever understood and fixed, this step
  * should go and the floor with it.
  */
+/*
+ * How long a step of the connect sequence waits for the CP.
+ *
+ * Not a measure of the work: the CP sits on a finished reply until the AP's
+ * next write (see mm_sit_client_registration_queries_in_flight() and the
+ * boot-time GIPC burst, which shares the 4 KiB FMT ring with this traffic),
+ * so a step's latency is bounded by when something else happens to write.
+ *
+ * Measured on hardware 2026-11-08, both stacks, 841 matched request/response
+ * pairs in one boot: p50 2 ms, p90 10 ms, p99 36 ms -- and a tail of 4.93 s
+ * on SET_PREFERRED_DATA_MODEM, the first step of a bearer connect. At the 5 s
+ * this used to be, that reply lost the race by 70 ms and the connect failed
+ * with "Serial command timed out" on an attempt that was about to succeed.
+ * Stock's worst over 858 pairs on the same firmware is 2.59 s.
+ *
+ * CONNECT_STEP_SETUP already used this value and has its own retry on top.
+ */
+#define CONNECT_STEP_TIMEOUT_SECS 10
+
 typedef enum {
     CONNECT_STEP_PREFERRED_MODEM,
     CONNECT_STEP_DATA_PROFILE,
@@ -3566,11 +3585,11 @@ connect_step (GTask *task)
 
     if (ctx->step == CONNECT_STEP_SETUP) {
         ctx->setup_sent = TRUE;
-        mm_sit_client_command (self, request, 10, cancellable,
+        mm_sit_client_command (self, request, CONNECT_STEP_TIMEOUT_SECS, cancellable,
                                (GAsyncReadyCallback) connect_setup_ready, task);
     } else
         run_checked_command (ctx->step == CONNECT_STEP_PREFERRED_MODEM ? control_client (self) : self,
-                             request, 5, cancellable,
+                             request, CONNECT_STEP_TIMEOUT_SECS, cancellable,
                              (GAsyncReadyCallback) connect_checked_ready, task);
 }
 
