@@ -123,6 +123,10 @@ struct _MMSitClientPrivate {
      * on the stack whose SIM has an ISIM (AID ...871004...), two on the one
      * that does not. Caching only apps[0] made that impossible.
      */
+    /* EF_DOMAIN from the ISIM, if the card has one. The operator chooses it,
+     * so it is read rather than derived -- most use the 3GPP default form but
+     * nothing requires them to. */
+    gchar               *isim_domain;
     guint8               sim_aids[MM_SIT_MAX_SIM_APPS][MM_SIT_MAX_AID_LENGTH];
     gsize                sim_aid_lens[MM_SIT_MAX_SIM_APPS];
     guint                sim_aid_count;
@@ -486,6 +490,93 @@ mm_sit_client_get_device_identity (MMSitClient  *self,
         *out_os_version = self->priv->device_os_version;
     if (out_software_version)
         *out_software_version = self->priv->device_build;
+}
+
+/*
+ * Whether the card carries an ISIM application.
+ *
+ * It decides one hidden-menu value: stock sends the IMS home domain only for
+ * a card that has an ISIM. Of this pair, the Videotron card has one and is
+ * sent ims.mnc500.mcc302.3gppnetwork.org; the Telus card has none and is sent
+ * no domain at all.
+ */
+/* 3GPP TS 31.103: the ISIM's application identifier. */
+static const guint8 isim_aid_prefix[] = { 0xa0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04 };
+
+static const guint8 *
+isim_aid (MMSitClient *self,
+          gsize       *out_len)
+{
+    guint i;
+
+    for (i = 0; i < self->priv->sim_aid_count; i++) {
+        if (self->priv->sim_aid_lens[i] >= G_N_ELEMENTS (isim_aid_prefix) &&
+            memcmp (self->priv->sim_aids[i], isim_aid_prefix,
+                    G_N_ELEMENTS (isim_aid_prefix)) == 0) {
+            *out_len = self->priv->sim_aid_lens[i];
+            return self->priv->sim_aids[i];
+        }
+    }
+    *out_len = 0;
+    return NULL;
+}
+
+/*
+ * EF_DOMAIN (TS 31.103 4.2.3): a single TLV, tag 0x80, holding the home
+ * network domain name. Stock puts it in the hidden menu as tag 778.
+ */
+static void
+isim_domain_ready (MMSitClient  *self,
+                   GAsyncResult *res,
+                   gpointer      unused)
+{
+    g_autoptr(GBytes) data = NULL;
+    const guint8     *raw;
+    gsize             len = 0;
+
+    /* A card may have an ISIM and still refuse the file; that is not an
+     * error, it only means no domain to send. */
+    data = mm_sit_client_read_ef_finish (self, res, NULL, NULL);
+    if (!data)
+        return;
+    raw = g_bytes_get_data (data, &len);
+    if (len < 2 || raw[0] != 0x80 || raw[1] == 0 || (gsize) raw[1] + 2 > len)
+        return;
+    g_free (self->priv->isim_domain);
+    self->priv->isim_domain = g_strndup ((const gchar *) raw + 2, raw[1]);
+    mm_obj_dbg (self, "ISIM home domain '%s'", self->priv->isim_domain);
+}
+
+static void
+read_isim_domain (MMSitClient  *self,
+                  GCancellable *cancellable)
+{
+    const guint8 *aid;
+    gsize         aid_len = 0;
+
+    aid = isim_aid (self, &aid_len);
+    if (!aid)
+        return;
+    mm_sit_client_read_ef_for_aid (self, 0x6f03, aid, aid_len, cancellable,
+                                   (GAsyncReadyCallback) isim_domain_ready, NULL);
+}
+
+/* The home domain the ISIM names, or NULL. Owned by @self. */
+const gchar *
+mm_sit_client_get_isim_domain (MMSitClient *self)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), NULL);
+    return self->priv->isim_domain;
+}
+
+gboolean
+mm_sit_client_sim_has_isim (MMSitClient *self)
+{
+    gsize len = 0;
+
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+
+    return isim_aid (self, &len) != NULL;
 }
 
 gboolean
@@ -1198,6 +1289,14 @@ typedef struct {
      * stock reads none at all.
      */
     guint        max_data_passes;
+    /*
+     * The application the file lives under. Empty means the subscription
+     * application, which is every file but the ISIM's: EF_DOMAIN and its
+     * neighbours exist only under ADF_ISIM, and a read of them against the
+     * USIM is refused.
+     */
+    guint8       aid[MM_SIT_MAX_AID_LENGTH];
+    gsize        aid_len;
 } ReadEfContext;
 
 static void
@@ -1353,7 +1452,8 @@ read_ef_step (GTask *task)
 
     ctx->passes++;
     request = mm_sit_request_new_sim_io (mm_sit_client_next_token (self), &sim_io,
-                                         self->priv->sim_aid, self->priv->sim_aid_len,
+                                         ctx->aid_len ? ctx->aid : self->priv->sim_aid,
+                                         ctx->aid_len ? ctx->aid_len : self->priv->sim_aid_len,
                                          &error);
     if (!request) {
         g_task_return_error (task, g_steal_pointer (&error));
@@ -1392,6 +1492,35 @@ read_ef_capped (MMSitClient        *self,
     ctx->data = g_byte_array_new ();
     g_task_set_task_data (task, ctx, (GDestroyNotify) read_ef_context_free);
 
+    read_ef_step (task);
+}
+
+/*
+ * The same read against a named application.
+ *
+ * Only the ISIM needs it, and only because its files are not reachable from
+ * the subscription application: a card with an ISIM answers EF_DOMAIN under
+ * ADF_ISIM and refuses it everywhere else.
+ */
+void
+mm_sit_client_read_ef_for_aid (MMSitClient        *self,
+                               guint16             file_id,
+                               const guint8       *aid,
+                               gsize               aid_len,
+                               GCancellable       *cancellable,
+                               GAsyncReadyCallback callback,
+                               gpointer            user_data)
+{
+    GTask         *task;
+    ReadEfContext *ctx;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    ctx = g_slice_new0 (ReadEfContext);
+    ctx->file_id = file_id;
+    ctx->aid_len = MIN (aid_len, MM_SIT_MAX_AID_LENGTH);
+    memcpy (ctx->aid, aid, ctx->aid_len);
+    ctx->data = g_byte_array_new ();
+    g_task_set_task_data (task, ctx, (GDestroyNotify) read_ef_context_free);
     read_ef_step (task);
 }
 
@@ -2848,6 +2977,7 @@ boot_config_step (GTask *task)
             mm_sit_client_next_token (self), self->priv->cp ? 2 : 1);
         break;
     case BOOT_CONFIG_STEP_BOOT_EFS:
+        read_isim_domain (self, g_task_get_cancellable (task));
         /* See mm_sit_client_read_boot_efs(). Cannot fail the boot. */
         mm_sit_client_read_boot_efs (self, g_task_get_cancellable (task),
                                      (GAsyncReadyCallback) boot_config_efs_ready,

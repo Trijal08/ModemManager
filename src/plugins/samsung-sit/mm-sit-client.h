@@ -77,6 +77,22 @@ void     mm_sit_client_get_device_identity (MMSitClient  *self,
                                             const gchar **out_os_version,
                                             const gchar **out_software_version);
 
+/* Read one elementary file under a named application rather than the
+ * subscription one; the ISIM's files are reachable no other way. */
+void mm_sit_client_read_ef_for_aid (MMSitClient        *self,
+                                    guint16             file_id,
+                                    const guint8       *aid,
+                                    gsize               aid_len,
+                                    GCancellable       *cancellable,
+                                    GAsyncReadyCallback callback,
+                                    gpointer            user_data);
+
+/* Whether the card carries an ISIM application (AID A000000087 1004). */
+gboolean mm_sit_client_sim_has_isim (MMSitClient *self);
+
+/* The home domain EF_DOMAIN names, or NULL. Owned by the client. */
+const gchar *mm_sit_client_get_isim_domain (MMSitClient *self);
+
 gboolean mm_sit_client_get_carrier_sim_info (MMSitClient         *self,
                                              MMSitCarrierSimInfo *out_info);
 void     mm_sit_client_query_carrier_sim_info        (MMSitClient         *self,

@@ -985,6 +985,8 @@ start_sequence (MMSitIms *self)
             .spn = self->priv->sim_spn,
             .gid1 = self->priv->sim_gid1,
             .gid2 = self->priv->sim_gid2,
+            .has_isim = mm_sit_client_sim_has_isim (self->priv->client),
+            .isim_domain = mm_sit_client_get_isim_domain (self->priv->client),
         };
 
         ctx->config = mm_sit_ims_config_resolve (self->priv->ims_database,

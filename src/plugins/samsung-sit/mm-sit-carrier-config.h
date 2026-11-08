@@ -17,6 +17,11 @@ typedef struct {
     const gchar *gid1;
     const gchar *gid2;
     const gchar *privilege_access_rule;
+    /* Whether the card carries an ISIM application. Only the IMS settings
+     * read it; the manifest resolver ignores it. */
+    gboolean     has_isim;
+    /* EF_DOMAIN as the ISIM states it, or NULL to derive the 3GPP form. */
+    const gchar *isim_domain;
 } MMSitCarrierIdentity;
 
 typedef struct {

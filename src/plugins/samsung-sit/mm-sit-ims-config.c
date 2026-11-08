@@ -42,6 +42,8 @@ ffi_identity (const MMSitCarrierIdentity *identity)
         out.gid1   = identity->gid1;
         out.gid2   = identity->gid2;
         out.iccid  = identity->iccid;
+        out.has_isim = identity->has_isim ? 1 : 0;
+        out.isim_domain = identity->isim_domain;
     }
     return out;
 }
