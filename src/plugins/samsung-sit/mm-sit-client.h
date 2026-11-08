@@ -6,6 +6,13 @@
 
 #include "mm-port-serial-sit.h"
 
+/*
+ * A data PDN the CP would not create, carrying the cause it gave. On this CP
+ * the attach APN decides whether a data call can be created at all, so
+ * whoever owns that choice has to hear about a refusal.
+ */
+#define MM_SIT_CLIENT_SIGNAL_DATA_PDN_REFUSED "data-pdn-refused"
+
 #define MM_TYPE_SIT_CLIENT            (mm_sit_client_get_type ())
 #define MM_SIT_CLIENT(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), MM_TYPE_SIT_CLIENT, MMSitClient))
 #define MM_SIT_CLIENT_CLASS(klass)    (G_TYPE_CHECK_CLASS_CAST ((klass), MM_TYPE_SIT_CLIENT, MMSitClientClass))
@@ -472,6 +479,7 @@ gboolean mm_sit_client_send_boot_config_finish (MMSitClient        *self,
 void     mm_sit_client_set_initial_attach_apn        (MMSitClient        *self,
                                                       const gchar        *apn,
                                                       MMSitPdpType        pdp,
+                                                      guint8              pcscf,
                                                       const MMSitApnAuth *auth,
                                                       GCancellable       *cancellable,
                                                       GAsyncReadyCallback callback,
@@ -497,6 +505,7 @@ void     mm_sit_client_set_data_profile        (MMSitClient        *self,
                                                 const gchar        *apn,
                                                 MMSitPdpType        pdp,
                                                 guint32             apn_types,
+                                                guint32             bearers,
                                                 const MMSitApnAuth *auth,
                                                 GCancellable       *cancellable,
                                                 GAsyncReadyCallback callback,
@@ -533,6 +542,7 @@ void     mm_sit_client_setup_data_call        (MMSitClient        *self,
                                                const gchar        *apn,
                                                MMSitPdpType        pdp,
                                                guint32             apn_types,
+                                               guint32             bearers,
                                                GCancellable       *cancellable,
                                                GAsyncReadyCallback callback,
                                                gpointer            user_data);

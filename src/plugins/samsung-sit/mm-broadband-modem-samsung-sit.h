@@ -8,7 +8,20 @@
 #include "mm-sit-client.h"
 #include "mm-sit-ims.h"
 
-#define MM_SIT_DEFAULT_CARRIER_CONFIG_DIRECTORY "/vendor/firmware/carrierconfig"
+/*
+ * Two different directories, and they are deliberately not the same string.
+ *
+ * ANNOUNCED is what goes on the wire in CARRIER_CONFIG_MANIFEST. The CP opens
+ * paths under it over RFS, and it is downstream's location so that the frame
+ * matches the vendor RIL byte for byte. There is no /vendor on this rootfs;
+ * exynos-modem's RFS server re-roots whatever the CP opens onto the real
+ * files, so nothing has to exist at this path.
+ *
+ * LOCAL is where the plugin itself opens cfg.db, which it has to be able to
+ * read directly. A udev rule may override it for a different layout.
+ */
+#define MM_SIT_ANNOUNCED_CARRIER_CONFIG_DIRECTORY "/vendor/firmware/carrierconfig"
+#define MM_SIT_DEFAULT_CARRIER_CONFIG_DIRECTORY   "/lib/firmware/google/s5400/carrierconfig"
 
 #define MM_TYPE_BROADBAND_MODEM_SAMSUNG_SIT            (mm_broadband_modem_samsung_sit_get_type ())
 #define MM_BROADBAND_MODEM_SAMSUNG_SIT(obj)            (G_TYPE_CHECK_INSTANCE_CAST ((obj), MM_TYPE_BROADBAND_MODEM_SAMSUNG_SIT, MMBroadbandModemSamsungSit))

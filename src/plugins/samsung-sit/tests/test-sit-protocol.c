@@ -254,10 +254,18 @@ test_apn_auth_on_the_wire (void)
         .password = "s3cret",
     };
 
-    profile = mm_sit_request_new_set_data_profile (1, "internet", MM_SIT_PDP_TYPE_IPV4V6, MM_SIT_APN_TYPE_DEFAULT, &auth, &error);
+    profile = mm_sit_request_new_set_data_profile (1, "internet", MM_SIT_PDP_TYPE_IPV4V6, MM_SIT_APN_TYPE_DEFAULT, 0x14CE08, &auth, &error);
     attach = mm_sit_request_new_set_initial_attach_apn (2, "internet", MM_SIT_PDP_TYPE_IPV4V6, &auth, &error);
     setup = mm_sit_request_new_setup_data_call (3, MM_SIT_DATA_CALL_CID_DEFAULT, "internet", MM_SIT_PDP_TYPE_IPV4V6, MM_SIT_APN_TYPE_DEFAULT, &auth, &error);
     g_assert_no_error (error);
+
+    /* @0xee is the radio-technology mask the CP matches URSP rules against;
+     * zero declares a profile valid on no RAT and the IMS PDN is refused with
+     * MATCH_ALL_RULE_NOT_ALLOWED. Telus's IMS entry reaches the wire as
+     * 0x14CE08, which is what this modem's own Android sends. */
+    g_assert_cmpuint (profile->data[0xee] | (profile->data[0xef] << 8) |
+                      (profile->data[0xf0] << 16) | (profile->data[0xf1] << 24),
+                      ==, 0x14CE08);
 
     g_assert_cmpuint (profile->data[0x77], ==, MM_SIT_AUTH_TYPE_CHAP);
     g_assert_cmpmem (&profile->data[0x78], 5, "alice", 5);
@@ -285,7 +293,7 @@ test_build_data_requests (void)
     g_autoptr(GByteArray) fast_dormancy = NULL;
     g_autoptr(GError)     error = NULL;
 
-    profile = mm_sit_request_new_set_data_profile (1, "internet", MM_SIT_PDP_TYPE_IPV4, MM_SIT_APN_TYPE_DEFAULT, NULL, &error);
+    profile = mm_sit_request_new_set_data_profile (1, "internet", MM_SIT_PDP_TYPE_IPV4, MM_SIT_APN_TYPE_DEFAULT, 0x14CE08, NULL, &error);
     g_assert_no_error (error);
     g_assert_cmpuint (profile->len, ==, 246);
     g_assert_cmpmem (&profile->data[16], 8, "internet", 8);
@@ -315,14 +323,17 @@ test_build_data_requests (void)
     g_clear_pointer (&profile, g_byte_array_unref);
     g_clear_pointer (&attach, g_byte_array_unref);
     g_clear_pointer (&setup, g_byte_array_unref);
-    profile = mm_sit_request_new_set_data_profile (1, "internet", MM_SIT_PDP_TYPE_IPV4V6, MM_SIT_APN_TYPE_DEFAULT, NULL, &error);
+    profile = mm_sit_request_new_set_data_profile (1, "internet", MM_SIT_PDP_TYPE_IPV4V6, MM_SIT_APN_TYPE_DEFAULT, 0x14CE08, NULL, &error);
     attach = mm_sit_request_new_set_initial_attach_apn (2, "internet", MM_SIT_PDP_TYPE_IPV4V6, NULL, &error);
     setup = mm_sit_request_new_setup_data_call (3, MM_SIT_DATA_CALL_CID_DEFAULT, "internet", MM_SIT_PDP_TYPE_IPV6, MM_SIT_APN_TYPE_DEFAULT, NULL, &error);
     g_assert_no_error (error);
     g_assert_cmpuint (profile->data[0x75], ==, 3);
     g_assert_cmpuint (profile->data[0x76], ==, 3);
     g_assert_cmpuint (attach->data[0xda], ==, 3);
-    g_assert_cmpuint (attach->data[0xf8], ==, 3);
+    /* @0xf8 is the attach's roaming protocol, and it is IPv4 whatever the home
+     * protocol is: this modem's own Android attaches pdp=3 rpdp=1 on Telus and
+     * pdp=1 rpdp=1 on Fizz. */
+    g_assert_cmpuint (attach->data[0xf8], ==, 1);
     g_assert_cmpuint (setup->data[0xda], ==, 2);
 
     deactivate = mm_sit_request_new_deactivate_data_call (4, 1, 0);

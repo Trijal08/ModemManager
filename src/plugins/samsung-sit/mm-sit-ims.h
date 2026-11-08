@@ -112,6 +112,7 @@ GList *mm_sit_ims_get_call_list (MMSitIms *self);
 /* Emitted when a tracked call changed, so the Voice interface re-reads the
  * list -- the same shape as the CS group's empty CALL_STATE_CHANGED poke. */
 #define MM_SIT_IMS_SIGNAL_CALLS_CHANGED "calls-changed"
+#define MM_SIT_IMS_SIGNAL_PDN_REFUSED  "pdn-refused"
 
 /* The P-Associated-URI list from the last successful registration, or NULL. */
 const gchar *mm_sit_ims_get_associated_uris (MMSitIms *self);
@@ -141,7 +142,8 @@ const gchar *mm_sit_ims_get_associated_uris (MMSitIms *self);
  */
 void     mm_sit_ims_set_apn           (MMSitIms    *self,
                                        const gchar *apn,
-                                       guint8       pdp);
+                                       guint8       pdp,
+                                       guint32      bearers);
 
 void     mm_sit_ims_set_frame_time    (MMSitIms *self);
 void     mm_sit_ims_set_rtp_threshold (MMSitIms *self);

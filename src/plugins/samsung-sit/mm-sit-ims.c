@@ -72,6 +72,7 @@ struct _MMSitImsPrivate {
     gchar       *ims_database;
     /* The IMS APN and its address family, from the carrier's APN list. */
     gchar       *ims_apn;
+    guint32      ims_bearers;
     guint8       ims_pdp;
     gchar       *sim_mccmnc;
     gchar       *sim_spn;
@@ -128,6 +129,7 @@ struct _MMSitImsPrivate {
 
 enum {
     SIGNAL_CALLS_CHANGED,
+    SIGNAL_PDN_REFUSED,
     SIGNAL_LAST,
 };
 
@@ -270,6 +272,19 @@ schedule_retry (MMSitIms    *self,
     mm_obj_dbg (self, "IMS %s attempt %u/%u failed (%s); retrying in %us",
                 what, self->priv->provisioning_failures, MAX_PROVISIONING_ATTEMPTS,
                 error ? error->message : "unknown", MM_SIT_IMS_RETRY_TIMEOUT_SECS);
+    /*
+     * Tell whoever is listening why, so it can change something before the
+     * retry. The cause travels in the message because that is where
+     * mm_sit_client_setup_data_call() puts it; parsing it back out is ugly but
+     * keeps the client's error contract alone.
+     */
+    if (error) {
+        const gchar *at = strstr (error->message, "cause ");
+        guint64      cause = at ? g_ascii_strtoull (at + strlen ("cause "), NULL, 10) : 0;
+
+        if (cause)
+            g_signal_emit (self, signals[SIGNAL_PDN_REFUSED], 0, (guint) cause);
+    }
     g_clear_error (&error);
     self->priv->retry_id = g_timeout_add_seconds (MM_SIT_IMS_RETRY_TIMEOUT_SECS,
                                                   (GSourceFunc) retry_cb, self);
@@ -440,6 +455,11 @@ sequence_step (GTask *task)
                                        self->priv->ims_pdp ? (MMSitPdpType) self->priv->ims_pdp
                                                            : MM_SIT_PDP_TYPE_IPV4V6,
                                        MM_SIT_APN_TYPE_IMS,
+                                       /* The carrier record's mask, in the CP's
+                                        * numbering. Zero would declare a profile
+                                        * valid on no radio technology and the PDN
+                                        * is then refused with 2253. */
+                                       self->priv->ims_bearers,
                                        g_task_get_cancellable (task),
                                        (GAsyncReadyCallback) pdn_ready, task);
         return;
@@ -1319,19 +1339,23 @@ mm_sit_ims_get_associated_uris (MMSitIms *self)
 void
 mm_sit_ims_set_apn (MMSitIms    *self,
                     const gchar *apn,
-                    guint8       pdp)
+                    guint8       pdp,
+                    guint32      bearers)
 {
     g_return_if_fail (MM_IS_SIT_IMS (self));
 
     if (!apn || !apn[0])
         return;
-    if (g_strcmp0 (self->priv->ims_apn, apn) == 0 && self->priv->ims_pdp == pdp)
+    if (g_strcmp0 (self->priv->ims_apn, apn) == 0 && self->priv->ims_pdp == pdp &&
+        self->priv->ims_bearers == bearers)
         return;
 
     g_free (self->priv->ims_apn);
     self->priv->ims_apn = g_strdup (apn);
     self->priv->ims_pdp = pdp;
-    mm_obj_dbg (self, "IMS PDN will use the carrier's APN '%s' (pdp %u)", apn, pdp);
+    self->priv->ims_bearers = bearers;
+    mm_obj_dbg (self, "IMS PDN will use the carrier's APN '%s' (pdp %u, bearers 0x%x)",
+                apn, pdp, bearers);
 }
 
 void
@@ -1470,4 +1494,12 @@ mm_sit_ims_class_init (MMSitImsClass *klass)
                       G_OBJECT_CLASS_TYPE (object_class),
                       G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
                       G_TYPE_NONE, 0);
+    /* The CP refused the IMS PDN, with the cause it gave. Lets the modem
+     * change what it attaches with before the retry; see
+     * attach_apn_resolve(). */
+    signals[SIGNAL_PDN_REFUSED] =
+        g_signal_new (MM_SIT_IMS_SIGNAL_PDN_REFUSED,
+                      G_OBJECT_CLASS_TYPE (object_class),
+                      G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL,
+                      G_TYPE_NONE, 1, G_TYPE_UINT);
 }

@@ -526,6 +526,7 @@ mm_sit_request_new_set_data_profile (guint16      token,
                                      const gchar *apn,
                                      MMSitPdpType pdp,
                                      guint32      apn_types,
+                                     guint32      bearers,
                                      const MMSitApnAuth *auth,
                                      GError     **error)
 {
@@ -534,7 +535,7 @@ mm_sit_request_new_set_data_profile (guint16      token,
     SamsungSitApnAuth ffi;
     SamsungSitStatus status;
 
-    status = samsung_sit_build_set_data_profile (token, apn, (SamsungSitPdpType) pdp, apn_types, ffi_auth (auth, &ffi), &buffer, &len);
+    status = samsung_sit_build_set_data_profile (token, apn, (SamsungSitPdpType) pdp, apn_types, bearers, ffi_auth (auth, &ffi), &buffer, &len);
     return finish_build (status, buffer, len, error);
 }
 
@@ -559,6 +560,7 @@ mm_sit_request_new_set_initial_attach_apn_for_stack (guint16      token,
                                                    guint8       stack,
                                            const gchar *apn,
                                            MMSitPdpType pdp,
+                                           guint8       pcscf,
                                            const MMSitApnAuth *auth,
                                            GError     **error)
 {
@@ -567,7 +569,7 @@ mm_sit_request_new_set_initial_attach_apn_for_stack (guint16      token,
     SamsungSitApnAuth ffi;
     SamsungSitStatus status;
 
-    status = samsung_sit_build_set_initial_attach_apn_for_stack (token, stack, apn, (SamsungSitPdpType) pdp, ffi_auth (auth, &ffi), &buffer, &len);
+    status = samsung_sit_build_set_initial_attach_apn_for_stack (token, stack, apn, (SamsungSitPdpType) pdp, pcscf, ffi_auth (auth, &ffi), &buffer, &len);
     return finish_build (status, buffer, len, error);
 }
 

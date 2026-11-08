@@ -10,6 +10,7 @@
 
 enum {
     SIGNAL_INDICATION,
+    SIGNAL_DATA_PDN_REFUSED,
     SIGNAL_LAST,
 };
 
@@ -2513,6 +2514,30 @@ mm_sit_client_send_boot_config_finish (MMSitClient  *self,
     return g_task_propagate_boolean (G_TASK (res), error);
 }
 
+/*
+ * Connecting a bearer re-points the attach APN at that bearer's own APN, and it
+ * has to, on this CP.
+ *
+ * SET_INITIAL_ATTACH_APN names the APN the CP puts in its ATTACH REQUEST and
+ * the CP keeps whatever it was last told, so this is modem-wide state and not a
+ * property of the context being brought up. Android never sends it from its
+ * data-call path: it attaches on the carrier's IA entry once and asks for every
+ * PDN it wants, IMS included, and the CP grants them.
+ *
+ * Ours will not. It refuses to create a PDN for the IMS DNN at all (see
+ * attach_apn_resolve() in mm-broadband-modem-samsung-sit.c), so the only way to
+ * get an IMS PDN is to attach on 'ims' and let the attach create it. That in
+ * turn leaves the data APN with no context, and a SETUP_DATA_CALL for it is
+ * refused the same way -- unless the attach is re-pointed at it first, which is
+ * what this step does.
+ *
+ * So the two halves are a pair and neither works alone: 'ims' at power-up gets
+ * IMS, and this step gets data. Removing this step with the IMS attach floor in
+ * place costs mobile data on the stack that is attached for IMS; measured on
+ * hardware, ESM-wise the CP simply answers 2253 for whichever APN it has no
+ * context for. If the IMS refusal is ever understood and fixed, this step
+ * should go and the floor with it.
+ */
 typedef enum {
     CONNECT_STEP_PREFERRED_MODEM,
     CONNECT_STEP_DATA_PROFILE,
@@ -2608,6 +2633,21 @@ cid_acquire (MMSitClient  *self,
     return 0;
 }
 
+/*
+ * Drop only this client's APN mapping, leaving the global reservation alone.
+ * For the case where the reservation is held by something that is still using
+ * it: cid_acquire() reuses a cid whose APN matches, so without this the next
+ * attempt asks for the same blocked cid and is refused again, forever.
+ */
+static void
+cid_forget (MMSitClient *self,
+            guint8       cid)
+{
+    if (self->priv->cids &&
+        g_hash_table_remove (self->priv->cids, GUINT_TO_POINTER ((guint) cid)))
+        mm_obj_dbg (self->priv->port, "context id %u given up; it is reserved elsewhere", cid);
+}
+
 static void
 cid_release (MMSitClient *self,
              guint8       cid)
@@ -2664,6 +2704,7 @@ typedef struct {
     gchar         *auth_user;
     gchar         *auth_password;
     guint32        apn_types;
+    guint32        bearers;
     guint          registration_attempts;
     guint          setup_attempts;
     guint          retry_id;
@@ -2691,12 +2732,23 @@ connect_context_free (ConnectContext *ctx)
     /* Every failure path lands here -- cancelled, refused, timed out, retries
      * exhausted -- so releasing the reservation here is the one place that
      * cannot be forgotten. A context that did come up keeps its cid until the
-     * bearer disconnects it. */
+     * bearer disconnects it.
+     *
+     * A SETUP that was sent but never produced an address produced no context
+     * either, so there is nothing for the CP to deactivate: it answers
+     * DEACTIVATE_DATA_CALL with status 2, the cleanup is treated as failed and
+     * the cid is retained "until radio-off". Meanwhile the per-stack table
+     * still maps that cid to the APN, so cid_acquire() hands the same one back
+     * on the next attempt and mm_sit_cp_claim_data() refuses it -- every retry
+     * for the rest of the process fails with "context N is already connected
+     * or awaiting setup/cleanup", which is how one refused data call wedged
+     * Fizz for a whole boot. Only tear down what actually came up. */
     if (!ctx->cid_kept) {
         if (ctx->cp && ctx->unexpected_cid) {
             /* Do not deactivate an unexpected context owned by another stack. */
             mm_obj_warn (ctx->client, "Unexpected DSDS CID; retaining data ownership until radio-off");
-        } else if (ctx->cp && ctx->setup_sent)
+        } else if (ctx->cp && ctx->setup_sent &&
+                   (ctx->call.has_ipv4 || ctx->call.has_ipv6))
             mm_sit_client_disconnect_data (ctx->client, ctx->cid, NULL,
                                            (GAsyncReadyCallback) connect_cleanup_ready,
                                            g_object_ref (ctx->cp));
@@ -2867,6 +2919,11 @@ connect_setup_ready (MMSitClient *self,
 
     ctx->setup_attempts++;
     if (ctx->setup_attempts >= 6) {
+        /* Tell the modem before failing: the attach APN it chose is what
+         * decides whether this PDN could have been created. */
+        if (ctx->call.cause)
+            g_signal_emit (self, signals[SIGNAL_DATA_PDN_REFUSED], 0,
+                           (guint) ctx->call.cause);
         g_task_return_new_error (task, G_IO_ERROR, G_IO_ERROR_FAILED,
                                  "SIT data call returned no address after 6 attempts (cause %u)",
                                  ctx->call.cause);
@@ -2889,7 +2946,7 @@ connect_build_request (MMSitClient   *self,
     case CONNECT_STEP_PREFERRED_MODEM:
         return mm_sit_request_new_set_preferred_modem (mm_sit_client_next_token (control_client (self)), self->priv->stack);
     case CONNECT_STEP_DATA_PROFILE:
-        return mm_sit_request_new_set_data_profile (mm_sit_client_next_token (self), ctx->apn, ctx->pdp, ctx->apn_types, &ctx->auth, error);
+        return mm_sit_request_new_set_data_profile (mm_sit_client_next_token (self), ctx->apn, ctx->pdp, ctx->apn_types, ctx->bearers, &ctx->auth, error);
     case CONNECT_STEP_ATTACH_APN:
         return mm_sit_request_new_set_initial_attach_apn (mm_sit_client_next_token (self), ctx->apn, ctx->pdp, &ctx->auth, error);
     case CONNECT_STEP_CONFIG_0900:
@@ -2943,6 +3000,8 @@ connect_step (GTask *task)
         return;
     }
 
+    /* The IMS context is the attach context; re-pointing it would tear down
+     * the very PDN this connect is for. */
     if (ctx->cp && ctx->step == CONNECT_STEP_ATTACH_APN)
         ctx->step++;
 
@@ -3007,6 +3066,8 @@ mm_sit_client_connect_data (MMSitClient        *self,
     if (self->priv->cp && !mm_sit_cp_claim_data (self->priv->cp, self->priv->stack, cid, &error)) {
         if (!mm_sit_cp_data_reserved (self->priv->cp, cid))
             cid_release (self, cid);
+        else
+            cid_forget (self, cid);
         g_task_return_error (task, error);
         g_object_unref (task);
         return;
@@ -3117,6 +3178,7 @@ typedef struct {
     gchar        *apn;
     MMSitPdpType  pdp;
     guint32       apn_types;
+    guint32       bearers;
     MMSitDataCall call;
 } SetupContext;
 
@@ -3211,6 +3273,8 @@ setup_data_call_ready (MMSitClient  *self,
 
     if (ctx->call.cause) {
         cid_release (self, ctx->cid);
+        g_signal_emit (self, signals[SIGNAL_DATA_PDN_REFUSED], 0,
+                       (guint) ctx->call.cause);
         g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
                                  "data call refused: cause %u", ctx->call.cause);
         g_object_unref (task);
@@ -3228,6 +3292,7 @@ mm_sit_client_setup_data_call (MMSitClient        *self,
                                const gchar        *apn,
                                MMSitPdpType        pdp,
                                guint32             apn_types,
+                               guint32             bearers,
                                GCancellable       *cancellable,
                                GAsyncReadyCallback callback,
                                gpointer            user_data)
@@ -3253,11 +3318,12 @@ mm_sit_client_setup_data_call (MMSitClient        *self,
     ctx->apn = g_strdup (apn);
     ctx->pdp = pdp;
     ctx->apn_types = apn_types;
+    ctx->bearers = bearers;
     g_task_set_task_data (task, ctx, (GDestroyNotify) setup_context_free);
 
     /* Register the profile before asking for the context; see setup_profile_ready. */
     request = mm_sit_request_new_set_data_profile (mm_sit_client_next_token (self), apn, pdp,
-                                                   apn_types, &auth, &error);
+                                                   apn_types, bearers, &auth, &error);
     if (!request) {
         cid_release (self, cid);
         g_task_return_error (task, error);
@@ -3543,6 +3609,7 @@ void
 mm_sit_client_set_initial_attach_apn (MMSitClient        *self,
                                       const gchar        *apn,
                                       MMSitPdpType        pdp,
+                                      guint8              pcscf,
                                       const MMSitApnAuth *auth,
                                       GCancellable       *cancellable,
                                       GAsyncReadyCallback callback,
@@ -3552,7 +3619,7 @@ mm_sit_client_set_initial_attach_apn (MMSitClient        *self,
     g_autoptr(GError)     error = NULL;
 
     request = mm_sit_request_new_set_initial_attach_apn_for_stack (
-        mm_sit_client_next_token (self), self->priv->stack, apn, pdp, auth, &error);
+        mm_sit_client_next_token (self), self->priv->stack, apn, pdp, pcscf, auth, &error);
     if (!request) {
         GTask *task = g_task_new (self, cancellable, callback, user_data);
 
@@ -3577,6 +3644,7 @@ mm_sit_client_set_data_profile (MMSitClient        *self,
                                 const gchar        *apn,
                                 MMSitPdpType        pdp,
                                 guint32             apn_types,
+                                guint32             bearers,
                                 const MMSitApnAuth *auth,
                                 GCancellable       *cancellable,
                                 GAsyncReadyCallback callback,
@@ -3586,7 +3654,7 @@ mm_sit_client_set_data_profile (MMSitClient        *self,
     g_autoptr(GError)     error = NULL;
 
     request = mm_sit_request_new_set_data_profile (mm_sit_client_next_token (self),
-                                                   apn, pdp, apn_types, auth, &error);
+                                                   apn, pdp, apn_types, bearers, auth, &error);
     if (!request) {
         GTask *task = g_task_new (self, cancellable, callback, user_data);
 
@@ -4074,4 +4142,19 @@ mm_sit_client_class_init (MMSitClientClass *klass)
                       G_TYPE_NONE,
                       1,
                       G_TYPE_POINTER);
+
+    /*
+     * A data PDN the CP would not create, with the cause it gave. Whoever owns
+     * the attach APN needs to know, because on this CP the choice of attach
+     * APN is what decides whether a data call can be created at all.
+     */
+    signals[SIGNAL_DATA_PDN_REFUSED] =
+        g_signal_new (MM_SIT_CLIENT_SIGNAL_DATA_PDN_REFUSED,
+                      G_OBJECT_CLASS_TYPE (object_class),
+                      G_SIGNAL_RUN_LAST,
+                      0,
+                      NULL, NULL, NULL,
+                      G_TYPE_NONE,
+                      1,
+                      G_TYPE_UINT);
 }

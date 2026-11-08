@@ -96,7 +96,12 @@ typedef struct {
     gchar   *name;      /* the vendor's label, for logging */
     gchar   *apn;
     guint32  types;     /* MM_SIT_APN_TYPE_* bitmask */
-    guint32  bearers;   /* 1 << (radio tech - 1); 0 means any */
+    guint32  bearers;   /* 1 << (radio tech - 1), Android's framework
+                         * encoding. The CP's SET_DATA_PROFILE field at @0xee
+                         * is bit n instead, so shift left by one for the wire.
+                         * Zero is not "any": it declares a profile valid on no
+                         * radio technology, and the IMS PDN is then refused
+                         * with MATCH_ALL_RULE_NOT_ALLOWED (2253). */
     guint8   protocol;  /* MM_SIT_PDP_TYPE_* */
     guint8   roaming;
 } MMSitApn;

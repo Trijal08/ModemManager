@@ -349,6 +349,14 @@ typedef struct {
  * expects a fresh attach (TS 24.301 5.5.3.2.5). The one cause worth retrying. */
 #define MM_SIT_REJECT_CAUSE_IMPLICITLY_DETACHED 10
 
+/*
+ * The cause SETUP_DATA_CALL comes back with when the CP will not create the
+ * PDN at all: 0x8CD, which Android's DataFailCause calls
+ * MATCH_ALL_RULE_NOT_ALLOWED -- a UE-side URSP decision rather than a network
+ * rejection. This CP answers it for the IMS DNN specifically.
+ */
+#define MM_SIT_REJECT_CAUSE_MATCH_ALL_RULE_NOT_ALLOWED 2253
+
 typedef struct {
     gchar    plmn[7];
     gboolean circuit_switched;
@@ -592,6 +600,7 @@ GByteArray *mm_sit_request_new_set_data_profile       (guint16                to
                                                        const gchar           *apn,
                                                        MMSitPdpType           pdp,
                                                        guint32                apn_types,
+                                                       guint32                bearers,
                                                        const MMSitApnAuth    *auth,
                                                        GError               **error);
 GByteArray *mm_sit_request_new_set_initial_attach_apn (guint16                token,
@@ -639,9 +648,20 @@ GByteArray *mm_sit_request_new_oem_config             (guint16                to
                                                        GError               **error);
 GByteArray *mm_sit_request_new_set_modem_config       (guint16                token);
 GByteArray *mm_sit_request_new_set_modem_config_count (guint16 token, guint8 count);
+/*
+ * What the attach asks the network for at @0xdb. Stock asks for nothing: its CP
+ * grants the IMS PDN on request, so the addresses arrive with that PDN. Ask for
+ * both only where the attach is what creates the IMS context, because a later
+ * SETUP_DATA_CALL for the same DNN returns the parameters the context was
+ * created with -- too late to start asking.
+ */
+#define MM_SIT_PCSCF_REQUEST_NONE 0
+#define MM_SIT_PCSCF_REQUEST_BOTH 3
+
 GByteArray *mm_sit_request_new_set_initial_attach_apn_for_stack
                                                       (guint16 token, guint8 stack,
                                                        const gchar *apn, MMSitPdpType pdp,
+                                                       guint8 pcscf,
                                                        const MMSitApnAuth *auth, GError **error);
 GByteArray *mm_sit_request_new_device_info            (guint16                token,
                                                        const gchar           *model,
