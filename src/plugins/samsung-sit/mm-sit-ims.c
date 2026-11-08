@@ -36,16 +36,31 @@
 /* The fallback when no carrier record names one; see mm_sit_ims_set_apn(). */
 #define IMS_APN "ims"
 
-/* How long to wait before trying again after the CP refuses a step. The CP
- * throttles its own registration attempts (RILC_UNSOL_IMS_THROTTLED_TIME), so
- * being patient here costs nothing and hammering it would be actively wrong. */
+/*
+ * How long to wait before trying again after the CP refuses a step.
+ *
+ * The first delay is short because the common refusal is a transient. Measured
+ * across twelve boots, the first IMS ask is refused on ten of them with cause
+ * 168 returned in 9-61ms -- a local refusal, far too quick to be a network
+ * round trip -- and a later, identical ask is granted. Nothing we send
+ * separates the two: the AP->CP request streams before a granted ask and a
+ * refused one are 98% identical, so this is a condition to recover from rather
+ * than one to predict, and sleeping 30s on it was most of the time VoLTE took
+ * to come up.
+ *
+ * It still backs off to the cap, because a data-only subscription may refuse
+ * the IMS PDN for good and because the CP throttles its own SIP registration
+ * (RILC_UNSOL_IMS_THROTTLED_TIME), which is what the patience here was
+ * originally for. The cooldown below takes over once the attempts run out.
+ */
+#define MM_SIT_IMS_RETRY_FIRST_SECS 2
 #ifndef MM_SIT_IMS_RETRY_TIMEOUT_SECS
 #define MM_SIT_IMS_RETRY_TIMEOUT_SECS 30
 #endif
 
 /* Data-only subscriptions may always refuse the IMS PDN. Bound AP-side
  * provisioning attempts per lifecycle; the CP manages SIP retries itself. */
-#define MAX_PROVISIONING_ATTEMPTS 3
+#define MAX_PROVISIONING_ATTEMPTS 5
 
 /*
  * Floor on how often the whole provisioning sequence may run, and how fast it
@@ -346,11 +361,25 @@ retry_cb (MMSitIms *self)
     return G_SOURCE_REMOVE;
 }
 
+/* See MM_SIT_IMS_RETRY_FIRST_SECS: quick first, then doubling to the cap. */
+static guint
+retry_delay_secs (guint failures)
+{
+    guint secs = MM_SIT_IMS_RETRY_FIRST_SECS;
+
+    while (failures > 1 && secs < MM_SIT_IMS_RETRY_TIMEOUT_SECS) {
+        secs *= 2;
+        failures--;
+    }
+    return MIN (secs, (guint) MM_SIT_IMS_RETRY_TIMEOUT_SECS);
+}
+
 static void
 schedule_retry (MMSitIms    *self,
                 const gchar *what,
                 GError      *error)
 {
+    guint retry_secs;
     clear_retry (self);
     /*
      * Only a refusal counts against the burst. "Serial command timed out" means
@@ -395,9 +424,10 @@ schedule_retry (MMSitIms    *self,
         mm_sit_ims_stop (self);
         return;
     }
+    retry_secs = retry_delay_secs (self->priv->provisioning_failures);
     mm_obj_dbg (self, "IMS %s attempt %u/%u failed (%s); retrying in %us",
                 what, self->priv->provisioning_failures, MAX_PROVISIONING_ATTEMPTS,
-                error ? error->message : "unknown", MM_SIT_IMS_RETRY_TIMEOUT_SECS);
+                error ? error->message : "unknown", retry_secs);
     /*
      * Tell whoever is listening why, so it can change something before the
      * retry. The cause travels in the message because that is where
@@ -412,7 +442,7 @@ schedule_retry (MMSitIms    *self,
             g_signal_emit (self, signals[SIGNAL_PDN_REFUSED], 0, (guint) cause);
     }
     g_clear_error (&error);
-    self->priv->retry_id = g_timeout_add_seconds (MM_SIT_IMS_RETRY_TIMEOUT_SECS,
+    self->priv->retry_id = g_timeout_add_seconds (retry_secs,
                                                   (GSourceFunc) retry_cb, self);
 }
 

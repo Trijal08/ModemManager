@@ -3026,7 +3026,7 @@ ims_retry_wait (guint *counter, guint target)
     guint poll_id, timeout_id;
 
     poll_id = g_timeout_add (10, (GSourceFunc) ims_retry_wait_poll, &wait);
-    timeout_id = g_timeout_add_seconds (8, (GSourceFunc) ims_retry_wait_done, loop);
+    timeout_id = g_timeout_add_seconds (20, (GSourceFunc) ims_retry_wait_done, loop);
     g_main_loop_run (loop);
     if (*counter < target) {
         g_source_remove (poll_id);
@@ -3140,7 +3140,7 @@ test_ims_provisioning_retries (gconstpointer data)
     mm_sit_ims_set_registered (ims, TRUE);
     ims_retry_wait (recover ? &peer.pdn_infos : &peer.stops, 1);
     ims_retry_check_quiet (ims);
-    g_assert_cmpuint (peer.setups, ==, 3);
+    g_assert_cmpuint (peer.setups, ==, recover ? 3 : 5);
     g_assert_cmpuint (peer.pdn_infos, ==, recover ? 1 : 0);
     g_assert_cmpuint (peer.stops, ==, recover ? 0 : 1);
 
@@ -3150,7 +3150,7 @@ test_ims_provisioning_retries (gconstpointer data)
         mm_sit_ims_set_registered (ims, TRUE);
         ims_retry_wait (&peer.stops, 3);
         ims_retry_check_quiet (ims);
-        g_assert_cmpuint (peer.setups, ==, 6);
+        g_assert_cmpuint (peer.setups, ==, 10);
     }
     mm_sit_ims_stop (ims);
     ims_retry_wait (&peer.stops, recover ? 1 : 4);
