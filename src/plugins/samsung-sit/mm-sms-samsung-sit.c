@@ -29,6 +29,7 @@
 #include "mm-broadband-modem-samsung-sit.h"
 #include "mm-iface-modem.h"
 #include "mm-log-object.h"
+#include "mm-sit-ims.h"
 #include "mm-sms-part-3gpp.h"
 #include "mm-sms-samsung-sit.h"
 
@@ -206,19 +207,22 @@ sms_send (MMBaseSms          *self,
 
     ctx = g_slice_new0 (SendContext);
     ctx->client = client;
-    /* IMS carries messages on LTE and 5G; everything older uses the CS group.
-     * The access technology lives on the modem's D-Bus skeleton -- the modem
-     * object itself is not an MmGdbusModem, and casting it to one silently
-     * yielded no technologies at all, so every send guessed the CS group. */
+    /*
+     * Pick the transport on whether IMS is registered, which is what actually
+     * decides whether the IMS group can carry a message -- and is how the
+     * voice interface chooses, so the two now agree.
+     *
+     * This used to infer it from the access technology on the modem's D-Bus
+     * skeleton. That is a cached value, and when the control plane is slow the
+     * polls behind it time out and it reads as no technologies at all, which
+     * silently means "not LTE" and sends over the CS group. Caught doing
+     * exactly that on a registered LTE modem: the CS send was accepted 19
+     * seconds later, long after the messaging app had shown it as failed.
+     */
     {
-        MmGdbusModem *skeleton = NULL;
+        MMSitIms *ims = mm_broadband_modem_samsung_sit_peek_ims (MM_BROADBAND_MODEM_SAMSUNG_SIT (priv->modem));
 
-        g_object_get (priv->modem, MM_IFACE_MODEM_DBUS_SKELETON, &skeleton, NULL);
-        if (skeleton) {
-            ctx->over_ims = !!(mm_gdbus_modem_get_access_technologies (skeleton) &
-                               (MM_MODEM_ACCESS_TECHNOLOGY_LTE | MM_MODEM_ACCESS_TECHNOLOGY_5GNR));
-            g_object_unref (skeleton);
-        }
+        ctx->over_ims = ims && mm_sit_ims_is_registered (ims);
         mm_obj_dbg (self, "sending over %s", ctx->over_ims ? "IMS" : "the CS group");
     }
     ctx->parts = mm_base_sms_get_parts (self);
@@ -226,6 +230,40 @@ sms_send (MMBaseSms          *self,
     g_task_set_task_data (task, ctx, (GDestroyNotify) send_context_free);
 
     send_next_part (task);
+}
+
+/*****************************************************************************/
+
+static gboolean
+sms_delete_finish (MMBaseSms     *self,
+                   GAsyncResult  *res,
+                   GError       **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+/*
+ * Nothing is stored on the modem to delete.
+ *
+ * The CP hands a received message over as an indication, which is answered
+ * with an SMS_ACK and then forgotten -- parts are built with
+ * SMS_PART_INVALID_INDEX because there is no storage index to build them
+ * with, and the modem keeps no copy. The message exists only in our own list,
+ * which the core drops once this returns.
+ *
+ * Without this the core answers every delete with "Deleting SMS is not
+ * supported by this modem", so a received message cannot be dismissed and the
+ * attempt is logged twice per message for as long as it is in the list.
+ */
+static void
+sms_delete (MMBaseSms           *self,
+            GAsyncReadyCallback  callback,
+            gpointer             user_data)
+{
+    GTask *task = g_task_new (self, NULL, callback, user_data);
+
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
 }
 
 /*****************************************************************************/
@@ -270,4 +308,6 @@ mm_sms_samsung_sit_class_init (MMSmsSamsungSitClass *klass)
     object_class->dispose = dispose;
     base_sms_class->send = sms_send;
     base_sms_class->send_finish = sms_send_finish;
+    base_sms_class->delete = sms_delete;
+    base_sms_class->delete_finish = sms_delete_finish;
 }

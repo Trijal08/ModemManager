@@ -315,14 +315,29 @@ call_hangup (MMBaseCall          *_self,
     call_id = call_cp_id (_self);
 
     if (call_is_ims (self)) {
-        /* A call that was never answered is declined rather than hung up, and
-         * the CP is told which of the two it was. */
-        gboolean declined = (mm_base_call_get_state (_self) == MM_CALL_STATE_RINGING_IN);
+        MMCallState state = mm_base_call_get_state (_self);
+        /*
+         * A call that was never answered has to be reported as such, and that
+         * is not only the incoming-and-declined case: an outgoing call the
+         * user gives up on while it is still dialing, or ringing at the far
+         * end, was never answered either.  Reason 0 tells the CP a call ended
+         * normally, and telling it that about a call it never saw answered
+         * stops it registering IMS at all -- see mm_sit_ims_hangup().
+         *
+         * Observed as exactly that: an outgoing call sat in DIALING, the user
+         * hung up, and every dial afterwards died with cause 128 while IMS
+         * still reported itself registered.
+         */
+        gboolean unanswered = (state == MM_CALL_STATE_DIALING ||
+                               state == MM_CALL_STATE_RINGING_OUT ||
+                               state == MM_CALL_STATE_RINGING_IN ||
+                               state == MM_CALL_STATE_WAITING);
 
-        mm_obj_dbg (self, "%s IMS call %u (MM index %u)",
-                    declined ? "declining" : "hanging up", call_id, index);
+        mm_obj_dbg (self, "%s IMS call %u (MM index %u, state %s)",
+                    unanswered ? "releasing unanswered" : "hanging up",
+                    call_id, index, mm_call_state_get_string (state));
         mm_sit_ims_hangup (mm_broadband_modem_samsung_sit_peek_ims (MM_BROADBAND_MODEM_SAMSUNG_SIT (self->priv->modem)),
-                           (guint8) call_id, declined,
+                           (guint8) call_id, unanswered,
                            (GAsyncReadyCallback) ims_simple_ready, task);
         return;
     }
