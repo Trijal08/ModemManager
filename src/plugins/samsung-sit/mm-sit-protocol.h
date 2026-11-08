@@ -619,6 +619,16 @@ GByteArray *mm_sit_request_new_set_data_profile       (guint16                to
                                                        guint32                bearers,
                                                        const MMSitApnAuth    *auth,
                                                        GError               **error);
+/* As above, with the carrier's roaming protocol named separately. Stock sends
+ * it from the carrier database rather than copying the home protocol. */
+GByteArray *mm_sit_request_new_set_data_profile_roaming (guint16          token,
+                                                       const gchar         *apn,
+                                                       MMSitPdpType         pdp,
+                                                       MMSitPdpType         roaming_pdp,
+                                                       guint32              apn_types,
+                                                       guint32              bearers,
+                                                       const MMSitApnAuth  *auth,
+                                                       GError             **error);
 GByteArray *mm_sit_request_new_set_initial_attach_apn (guint16                token,
                                                        const gchar           *apn,
                                                        MMSitPdpType           pdp,

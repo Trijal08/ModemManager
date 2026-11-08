@@ -578,12 +578,14 @@ sequence_step (GTask *task)
             MMSitApnAuth    auth = { 0 };
 
             ctx->apn_sent++;
-            mm_sit_client_set_data_profile (self->priv->client, apn->apn,
-                                            (MMSitPdpType) apn->protocol,
-                                            apn->types, apn->bearers << 1,
-                                            &auth, g_task_get_cancellable (task),
-                                            (GAsyncReadyCallback) profile_ready,
-                                            task);
+            /* The carrier's roaming protocol, not a copy of the home one. */
+            mm_sit_client_set_data_profile_roaming (self->priv->client, apn->apn,
+                                                    (MMSitPdpType) apn->protocol,
+                                                    (MMSitPdpType) apn->roaming,
+                                                    apn->types, apn->bearers << 1,
+                                                    &auth, g_task_get_cancellable (task),
+                                                    (GAsyncReadyCallback) profile_ready,
+                                                    task);
             return;
         }
         ctx->step++;

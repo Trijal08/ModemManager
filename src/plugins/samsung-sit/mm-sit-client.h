@@ -247,6 +247,16 @@ void     mm_sit_client_get_facility_lock        (MMSitClient        *self,
  * AID, fall back to reading EF_DIR, and close the channel. Read-only, and it
  * always closes what it opened. Nothing is reported; it exists for parity.
  */
+/* Read the elementary files stock reads at boot -- the largest volume gap in
+ * the capture. Results are discarded; the traffic is the point. */
+void     mm_sit_client_read_boot_efs                  (MMSitClient        *self,
+                                                       GCancellable       *cancellable,
+                                                       GAsyncReadyCallback callback,
+                                                       gpointer            user_data);
+gboolean mm_sit_client_read_boot_efs_finish           (MMSitClient        *self,
+                                                       GAsyncResult       *res,
+                                                       GError            **error);
+
 void     mm_sit_client_probe_uicc_access_rules        (MMSitClient        *self,
                                                        GCancellable       *cancellable,
                                                        GAsyncReadyCallback callback,
@@ -536,6 +546,17 @@ void     mm_sit_client_set_data_profile        (MMSitClient        *self,
                                                 GCancellable       *cancellable,
                                                 GAsyncReadyCallback callback,
                                                 gpointer            user_data);
+/* The same, with the carrier's roaming protocol named separately. */
+void     mm_sit_client_set_data_profile_roaming   (MMSitClient        *self,
+                                                   const gchar        *apn,
+                                                   MMSitPdpType        pdp,
+                                                   MMSitPdpType        roaming_pdp,
+                                                   guint32             apn_types,
+                                                   guint32             bearers,
+                                                   const MMSitApnAuth *auth,
+                                                   GCancellable       *cancellable,
+                                                   GAsyncReadyCallback callback,
+                                                   gpointer            user_data);
 gboolean mm_sit_client_set_data_profile_finish (MMSitClient        *self,
                                                 GAsyncResult       *res,
                                                 GError            **error);

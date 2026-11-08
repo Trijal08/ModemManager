@@ -540,6 +540,28 @@ mm_sit_request_new_set_data_profile (guint16      token,
 }
 
 GByteArray *
+mm_sit_request_new_set_data_profile_roaming (guint16      token,
+                                             const gchar *apn,
+                                             MMSitPdpType pdp,
+                                             MMSitPdpType roaming_pdp,
+                                             guint32      apn_types,
+                                             guint32      bearers,
+                                             const MMSitApnAuth *auth,
+                                             GError     **error)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitApnAuth ffi;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_set_data_profile_roaming (token, apn, (SamsungSitPdpType) pdp,
+                                                         (SamsungSitPdpType) roaming_pdp,
+                                                         apn_types, bearers,
+                                                         ffi_auth (auth, &ffi), &buffer, &len);
+    return finish_build (status, buffer, len, error);
+}
+
+GByteArray *
 mm_sit_request_new_set_initial_attach_apn (guint16      token,
                                            const gchar *apn,
                                            MMSitPdpType pdp,

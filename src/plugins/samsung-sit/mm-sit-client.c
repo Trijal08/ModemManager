@@ -1115,6 +1115,14 @@ typedef struct {
     /* Transparent: bytes still to read. Records: the next record number. */
     guint        remaining;
     guint        next_record;
+    /*
+     * Stop after this many data passes, 0 meaning the whole file. The parity
+     * pass uses 1: stock issues GET_RESPONSE plus a single read for most files
+     * and reads every record only of the name tables, so reading everything
+     * overshot it -- 31 records of EF_SMS (0x6f3c) and 25 of 0x6f3b where
+     * stock reads none at all.
+     */
+    guint        max_data_passes;
 } ReadEfContext;
 
 static void
@@ -1231,6 +1239,13 @@ read_ef_step (GTask *task)
         sim_io.command = MM_SIT_SIM_IO_GET_RESPONSE;
         sim_io.p3      = 15;
         ready = (GAsyncReadyCallback) read_ef_info_ready;
+    } else if (ctx->max_data_passes && ctx->passes > ctx->max_data_passes) {
+        /* Capped: hand back what came in rather than failing. */
+        g_task_return_pointer (task,
+                               g_byte_array_free_to_bytes (g_steal_pointer (&ctx->data)),
+                               (GDestroyNotify) g_bytes_unref);
+        g_object_unref (task);
+        return;
     } else if (!ctx->remaining) {
         g_task_return_pointer (task,
                                g_byte_array_free_to_bytes (g_steal_pointer (&ctx->data)),
@@ -1273,14 +1288,15 @@ read_ef_step (GTask *task)
     mm_sit_client_command (self, request, 10, g_task_get_cancellable (task), ready, task);
 }
 
-void
-mm_sit_client_read_ef (MMSitClient        *self,
-                       guint16             file_id,
-                       const guint16      *path,
-                       guint               path_len,
-                       GCancellable       *cancellable,
-                       GAsyncReadyCallback callback,
-                       gpointer            user_data)
+static void
+read_ef_capped (MMSitClient        *self,
+                guint16             file_id,
+                const guint16      *path,
+                guint               path_len,
+                guint               max_data_passes,
+                GCancellable       *cancellable,
+                GAsyncReadyCallback callback,
+                gpointer            user_data)
 {
     ReadEfContext *ctx;
     GTask         *task;
@@ -1296,11 +1312,24 @@ mm_sit_client_read_ef (MMSitClient        *self,
     ctx = g_slice_new0 (ReadEfContext);
     ctx->file_id  = file_id;
     ctx->path_len = path_len;
+    ctx->max_data_passes = max_data_passes;
     memcpy (ctx->path, path, path_len * sizeof (guint16));
     ctx->data = g_byte_array_new ();
     g_task_set_task_data (task, ctx, (GDestroyNotify) read_ef_context_free);
 
     read_ef_step (task);
+}
+
+void
+mm_sit_client_read_ef (MMSitClient        *self,
+                       guint16             file_id,
+                       const guint16      *path,
+                       guint               path_len,
+                       GCancellable       *cancellable,
+                       GAsyncReadyCallback callback,
+                       gpointer            user_data)
+{
+    read_ef_capped (self, file_id, path, path_len, 0, cancellable, callback, user_data);
 }
 
 GBytes *
@@ -2416,6 +2445,7 @@ typedef enum {
     BOOT_CONFIG_STEP_SOFTWARE_VERSION,
     BOOT_CONFIG_STEP_OEM_CONFIG,
     BOOT_CONFIG_STEP_MODEM_CONFIG,
+    BOOT_CONFIG_STEP_BOOT_EFS,
     BOOT_CONFIG_STEP_UICC_RULES,
     BOOT_CONFIG_STEP_LAST,
 } BootConfigStep;
@@ -2524,6 +2554,18 @@ boot_config_software_version_ready (MMSitClient  *self,
 static void boot_config_step (GTask *task);
 
 static void
+boot_config_efs_ready (MMSitClient  *self,
+                       GAsyncResult *res,
+                       GTask        *task)
+{
+    BootConfigContext *ctx = g_task_get_task_data (task);
+
+    mm_sit_client_read_boot_efs_finish (self, res, NULL);
+    ctx->step++;
+    boot_config_step (task);
+}
+
+static void
 boot_config_uicc_ready (MMSitClient  *self,
                         GAsyncResult *res,
                         GTask        *task)
@@ -2618,6 +2660,12 @@ boot_config_step (GTask *task)
         request = mm_sit_request_new_set_modem_config_count (
             mm_sit_client_next_token (self), self->priv->cp ? 2 : 1);
         break;
+    case BOOT_CONFIG_STEP_BOOT_EFS:
+        /* See mm_sit_client_read_boot_efs(). Cannot fail the boot. */
+        mm_sit_client_read_boot_efs (self, g_task_get_cancellable (task),
+                                     (GAsyncReadyCallback) boot_config_efs_ready,
+                                     task);
+        return;
     case BOOT_CONFIG_STEP_UICC_RULES:
         /* Stock's carrier-privilege discovery; see
          * mm_sit_client_probe_uicc_access_rules(). It cannot fail the boot. */
@@ -3710,6 +3758,7 @@ mm_sit_client_setup_data_call (MMSitClient        *self,
      *
      * A bearer connect names it as its own first step, so this is only for the
      * paths that do not go through one. A no-op when the CP already knows.
+     *
      */
     if (self->priv->cp)
         mm_sit_cp_prefer_data_stack (self->priv->cp, self->priv->stack);
@@ -4166,6 +4215,117 @@ uicc_probe_step (GTask *task)
                            (GAsyncReadyCallback) uicc_probe_ready, task);
 }
 
+/*
+ * Read the elementary files stock reads at boot.
+ *
+ * The largest single divergence in the whole capture, and the one a filtered
+ * parity score hid: stock issues 121 SIM_IO exchanges on ch 0xf5 and 167 on
+ * 0xf6 before its IMS context, where we issued 27 and 25. Most of the volume is
+ * two files -- EF_OPL (0x6fc6) and EF_PNN (0x6fc5) are read record by record,
+ * 50 and 20-49 times -- and the rest is one GET_RESPONSE plus one read per file
+ * across the standard set.
+ *
+ * mm_sit_client_read_ef() already does the whole shape of a file read, record
+ * loops included, so this is the list and the order: ch 0xf5's sequence first,
+ * then the files only ch 0xf6 touches. A card without one of them answers with
+ * a status word and that file is skipped, so one list serves both stacks.
+ *
+ * Nothing is kept. The files the plugin actually uses are read by the code that
+ * needs them; this exists so the CP sees the traffic it sees on stock.
+ */
+/*
+ * Stock reads each of these once: GET_RESPONSE plus a single read. Only the
+ * operator-name tables are read record by record, which is where the bulk of
+ * its SIM_IO volume comes from (EF_OPL 50 reads, EF_PNN 20-49).
+ *
+ * Reading every record of everything overshot stock badly -- 206 exchanges
+ * against its 121, with 31 records of EF_SMS (0x6f3c) and 25 of 0x6f3b that
+ * stock never reads at all -- so `records` picks the two that want the whole
+ * file and the rest stop after one pass.
+ *
+ * Files the plugin reads for its own purposes are deliberately absent: 0x6f07
+ * (IMSI), 0x6f40 (MSISDN), 0x6f46, 0x6f60, 0x6f61, 0x6f3e, 0x6f3f, 0x6fad and
+ * 0x6fb7 are read by the code that needs them, and listing them here read each
+ * one twice where stock reads it once.
+ */
+typedef struct {
+    guint16  file_id;
+    gboolean records; /* read every record, not just the first pass */
+} BootEf;
+
+static const BootEf boot_ef_files[] = {
+    { 0x2fe2, FALSE }, { 0x6fc9, FALSE }, { 0x6fca, FALSE }, { 0x6f11, FALSE },
+    { 0x6fcb, FALSE }, { 0x6f13, FALSE }, { 0x6fcd, FALSE },
+    { 0x6fc5, TRUE  }, { 0x6fc6, TRUE  },
+    { 0x6f38, FALSE }, { 0x6f16, FALSE }, { 0x6f15, FALSE }, { 0x6f62, FALSE },
+    { 0x6fd9, FALSE }, { 0x6f7b, FALSE }, { 0x6f05, FALSE }, { 0x2f05, FALSE },
+    { 0x6f3c, FALSE }, { 0x6fe5, FALSE }, { 0x6f43, FALSE }, { 0x6fe7, FALSE },
+    { 0x6fc7, FALSE }, { 0x6f14, FALSE }, { 0x6f18, FALSE }, { 0x6f3b, FALSE },
+    { 0x6f02, FALSE }, { 0x6f04, FALSE }, { 0x6f03, FALSE }, { 0x6f09, FALSE },
+};
+
+typedef struct {
+    guint index;
+} BootEfContext;
+
+static void boot_ef_step (GTask *task);
+
+static void
+boot_ef_ready (MMSitClient  *self,
+               GAsyncResult *res,
+               GTask        *task)
+{
+    g_autoptr(GBytes) data = NULL;
+    g_autoptr(GError) error = NULL;
+
+    /* A file this card does not have is not a problem; stock gets refusals
+     * here too. The read itself is the point. */
+    data = mm_sit_client_read_ef_finish (self, res, NULL, &error);
+    boot_ef_step (task);
+}
+
+static void
+boot_ef_step (GTask *task)
+{
+    MMSitClient   *self = g_task_get_source_object (task);
+    BootEfContext *ctx = g_task_get_task_data (task);
+    const BootEf  *ef;
+
+    if (ctx->index >= G_N_ELEMENTS (boot_ef_files)) {
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+    ef = &boot_ef_files[ctx->index++];
+    read_ef_capped (self, ef->file_id, NULL, 0, ef->records ? 0 : 1,
+                    g_task_get_cancellable (task),
+                    (GAsyncReadyCallback) boot_ef_ready, task);
+}
+
+void
+mm_sit_client_read_boot_efs (MMSitClient        *self,
+                             GCancellable       *cancellable,
+                             GAsyncReadyCallback callback,
+                             gpointer            user_data)
+{
+    GTask *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    g_task_set_task_data (task, g_new0 (BootEfContext, 1), g_free);
+    mm_obj_dbg (self->priv->port, "reading the %u elementary files stock reads at boot",
+                (guint) G_N_ELEMENTS (boot_ef_files));
+    boot_ef_step (task);
+}
+
+gboolean
+mm_sit_client_read_boot_efs_finish (MMSitClient  *self,
+                                   GAsyncResult *res,
+                                   GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
 void
 mm_sit_client_probe_uicc_access_rules (MMSitClient        *self,
                                        GCancellable       *cancellable,
@@ -4366,11 +4526,36 @@ mm_sit_client_set_data_profile (MMSitClient        *self,
                                 GAsyncReadyCallback callback,
                                 gpointer            user_data)
 {
+    mm_sit_client_set_data_profile_roaming (self, apn, pdp, pdp, apn_types, bearers,
+                                            auth, cancellable, callback, user_data);
+}
+
+/*
+ * The profile push with the carrier's roaming protocol.
+ *
+ * Stock sends it separately from the home protocol -- frame+0x76, measured on
+ * identical firmware: services.telus.com and sos go out pdp 2 / roaming 3
+ * where copying the home protocol sent 2. `ims.db` has carried the column all
+ * along; the value was simply never passed on.
+ */
+void
+mm_sit_client_set_data_profile_roaming (MMSitClient        *self,
+                                        const gchar        *apn,
+                                        MMSitPdpType        pdp,
+                                        MMSitPdpType        roaming_pdp,
+                                        guint32             apn_types,
+                                        guint32             bearers,
+                                        const MMSitApnAuth *auth,
+                                        GCancellable       *cancellable,
+                                        GAsyncReadyCallback callback,
+                                        gpointer            user_data)
+{
     g_autoptr(GByteArray) request = NULL;
     g_autoptr(GError)     error = NULL;
 
-    request = mm_sit_request_new_set_data_profile (mm_sit_client_next_token (self),
-                                                   apn, pdp, apn_types, bearers, auth, &error);
+    request = mm_sit_request_new_set_data_profile_roaming (mm_sit_client_next_token (self),
+                                                           apn, pdp, roaming_pdp,
+                                                           apn_types, bearers, auth, &error);
     if (!request) {
         GTask *task = g_task_new (self, cancellable, callback, user_data);
 

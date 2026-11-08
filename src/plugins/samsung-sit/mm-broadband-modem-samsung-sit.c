@@ -4076,9 +4076,11 @@ register_next_apn_profile (GTask *task)
     }
 
     apn = g_ptr_array_index (self->priv->boot_apns, self->priv->boot_apn_index);
-    mm_sit_client_set_data_profile (client, apn->apn, (MMSitPdpType) apn->protocol,
-                                    apn->types, apn->bearers << 1, &auth0, NULL,
-                                    (GAsyncReadyCallback) apn_profile_ready, task);
+    /* The carrier's roaming protocol, not a copy of the home one. */
+    mm_sit_client_set_data_profile_roaming (client, apn->apn, (MMSitPdpType) apn->protocol,
+                                            (MMSitPdpType) apn->roaming,
+                                            apn->types, apn->bearers << 1, &auth0, NULL,
+                                            (GAsyncReadyCallback) apn_profile_ready, task);
 }
 
 static void

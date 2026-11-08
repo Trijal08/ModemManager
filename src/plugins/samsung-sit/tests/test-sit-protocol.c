@@ -2422,6 +2422,25 @@ client_boot_config_test_peer (ClientTestContext *ctx)
         MM_SIT_MESSAGE_OEM_CONFIG,
         MM_SIT_MESSAGE_SET_MODEM_CONFIG,
         /*
+         * The elementary-file pass. One GET_RESPONSE each, every one refused
+         * with 6a82 as a card that lacks the file would, so read_ef() gives up
+         * after a single exchange and the count here is the file count. On a
+         * card that has them, every file but the two operator-name tables stops
+         * after one data pass -- reading all records of all of them overshot
+         * stock by 85 exchanges.
+         */
+#define BOOT_EF_FILES 29
+        MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
+        MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
+        MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
+        MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
+        MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
+        MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
+        MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
+        MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
+        MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
+        MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
+        /*
          * The UICC access-control probe that closes the boot batch: three
          * opens by AID that the card refuses, one with no AID that yields a
          * channel, the three EF_DIR reads on it, and the close. Asserting the
@@ -2485,7 +2504,12 @@ client_boot_config_test_peer (ClientTestContext *ctx)
             }
         }
 
-        if (expected_ids[i] == MM_SIT_MESSAGE_OPEN_LOGICAL_CHANNEL) {
+        if (expected_ids[i] == MM_SIT_MESSAGE_SIM_IO) {
+            /* sw1/sw2 at frame+12/13: 6a82, "file not found". */
+            response_len = 16;
+            response[12] = 0x6a;
+            response[13] = 0x82;
+        } else if (expected_ids[i] == MM_SIT_MESSAGE_OPEN_LOGICAL_CHANNEL) {
             /* Channel at frame+12, its SW at +16. The first three opens name
              * an applet this card does not have (6a82); the fourth names none
              * and gets channel 1. */
