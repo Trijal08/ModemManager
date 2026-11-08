@@ -446,3 +446,103 @@ mm_sit_ims_config_get_user_agent (const MMSitImsConfig *self)
     g_return_val_if_fail (self != NULL, NULL);
     return self->user_agent;
 }
+
+/*****************************************************************************/
+/* The carrier's APN list */
+
+static void
+apn_free (MMSitApn *apn)
+{
+    g_free (apn->name);
+    g_free (apn->apn);
+    g_free (apn);
+}
+
+GPtrArray *
+mm_sit_carrier_apns_resolve (const gchar                *database_path,
+                             const MMSitCarrierIdentity *identity,
+                             GError                    **error)
+{
+    static const gchar *sql =
+        "SELECT name, apn, types, bearers, protocol, roaming "
+        "FROM apn WHERE carrier = ?1 ORDER BY seq";
+    sqlite3          *db = NULL;
+    sqlite3_stmt     *statement = NULL;
+    g_autofree gchar *carrier_name = NULL;
+    GPtrArray        *apns;
+    gint64            carrier;
+
+    if (!database_path || !database_path[0]) {
+        g_set_error_literal (error, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                             "no IMS configuration database configured");
+        return NULL;
+    }
+    if (sqlite3_open_v2 (database_path, &db, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK) {
+        g_set_error (error, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                     "could not open the IMS configuration database '%s': %s",
+                     database_path, sqlite3_errmsg (db));
+        sqlite3_close (db);
+        return NULL;
+    }
+
+    /* No default fallback here, unlike the settings: the carrier-neutral layer
+     * has no APNs of its own, and registering another carrier's APNs would be
+     * worse than registering none. */
+    carrier = find_carrier (db, identity, &carrier_name);
+    if (carrier < 0) {
+        sqlite3_close (db);
+        return NULL;
+    }
+
+    if (sqlite3_prepare_v2 (db, sql, -1, &statement, NULL) != SQLITE_OK) {
+        g_set_error (error, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                     "could not read the APN list for '%s': %s",
+                     carrier_name, sqlite3_errmsg (db));
+        sqlite3_close (db);
+        return NULL;
+    }
+    sqlite3_bind_int64 (statement, 1, carrier);
+
+    apns = g_ptr_array_new_with_free_func ((GDestroyNotify) apn_free);
+    while (sqlite3_step (statement) == SQLITE_ROW) {
+        const gchar *name = (const gchar *) sqlite3_column_text (statement, 0);
+        const gchar *apn  = (const gchar *) sqlite3_column_text (statement, 1);
+        MMSitApn    *item;
+
+        if (!apn || !apn[0])
+            continue;
+        item = g_new0 (MMSitApn, 1);
+        item->name     = g_strdup (name);
+        item->apn      = g_strdup (apn);
+        item->types    = (guint32) sqlite3_column_int64 (statement, 2);
+        item->bearers  = (guint32) sqlite3_column_int64 (statement, 3);
+        item->protocol = (guint8) sqlite3_column_int (statement, 4);
+        item->roaming  = (guint8) sqlite3_column_int (statement, 5);
+        g_ptr_array_add (apns, item);
+    }
+    sqlite3_finalize (statement);
+    sqlite3_close (db);
+
+    if (!apns->len) {
+        g_ptr_array_unref (apns);
+        return NULL;
+    }
+    return apns;
+}
+
+const MMSitApn *
+mm_sit_carrier_apns_find (GPtrArray *apns,
+                          guint32    types)
+{
+    guint i;
+
+    if (!apns || !types)
+        return NULL;
+    for (i = 0; i < apns->len; i++) {
+        const MMSitApn *apn = g_ptr_array_index (apns, i);
+
+        if ((apn->types & types) == types)
+            return apn;
+    }
+    return NULL;
+}

@@ -480,6 +480,31 @@ gboolean mm_sit_client_set_initial_attach_apn_finish (MMSitClient        *self,
                                                       GAsyncResult       *res,
                                                       GError            **error);
 
+/*
+ * Register one data profile, without asking for a context.
+ *
+ * The CP will not match a URSP rule for an APN it was never given a profile
+ * for, and refuses the request with MATCH_ALL_RULE_NOT_ALLOWED (2253), so the
+ * carrier's whole list has to be registered before any one context is asked
+ * for. The connect path registers the single profile it is about to use, which
+ * is not enough on a network whose policy forbids the catch-all.
+ *
+ * A profile the CP has no use for is answered with status 2 and nothing else
+ * happens; Android's own list draws the same answer for several entries, so a
+ * rejection here is worth a debug line and no more.
+ */
+void     mm_sit_client_set_data_profile        (MMSitClient        *self,
+                                                const gchar        *apn,
+                                                MMSitPdpType        pdp,
+                                                guint32             apn_types,
+                                                const MMSitApnAuth *auth,
+                                                GCancellable       *cancellable,
+                                                GAsyncReadyCallback callback,
+                                                gpointer            user_data);
+gboolean mm_sit_client_set_data_profile_finish (MMSitClient        *self,
+                                                GAsyncResult       *res,
+                                                GError            **error);
+
 /* 'pdp' is the address family to request; the CP may grant less, and the
  * resulting MMSitDataCall says which families actually came back. */
 void     mm_sit_client_connect_data        (MMSitClient        *self,

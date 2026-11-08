@@ -33,6 +33,7 @@
 /* The APN an IMS context uses. Not configurable yet: every capture and every
  * carrier config seen so far names it "ims", and the day one does not, it will
  * come from the same database the rest of the configuration will. */
+/* The fallback when no carrier record names one; see mm_sit_ims_set_apn(). */
 #define IMS_APN "ims"
 
 /* How long to wait before trying again after the CP refuses a step. The CP
@@ -60,6 +61,9 @@ struct _MMSitImsPrivate {
     /* Where the per-carrier IMS configuration is read from, and which
      * subscription to read out of it. */
     gchar       *ims_database;
+    /* The IMS APN and its address family, from the carrier's APN list. */
+    gchar       *ims_apn;
+    guint8       ims_pdp;
     gchar       *sim_mccmnc;
     gchar       *sim_spn;
     gchar       *sim_imsi;
@@ -382,11 +386,10 @@ sequence_step (GTask *task)
 
     switch (ctx->step) {
     case STEP_PDN:
-        mm_sit_client_setup_data_call (self->priv->client, IMS_APN,
-                                       /* Ask for both families: the network
-                                        * grants what it has, and on this one
-                                        * that is v6 only. */
-                                       MM_SIT_PDP_TYPE_IPV4V6,
+        mm_sit_client_setup_data_call (self->priv->client,
+                                       self->priv->ims_apn ?: IMS_APN,
+                                       self->priv->ims_pdp ? (MMSitPdpType) self->priv->ims_pdp
+                                                           : MM_SIT_PDP_TYPE_IPV4V6,
                                        MM_SIT_APN_TYPE_IMS,
                                        g_task_get_cancellable (task),
                                        (GAsyncReadyCallback) pdn_ready, task);
@@ -1196,6 +1199,24 @@ mm_sit_ims_get_associated_uris (MMSitIms *self)
 }
 
 void
+mm_sit_ims_set_apn (MMSitIms    *self,
+                    const gchar *apn,
+                    guint8       pdp)
+{
+    g_return_if_fail (MM_IS_SIT_IMS (self));
+
+    if (!apn || !apn[0])
+        return;
+    if (g_strcmp0 (self->priv->ims_apn, apn) == 0 && self->priv->ims_pdp == pdp)
+        return;
+
+    g_free (self->priv->ims_apn);
+    self->priv->ims_apn = g_strdup (apn);
+    self->priv->ims_pdp = pdp;
+    mm_obj_dbg (self, "IMS PDN will use the carrier's APN '%s' (pdp %u)", apn, pdp);
+}
+
+void
 mm_sit_ims_stop (MMSitIms *self)
 {
     guint8          *frame = NULL;
@@ -1303,6 +1324,7 @@ finalize (GObject *object)
     g_free (self->priv->software_version);
     g_free (self->priv->operator_code);
     g_free (self->priv->ims_database);
+    g_free (self->priv->ims_apn);
     g_free (self->priv->sim_mccmnc);
     g_free (self->priv->sim_spn);
     g_free (self->priv->sim_imsi);

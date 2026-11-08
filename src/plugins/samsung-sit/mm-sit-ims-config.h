@@ -74,6 +74,46 @@ const gchar *mm_sit_ims_config_get_carrier (const MMSitImsConfig *self);
  * most likely to reject us over, so it belongs in the log. */
 const gchar *mm_sit_ims_config_get_user_agent (const MMSitImsConfig *self);
 
+/*
+ * The carrier's APN list, from the same database and resolved for the same SIM.
+ *
+ * It lives here rather than in a file of its own because resolving *which*
+ * carrier a SIM belongs to is Android's scoring rule over carrier_list, and
+ * that is already implemented here -- duplicating it to keep the file names
+ * tidy would be the worse trade.
+ *
+ * The list is not an IMS detail even though it shares this database: the CP
+ * will not match a URSP rule for an APN it was never given a data profile for,
+ * and answers MATCH_ALL_RULE_NOT_ALLOWED (2253) instead. So the whole list has
+ * to be registered before any one context is asked for, and the entry marked
+ * IA is the APN to attach with. That is what Android does, confirmed on the
+ * wire against this CP.
+ *
+ * Values are already in the CP's own numbering; the database build does the
+ * conversion from CarrierSettings' enums.
+ */
+typedef struct {
+    gchar   *name;      /* the vendor's label, for logging */
+    gchar   *apn;
+    guint32  types;     /* MM_SIT_APN_TYPE_* bitmask */
+    guint32  bearers;   /* 1 << (radio tech - 1); 0 means any */
+    guint8   protocol;  /* MM_SIT_PDP_TYPE_* */
+    guint8   roaming;
+} MMSitApn;
+
+/*
+ * Resolve the list, in the vendor's own order, which is the order it should
+ * reach the CP in. NULL with no error set when the SIM resolves to a carrier
+ * that ships no APNs -- a normal outcome, not a failure.
+ */
+GPtrArray *mm_sit_carrier_apns_resolve (const gchar                *database_path,
+                                        const MMSitCarrierIdentity *identity,
+                                        GError                    **error);
+
+/* The first entry carrying every bit of @types, or NULL. */
+const MMSitApn *mm_sit_carrier_apns_find (GPtrArray *apns,
+                                          guint32    types);
+
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (MMSitImsConfig, mm_sit_ims_config_free)
 
 #endif /* MM_SIT_IMS_CONFIG_H */

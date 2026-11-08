@@ -21,6 +21,7 @@
 #include "mm-sms-part-3gpp.h"
 #include "mm-sms-samsung-sit.h"
 #include "mm-sit-carrier-config.h"
+#include "mm-sit-ims-config.h"
 #include "mm-sit-ims.h"
 #include "mm-sit-cp.h"
 #include "mm-utils.h"
@@ -54,6 +55,15 @@ struct _MMBroadbandModemSamsungSitPrivate {
      * is what load reports, and in turn what the core compares a new request
      * against to decide whether it is a change worth a power cycle. */
     MMBearerProperties *initial_eps_bearer_settings;
+    /* ims.db, cached from the carrier-config mapping at construction: the
+     * pre-radio-on path needs the carrier's APN list from it, and by then the
+     * mapping property is no longer convenient to re-derive. */
+    gchar       *ims_database;
+    /* The carrier's APN list while it is being registered with the CP, one
+     * profile per round trip, before the radio goes on. */
+    GPtrArray   *boot_apns;
+    guint        boot_apn_index;
+
     /* Reach the SIT ports through sit-proxy rather than owning the device
      * nodes, so mm-sit-tool and the IMS helper can share them. Set from
      * ID_MM_SIT_PROXY on the port. */
@@ -1759,6 +1769,7 @@ client_ready:
             ims_database = g_build_filename (directory, "ims.db", NULL);
         }
         self->priv->ims = mm_sit_ims_new (self->priv->client, mm_sit_client_get_stack (self->priv->client), ims_database);
+        self->priv->ims_database = g_strdup (ims_database);
     }
     g_signal_connect_swapped (self->priv->ims, MM_SIT_IMS_SIGNAL_CALLS_CHANGED,
                               G_CALLBACK (ims_calls_changed), self);
@@ -3098,21 +3109,149 @@ power_up_radio (GTask *task)
                                    task);
 }
 
+/*
+ * The carrier's APN list, for the SIM in this modem.
+ *
+ * Resolved here rather than cached from ensure_carrier_config() because that
+ * builds its identity out of SIM properties it does not own, and copying them
+ * to keep them alive buys nothing: this runs once per power-up.
+ */
+static GPtrArray *
+resolve_carrier_apns (MMBroadbandModemSamsungSit *self)
+{
+    g_autoptr(MMBaseSim)  sim = NULL;
+    g_autoptr(GError)     error = NULL;
+    g_autofree gchar     *gid1 = NULL;
+    g_autofree gchar     *gid2 = NULL;
+    MMSitCarrierIdentity  identity = { 0 };
+    GPtrArray            *apns;
+
+    if (!self->priv->ims_database)
+        return NULL;
+
+    g_object_get (self, MM_IFACE_MODEM_SIM, &sim, NULL);
+    if (!sim)
+        return NULL;
+
+    identity.imsi = self->priv->carrier_config_imsi;
+    identity.iccid = mm_gdbus_sim_get_sim_identifier (MM_GDBUS_SIM (sim));
+    identity.mccmnc = mm_gdbus_sim_get_operator_identifier (MM_GDBUS_SIM (sim));
+    identity.spn = mm_gdbus_sim_get_operator_name (MM_GDBUS_SIM (sim));
+    gid1 = variant_to_hex (mm_gdbus_sim_get_gid1 (MM_GDBUS_SIM (sim)));
+    gid2 = variant_to_hex (mm_gdbus_sim_get_gid2 (MM_GDBUS_SIM (sim)));
+    identity.gid1 = gid1;
+    identity.gid2 = gid2;
+
+    apns = mm_sit_carrier_apns_resolve (self->priv->ims_database, &identity, &error);
+    if (!apns)
+        mm_obj_dbg (self, "no carrier APN list for this SIM%s%s",
+                    error ? ": " : "", error ? error->message : "");
+    return apns;
+}
+
+static void apply_attach_apn (GTask *task);
+static void register_next_apn_profile (GTask *task);
+
+static void
+apn_profile_ready (MMSitClient  *client,
+                   GAsyncResult *res,
+                   GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
+    g_autoptr(GError)           error = NULL;
+    const MMSitApn             *apn = NULL;
+
+    if (self->priv->boot_apns && self->priv->boot_apn_index < self->priv->boot_apns->len)
+        apn = g_ptr_array_index (self->priv->boot_apns, self->priv->boot_apn_index);
+
+    /* The CP answers status 2 for a profile it has no use for, and Android's
+     * own list draws that answer for several entries -- DUN, emergency, XCAP.
+     * So this is informational, never a reason to stop. */
+    if (!mm_sit_client_set_data_profile_finish (client, res, &error))
+        mm_obj_dbg (self, "data profile '%s' not taken: %s",
+                    apn ? apn->apn : "?", error->message);
+    else
+        mm_obj_dbg (self, "data profile '%s' registered", apn ? apn->apn : "?");
+
+    self->priv->boot_apn_index++;
+    register_next_apn_profile (task);
+}
+
+/*
+ * Register the carrier's whole APN list with the CP, one profile per round
+ * trip, before the radio goes on.
+ *
+ * The CP will not match a URSP rule for an APN it was never given a profile
+ * for, and refuses the context with MATCH_ALL_RULE_NOT_ALLOWED (2253). The
+ * connect path registers only the profile it is about to use, which is not
+ * enough on a network whose policy forbids the catch-all -- the IMS PDN was
+ * refused for a month on exactly this. Registering the list and then attaching
+ * on the entry marked IA is what Android does, confirmed against this CP on the
+ * wire: profiles, attach APN, then the ims context comes up with its P-CSCF
+ * addresses.
+ */
+static void
+register_next_apn_profile (GTask *task)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
+    MMSitApnAuth                auth0 = { 0 };
+    const MMSitApn             *apn;
+    MMSitClient                *client;
+
+    if (!self->priv->boot_apns || self->priv->boot_apn_index >= self->priv->boot_apns->len) {
+        apply_attach_apn (task);
+        return;
+    }
+    client = mm_broadband_modem_samsung_sit_peek_client (self, NULL);
+    if (!client) {
+        apply_attach_apn (task);
+        return;
+    }
+
+    apn = g_ptr_array_index (self->priv->boot_apns, self->priv->boot_apn_index);
+    mm_sit_client_set_data_profile (client, apn->apn, (MMSitPdpType) apn->protocol,
+                                    apn->types, &auth0, NULL,
+                                    (GAsyncReadyCallback) apn_profile_ready, task);
+}
+
 static void
 attach_apn_from_settings_ready (MMBroadbandModemSamsungSit *self,
                                 GAsyncResult               *res,
                                 GTask                      *task)
 {
-    g_autoptr(MMBearerProperties) properties = NULL;
-    MMSitApnAuth                  auth;
-    g_autoptr(GError)             error = NULL;
-    MMSitClient                  *client;
+    g_autoptr(GError) error = NULL;
 
     if (!mm_broadband_modem_samsung_sit_ensure_carrier_config_finish (self, res, &error)) {
         mm_obj_warn (self, "couldn't provision carrier configuration before radio-on: %s",
                      error->message);
         g_clear_error (&error);
     }
+
+    g_clear_pointer (&self->priv->boot_apns, g_ptr_array_unref);
+    self->priv->boot_apns = resolve_carrier_apns (self);
+    self->priv->boot_apn_index = 0;
+
+    /* The IMS stack takes its PDN's APN from the same list, so it is resolved
+     * once here rather than twice. */
+    if (self->priv->ims) {
+        const MMSitApn *ims = mm_sit_carrier_apns_find (self->priv->boot_apns,
+                                                        MM_SIT_APN_TYPE_IMS);
+
+        if (ims)
+            mm_sit_ims_set_apn (self->priv->ims, ims->apn, ims->protocol);
+    }
+
+    register_next_apn_profile (task);
+}
+
+static void
+apply_attach_apn (GTask *task)
+{
+    MMBroadbandModemSamsungSit   *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
+    g_autoptr(MMBearerProperties) properties = NULL;
+    MMSitApnAuth                  auth;
+    g_autoptr(GError)             error = NULL;
+    MMSitClient                  *client;
 
     /*
      * The CP needs *an* attach APN or it never attaches, and it will not ask the
@@ -3122,12 +3261,23 @@ attach_apn_from_settings_ready (MMBroadbandModemSamsungSit *self,
      * policy.
      */
     if (!self->priv->initial_eps_bearer_settings) {
-        MMSitApnAuth auth0 = { 0 };
+        const MMSitApn *ia = mm_sit_carrier_apns_find (self->priv->boot_apns, MM_SIT_APN_TYPE_IA);
+        MMSitApnAuth    auth0 = { 0 };
 
         client = mm_broadband_modem_samsung_sit_peek_client (self, NULL);
         if (client) {
-            mm_obj_dbg (self, "no initial attach APN configured; letting the network choose");
-            mm_sit_client_set_initial_attach_apn (client, "", MM_SIT_PDP_TYPE_IPV4V6, &auth0, NULL,
+            /* The carrier's own initial-attach APN, the entry its CarrierSettings
+             * marks IA -- 'sp.telus.com' on Telus, which is also its data APN.
+             * A carrier that marks none gets an empty APN, which asks the network
+             * for the subscribed default: that is the right answer for a SIM like
+             * Fizz, whose list has no IA entry at all, and forcing one on it is
+             * what previously cost it its data connection (cause 2253). */
+            mm_obj_dbg (self, "no initial attach APN configured; using the carrier's %s",
+                        ia ? ia->apn : "subscribed default");
+            mm_sit_client_set_initial_attach_apn (client, ia ? ia->apn : "",
+                                                  ia ? (MMSitPdpType) ia->protocol
+                                                     : MM_SIT_PDP_TYPE_IPV4V6,
+                                                  &auth0, NULL,
                                                   (GAsyncReadyCallback) default_attach_apn_ready,
                                                   task);
             return;
@@ -5744,6 +5894,8 @@ dispose (GObject *object)
         g_source_remove (self->priv->search_watchdog_id);
         self->priv->search_watchdog_id = 0;
     }
+    g_clear_pointer (&self->priv->boot_apns, g_ptr_array_unref);
+    g_clear_pointer (&self->priv->ims_database, g_free);
     g_clear_object (&self->priv->initial_eps_bearer_settings);
     g_clear_object (&self->priv->ims);
     if (self->priv->client)

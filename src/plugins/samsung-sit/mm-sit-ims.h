@@ -132,6 +132,17 @@ const gchar *mm_sit_ims_get_associated_uris (MMSitIms *self);
 #define MM_SIT_IMS_MEDIA_CONNECTED 0
 #define MM_SIT_IMS_MEDIA_ENDED     6
 
+/*
+ * The APN the IMS PDN should use, from the carrier's own list -- the entry its
+ * CarrierSettings marks IMS, with that entry's address family. Telus ships
+ * 'ims' as IPv6-only; asking for both families works but describes the context
+ * wrongly. Until this is set the built-in default stands, so a SIM with no
+ * carrier record still gets a sensible attempt.
+ */
+void     mm_sit_ims_set_apn           (MMSitIms    *self,
+                                       const gchar *apn,
+                                       guint8       pdp);
+
 void     mm_sit_ims_set_frame_time    (MMSitIms *self);
 void     mm_sit_ims_set_rtp_threshold (MMSitIms *self);
 
