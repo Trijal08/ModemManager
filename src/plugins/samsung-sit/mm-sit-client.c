@@ -135,6 +135,53 @@ control_client (MMSitClient *self)
     return self->priv->cp ? mm_sit_cp_peek_client (self->priv->cp, 0) : self;
 }
 
+/*
+ * How many commands have to time out in a row before this is reported as the
+ * control plane being gone rather than one slow command.  The modem polls
+ * signal quality and access technology every few seconds, so this is a handful
+ * of seconds of silence.
+ */
+#define SIT_CONTROL_PLANE_ALARM 6
+
+/*
+ * A SIT command timing out is almost never about that command.  The CP's FMT
+ * ring is a single 4 KiB slot, and a frame left in it undrained makes every
+ * later frame unsendable, so one stuck frame silently takes down SMS, PDN
+ * setup and everything else until something clears it.  That failure spent a
+ * long time looking like unrelated SMS flakiness because the only trace of it
+ * was a debug line per command, so say it plainly and point at where the
+ * evidence is.
+ */
+static void
+port_timed_out (MMPort      *port,
+                guint        n_consecutive,
+                MMSitClient *self)
+{
+    if (n_consecutive == SIT_CONTROL_PLANE_ALARM)
+        mm_obj_err (self,
+                    "SIT control plane unresponsive: %u commands in a row timed out; "
+                    "the CP is not draining the FMT ring (look for \"txq full\" in dmesg)",
+                    n_consecutive);
+    else if (n_consecutive > 1)
+        mm_obj_warn (self, "SIT command timed out (%u in a row)", n_consecutive);
+    else
+        mm_obj_warn (self, "SIT command timed out");
+}
+
+/* Take ownership of @port and watch it; the one place the signal is wired. */
+static void
+sit_client_take_port (MMSitClient     *self,
+                      MMPortSerialSit *port)
+{
+    g_clear_object (&self->priv->port);
+    self->priv->port = port;
+    if (!port)
+        return;
+    /* Tied to both objects' lifetimes, so neither dispose has to undo it. */
+    g_signal_connect_object (port, MM_PORT_SIGNAL_TIMED_OUT,
+                             G_CALLBACK (port_timed_out), self, 0);
+}
+
 MMSitClient *
 mm_sit_client_new (const gchar *device)
 {
@@ -146,7 +193,7 @@ mm_sit_client_new (const gchar *device)
     name = g_str_has_prefix (device, "/dev/") ? device + strlen ("/dev/") : device;
     self = g_object_new (MM_TYPE_SIT_CLIENT, NULL);
     self->priv->device = g_strdup (name);
-    self->priv->port = mm_port_serial_sit_new (name);
+    sit_client_take_port (self, mm_port_serial_sit_new (name));
     return self;
 }
 
@@ -196,7 +243,7 @@ mm_sit_client_new_proxy (const gchar *device)
      * transport underneath differs. */
     self->priv->device = g_strdup (name);
     self->priv->proxy_fallback_device = g_strdup (name);
-    self->priv->port = mm_port_serial_sit_new_socket (socket_path);
+    sit_client_take_port (self, mm_port_serial_sit_new_socket (socket_path));
     return self;
 }
 
@@ -209,7 +256,7 @@ mm_sit_client_new_from_port (MMPortSerialSit *port)
 
     self = g_object_new (MM_TYPE_SIT_CLIENT, NULL);
     self->priv->device = g_strdup (mm_port_get_device (MM_PORT (port)));
-    self->priv->port = g_object_ref (port);
+    sit_client_take_port (self, g_object_ref (port));
     return self;
 }
 
@@ -260,8 +307,7 @@ mm_sit_client_open (MMSitClient  *self,
                      inner->message, self->priv->proxy_fallback_device);
 
         node = g_steal_pointer (&self->priv->proxy_fallback_device);
-        g_clear_object (&self->priv->port);
-        self->priv->port = mm_port_serial_sit_new (node);
+        sit_client_take_port (self, mm_port_serial_sit_new (node));
         if (!mm_port_serial_open (MM_PORT_SERIAL (self->priv->port), error))
             return FALSE;
     }

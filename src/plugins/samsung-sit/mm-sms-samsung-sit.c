@@ -50,6 +50,26 @@ typedef struct {
     gboolean     retried;
 } SendContext;
 
+/*
+ * Whether a failed part is worth another try on the same transport.
+ *
+ * A timeout says nothing about the transport: the frame never reached the CP,
+ * because the FMT ring was holding one the CP had not drained.  Switching
+ * transports on that is the wrong answer twice over -- it spends the one retry
+ * on a path we had already decided against, and if the ring then clears, the
+ * message goes out over CS when IMS was correct.  A refusal from the CP is the
+ * opposite: that transport was tried and declined, so the other one is exactly
+ * what to reach for.
+ */
+static gboolean
+send_failure_is_transport_blind (const GError *error)
+{
+    return g_error_matches (error, MM_SERIAL_ERROR, MM_SERIAL_ERROR_RESPONSE_TIMEOUT) ||
+           g_error_matches (error, MM_SERIAL_ERROR, MM_SERIAL_ERROR_SEND_FAILED) ||
+           g_error_matches (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT) ||
+           g_error_matches (error, G_IO_ERROR, G_IO_ERROR_BUSY);
+}
+
 static void
 send_context_free (SendContext *ctx)
 {
@@ -78,14 +98,20 @@ send_part_ready (MMSitClient  *client,
 
     if (!mm_sit_client_send_sms_finish (client, res, &reference, &error)) {
         if (!ctx->retried) {
+            gboolean blind = send_failure_is_transport_blind (error);
+
             /* The CP may not take the transport we guessed from the access
-             * technology; try the other one once before giving up. */
-            mm_obj_dbg (self, "SMS send over %s failed (%s); retrying over %s",
-                        ctx->over_ims ? "IMS" : "the CS group", error->message,
-                        ctx->over_ims ? "the CS group" : "IMS");
+             * technology; try the other one once before giving up -- unless
+             * the frame never got to the CP at all, in which case the
+             * transport was never the question. */
+            mm_obj_warn (self, "SMS send over %s failed (%s); retrying over %s",
+                         ctx->over_ims ? "IMS" : "the CS group", error->message,
+                         blind ? "the same transport"
+                               : (ctx->over_ims ? "the CS group" : "IMS"));
             g_clear_error (&error);
             ctx->retried = TRUE;
-            ctx->over_ims = !ctx->over_ims;
+            if (!blind)
+                ctx->over_ims = !ctx->over_ims;
             send_next_part (task);
             return;
         }
