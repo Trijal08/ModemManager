@@ -55,6 +55,18 @@ typedef struct {
     /* What this configures, for the reader and for the logs. */
     const gchar     *what;
     MMSitBootPhase   phase;
+    /*
+     * How many times stock sends this before its IMS context request, per
+     * stack: [0] on ch 0xf5, [1] on 0xf6. { 0, 0 } means once, so an entry
+     * that does not care need say nothing.
+     *
+     * Only counts identical in all three boot captures are stated. The ones
+     * that vary between them -- 0x0106, 0x0107, 0x0703, 0x0943, 0x0944,
+     * 0x0c20, 0x0c33, 0x0d17, 0x0d3a, 0x0d3b, 0x0d3c, 0x0108, 0x0740 -- have
+     * no single right answer, and pinning one capture's number is exactly how
+     * the replay table this replaced went stale.
+     */
+    guint8           repeat[2];
     MMSitBootSub     sub;
     MMSitBootStacks  stacks;
     guint16          len;
@@ -63,6 +75,9 @@ typedef struct {
 
 /* The whole configuration, in the order it is sent. */
 const MMSitBootRequest *mm_sit_boot_requests (gsize *n_requests);
+
+/* How many times to send this on `stack`. */
+guint mm_sit_boot_request_repeat (const MMSitBootRequest *request, guint stack);
 
 /* True when this request belongs on `stack`. */
 gboolean mm_sit_boot_request_wanted (const MMSitBootRequest *request, guint stack);

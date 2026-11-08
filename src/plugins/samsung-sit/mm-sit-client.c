@@ -1165,7 +1165,18 @@ mm_sit_client_ack_sms_finish (MMSitClient  *self,
 #define SIM_IO_MAX_READ 255
 /* Backstop on a file that claims an implausible number of records; a truncated
  * read is reported rather than passed off as the whole file. */
-#define SIM_IO_MAX_PASSES 32
+/*
+ * Safety bound on record reads of one file, not a record count: the loop stops
+ * when the SIM says there are no records left.
+ *
+ * It was 32, which is fewer records than real files carry. Stock reads 51
+ * records of EF_OPL (0x6fc6) and 50 of EF_PNN (0x6fc5) on the secondary SIM
+ * here -- identical in all three captures, because it is that SIM's record
+ * count -- and we stopped at 32, which this loop treats as an error rather
+ * than a short read. Counting records off the SIM instead of a constant is
+ * also the only form that is right on somebody else's SIM.
+ */
+#define SIM_IO_MAX_PASSES 128
 /* Absolute record addressing, the mode rild uses. */
 #define SIM_IO_RECORD_MODE_ABSOLUTE 4
 
@@ -4495,6 +4506,8 @@ static const BootEf boot_ef_files[] = {
     { 0x6fd9, FALSE }, { 0x6f7b, FALSE }, { 0x6f05, FALSE }, { 0x2f05, FALSE },
     { 0x6f3c, FALSE }, { 0x6fe5, FALSE }, { 0x6f43, FALSE }, { 0x6fe7, FALSE },
     { 0x6fc7, FALSE }, { 0x6f14, FALSE }, { 0x6f18, FALSE }, { 0x6f3b, FALSE },
+    /* Stock reads this twice on both stacks in all three captures. */
+    { 0x6f61, FALSE },
     { 0x6f02, FALSE }, { 0x6f04, FALSE }, { 0x6f03, FALSE }, { 0x6f09, FALSE },
 };
 

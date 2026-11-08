@@ -123,173 +123,206 @@ static const guint8 pre_set_voice_operation[4] = { 0x03, 0x00, 0x00, 0x00 };
 static const guint8 pre_aims_set_frame_time_02[10] = { 0x00, 0x02, 0xcd, 0x04, 0xa9, 0xa8, 0xa1, 0x01, 0x00, 0x00 };
 
 static const MMSitBootRequest boot_requests[] = {
+
+    /*
+     * Queries. r61 dropped fourteen of these on the grounds that a getter
+     * cannot configure anything -- true, and the wrong call: stock sends every
+     * one before its IMS context request, the counts here are identical in all
+     * three boot captures, and leaving them out was seven frames of divergence
+     * per stack for no gain. The responses are still discarded.
+     */
+    { 0x0400, "get imsi",             MM_SIT_BOOT_PHASE_RADIO,
+      { 1, 1 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+    { 0x0403, "get device id",        MM_SIT_BOOT_PHASE_RADIO,
+      { 1, 1 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+    { 0x070c, "get cell info list",   MM_SIT_BOOT_PHASE_RADIO,
+      { 1, 1 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+    { 0x0711, "get ps service",       MM_SIT_BOOT_PHASE_RADIO,
+      { 1, 1 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+    { 0x0718, "get radio capability", MM_SIT_BOOT_PHASE_RADIO,
+      { 4, 4 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+    { 0x0810, "get stack status",     MM_SIT_BOOT_PHASE_RADIO,
+      { 1, 1 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+    { 0x091b, "get voice operation",  MM_SIT_BOOT_PHASE_RADIO,
+      { 1, 1 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+    { 0x0957, "get device service",   MM_SIT_BOOT_PHASE_RADIO,
+      { 1, 1 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+    { 0x0c01, "get lpp supl ecid",    MM_SIT_BOOT_PHASE_RADIO,
+      { 2, 2 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+    /*
+     * Twice on the primary stack and never on the secondary, in all five
+     * captures. We never sent it; it is in no name table.
+     */
+    { 0x0615, "unnamed 0615",         MM_SIT_BOOT_PHASE_RADIO,
+      { 2, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_PRIMARY, 0, NULL },
+
     /*
      * Cell broadcast. The only entry whose payload is built rather than
      * stated, because the channel table above is the thing that is true
      * everywhere; see build_broadcast_sms_config().
      */
     { 0x0106, "cell broadcast channels", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_BUILD, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+      { 0, 0 }, MM_SIT_BOOT_SUB_BUILD, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
 
     /* primary stack only in 5/5 captures */
     { 0x090b, "set debug trace", MM_SIT_BOOT_PHASE_BOOT,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_PRIMARY, 1, cfg_set_debug_trace },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_PRIMARY, 1, cfg_set_debug_trace },
 
     /* primary stack only in 5/5 captures */
     { 0x0404, "send sgc value", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_PRIMARY, 12, cfg_send_sgc_value },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_PRIMARY, 12, cfg_send_sgc_value },
 
     /* GPS lock mode */
     { 0x0c20, "sit set gps lock mode", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 1, cfg_sit_set_gps_lock_mode },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 1, cfg_sit_set_gps_lock_mode },
 
     /* GPS NFW status */
     { 0x0c33, "sit set gps nfw status", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 1, cfg_sit_set_gps_nfw_status },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 1, cfg_sit_set_gps_nfw_status },
 
     /* teletype mode off */
     { 0x0903, "set tty mode", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 4, cfg_set_tty_mode },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 4, cfg_set_tty_mode },
 
     /* not in any name table; payload documented below */
     { 0x0413, "unnamed 0413", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
 
     /* not in any name table */
     { 0x097b, "unnamed 097b", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 13, cfg_unnamed_097b },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 13, cfg_unnamed_097b },
 
     /* not in any name table */
     { 0x097e, "unnamed 097e", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 13, cfg_unnamed_097e },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 13, cfg_unnamed_097e },
 
     /* not in any name table */
     { 0x096d, "unnamed 096d", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 14, cfg_unnamed_096d },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 14, cfg_unnamed_096d },
 
     /* per-RAT signal thresholds; a loop */
     { 0x0943, "set signal report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria },
 
     /* per-RAT signal thresholds; a loop */
     { 0x0943, "set signal report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_02 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_02 },
 
     /* per-RAT signal thresholds; a loop */
     { 0x0943, "set signal report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_03 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_03 },
 
     /* per-RAT signal thresholds; a loop */
     { 0x0943, "set signal report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_04 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_04 },
 
     /* per-RAT signal thresholds; a loop */
     { 0x0943, "set signal report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_05 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_05 },
 
     /* per-RAT signal thresholds; a loop */
     { 0x0943, "set signal report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_06 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_06 },
 
     /* per-RAT signal thresholds; a loop */
     { 0x0943, "set signal report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_07 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_07 },
 
     /* per-RAT signal thresholds; a loop */
     { 0x0943, "set signal report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_08 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_08 },
 
     /* per-RAT signal thresholds; a loop */
     { 0x0943, "set signal report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_09 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_09 },
 
     /* per-RAT signal thresholds; a loop */
     { 0x0943, "set signal report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_10 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_10 },
 
     /* per-RAT link capacity thresholds; a loop */
     { 0x0944, "set link capa report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 178, cfg_set_link_capa_report_criteria },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 178, cfg_set_link_capa_report_criteria },
 
     /* per-RAT link capacity thresholds; a loop */
     { 0x0944, "set link capa report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 178, cfg_set_link_capa_report_criteria_02 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 178, cfg_set_link_capa_report_criteria_02 },
 
     /* per-RAT link capacity thresholds; a loop */
     { 0x0944, "set link capa report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 178, cfg_set_link_capa_report_criteria_03 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 178, cfg_set_link_capa_report_criteria_03 },
 
     /* per-RAT link capacity thresholds; a loop */
     { 0x0944, "set link capa report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 178, cfg_set_link_capa_report_criteria_04 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 178, cfg_set_link_capa_report_criteria_04 },
 
     /* per-RAT link capacity thresholds; a loop */
     { 0x0944, "set link capa report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 178, cfg_set_link_capa_report_criteria_05 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 178, cfg_set_link_capa_report_criteria_05 },
 
     /* turn cell broadcast on */
     { 0x0107, "sms broadcast activation", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 4, cfg_sms_broadcast_activation },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 4, cfg_sms_broadcast_activation },
 
     /* carries the SIM's MCCMNC */
     { 0x090d, "set open carrier info", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_MCCMNC, MM_SIT_BOOT_STACKS_ALL, 10, cfg_set_open_carrier_info },
+      { 0, 0 }, MM_SIT_BOOT_SUB_MCCMNC, MM_SIT_BOOT_STACKS_ALL, 10, cfg_set_open_carrier_info },
 
     /* query; answers {"mode":0} */
     { 0x0761, "get nr mode", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
 
     /* <stack><enabled> */
     { 0x0625, "set mobile data state", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_STACK, MM_SIT_BOOT_STACKS_ALL, 2, cfg_set_mobile_data_state },
+      { 0, 0 }, MM_SIT_BOOT_SUB_STACK, MM_SIT_BOOT_STACKS_ALL, 2, cfg_set_mobile_data_state },
 
     /* primary stack only in 5/5 captures */
     { 0x1307, "unnamed 1307", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_PRIMARY, 0, NULL },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_PRIMARY, 0, NULL },
 
     /* {"allowedPlmnList":[],"barredPlmnList":[...]} */
     { 0x0762, "set nr plmn policy", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 312, cfg_set_nr_plmn_policy },
+      { 4, 4 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 312, cfg_set_nr_plmn_policy },
 
     /* {"mode":0} */
     { 0x0760, "set nr mode", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 11, cfg_set_nr_mode },
+      { 2, 2 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 11, cfg_set_nr_mode },
 
     /* per-RAT signal thresholds; a loop */
     { 0x0943, "set signal report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_11 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_11 },
 
     /* per-RAT signal thresholds; a loop */
     { 0x0943, "set signal report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_12 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_12 },
 
     /* per-RAT signal thresholds; a loop */
     { 0x0943, "set signal report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_13 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_13 },
 
     /* per-RAT signal thresholds; a loop */
     { 0x0943, "set signal report criteria", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_14 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 55, cfg_set_signal_report_criteria_14 },
 
     /* VoNR capability */
     { 0x0954, "set vonr capa", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 4, cfg_set_vonr_capa },
+      { 3, 2 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 4, cfg_set_vonr_capa },
 
     /* query; answers {"sa_mode":N} */
     { 0x0755, "get nr sa mode", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+      { 2, 2 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
 
     /* RAT mask 0x000401f8 */
     { 0x074f, "set allowed network type bitmap", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 4, cfg_set_allowed_network_type_bitmap },
+      { 3, 3 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 4, cfg_set_allowed_network_type_bitmap },
 
     /* both stacks in 5/5 captures */
     { 0x0c14, "sit set gps supl ni ready", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, cfg_sit_set_gps_supl_ni_ready },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, cfg_sit_set_gps_supl_ni_ready },
 
     /* both stacks in 5/5 captures */
     { 0x0605, "set fast dormancy info", MM_SIT_BOOT_PHASE_RADIO,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 4, cfg_set_fast_dormancy_info },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 4, cfg_set_fast_dormancy_info },
 
     /*
      * Everything below is the PRE_PDN block, and it is the one thing here that
@@ -310,19 +343,19 @@ static const MMSitBootRequest boot_requests[] = {
      * is now cheap and worth running.
      */
     { 0x0d39, "aims stack start req", MM_SIT_BOOT_PHASE_PRE_PDN,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_stack_start_req },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_stack_start_req },
     { 0x0d0b, "aims set frame time", MM_SIT_BOOT_PHASE_PRE_PDN,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 10, pre_aims_set_frame_time },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 10, pre_aims_set_frame_time },
     { 0x0d3b, "aims xcapm start req", MM_SIT_BOOT_PHASE_PRE_PDN,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_xcapm_start_req },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_xcapm_start_req },
     { 0x091a, "set voice operation", MM_SIT_BOOT_PHASE_PRE_PDN,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 4, pre_set_voice_operation },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 4, pre_set_voice_operation },
     { 0x0d0b, "aims set frame time", MM_SIT_BOOT_PHASE_PRE_PDN,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 10, pre_aims_set_frame_time_02 },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 10, pre_aims_set_frame_time_02 },
     { 0x0703, "query network selection mode", MM_SIT_BOOT_PHASE_PRE_PDN,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
     { 0x0700, "get voice registration", MM_SIT_BOOT_PHASE_PRE_PDN,
-      MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 0, NULL },
 };
 
 const MMSitBootRequest *
@@ -330,6 +363,15 @@ mm_sit_boot_requests (gsize *n_requests)
 {
     *n_requests = G_N_ELEMENTS (boot_requests);
     return boot_requests;
+}
+
+/* How many times to send this on `stack`; see MMSitBootRequest.repeat. */
+guint
+mm_sit_boot_request_repeat (const MMSitBootRequest *request, guint stack)
+{
+    guint n = request->repeat[stack ? 1 : 0];
+
+    return n ? n : 1;
 }
 
 gboolean

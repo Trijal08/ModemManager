@@ -108,6 +108,8 @@ struct _MMBroadbandModemSamsungSitPrivate {
     guint        boot_apn_index;
     /* Cursor into this stack's parity table for the walk in progress. */
     guint        parity_index;
+    /* Sends of the current row so far; see MMSitBootRequest.repeat. */
+    guint        parity_repeat;
 
     /* Reach the SIT ports through sit-proxy rather than owning the device
      * nodes, so mm-sit-tool and the IMS helper can share them. Set from
@@ -3849,7 +3851,18 @@ parity_ready (MMSitClient  *client,
         mm_obj_dbg (self, "boot config: 0x%04x refused: %s",
                     table[self->priv->parity_index].id, error->message);
 
-    self->priv->parity_index++;
+    /* Stay on this row until it has been sent as often as stock sends it;
+     * see MMSitBootRequest.repeat. */
+    {
+        MMSitClient *c = mm_broadband_modem_samsung_sit_peek_client (self, NULL);
+        guint        want = c ? mm_sit_boot_request_repeat (&table[self->priv->parity_index],
+                                                            mm_sit_client_get_stack (c)) : 1;
+
+        if (++self->priv->parity_repeat >= want) {
+            self->priv->parity_repeat = 0;
+            self->priv->parity_index++;
+        }
+    }
     parity_step (task, phase);
 }
 

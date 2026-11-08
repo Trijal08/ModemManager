@@ -2461,7 +2461,7 @@ client_boot_config_test_peer (ClientTestContext *ctx)
          * after one data pass -- reading all records of all of them overshot
          * stock by 85 exchanges.
          */
-#define BOOT_EF_FILES 29
+#define BOOT_EF_FILES 30
         MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
         MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
         MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
@@ -2471,7 +2471,8 @@ client_boot_config_test_peer (ClientTestContext *ctx)
         MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
         MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
         MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
-        MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
+        /* 0x6f61 EF_PLMNwAcT, which stock reads and we did not. */
+        MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO, MM_SIT_MESSAGE_SIM_IO,
         /*
          * The UICC access-control probe that closes the boot batch: three
          * opens by AID that the card refuses, one with no AID that yields a
@@ -3434,7 +3435,9 @@ test_boot_primary_only_requests (void)
         g_assert_true (mm_sit_boot_request_wanted (&table[i], 0));
         g_assert_false (mm_sit_boot_request_wanted (&table[i], 1));
     }
-    g_assert_cmpuint (primary, ==, 3);
+    /* SEND_SGC_VALUE, SET_DEBUG_TRACE, 0x1307 and 0x0615: all four are sent on
+     * stack 0 only in all five captures. */
+    g_assert_cmpuint (primary, ==, 4);
 
     /* Everything else belongs on both. */
     for (i = 0; i < n_table; i++) {
@@ -3442,6 +3445,42 @@ test_boot_primary_only_requests (void)
             continue;
         g_assert_true (mm_sit_boot_request_wanted (&table[i], 0));
         g_assert_true (mm_sit_boot_request_wanted (&table[i], 1));
+    }
+}
+
+/*
+ * The repeat counts that are stated must be ones stock keeps the same in every
+ * capture. A count copied from a single boot is what made the old replay table
+ * go stale, so this pins the stable set rather than the table's own numbers.
+ */
+static void
+test_boot_repeat_counts (void)
+{
+    static const struct { guint16 id; guint8 f5; guint8 f6; } expect[] = {
+        { 0x0400, 1, 1 }, { 0x0403, 1, 1 }, { 0x070c, 1, 1 }, { 0x0711, 1, 1 },
+        { 0x0718, 4, 4 }, { 0x0810, 1, 1 }, { 0x091b, 1, 1 }, { 0x0957, 1, 1 },
+        { 0x0c01, 2, 2 }, { 0x0615, 2, 0 }, { 0x074f, 3, 3 }, { 0x0755, 2, 2 },
+        { 0x0760, 2, 2 }, { 0x0762, 4, 4 }, { 0x0954, 3, 2 },
+    };
+    const MMSitBootRequest *table;
+    gsize                   n_table = 0, i, j;
+
+    table = mm_sit_boot_requests (&n_table);
+    for (i = 0; i < G_N_ELEMENTS (expect); i++) {
+        gboolean found = FALSE;
+
+        for (j = 0; j < n_table; j++) {
+            if (table[j].id != expect[i].id)
+                continue;
+            found = TRUE;
+            g_assert_cmpuint (mm_sit_boot_request_repeat (&table[j], 0), ==,
+                              expect[i].f5 ? expect[i].f5 : 1);
+            if (table[j].stacks != MM_SIT_BOOT_STACKS_PRIMARY)
+                g_assert_cmpuint (mm_sit_boot_request_repeat (&table[j], 1), ==,
+                                  expect[i].f6 ? expect[i].f6 : 1);
+            break;
+        }
+        g_assert_true (found);
     }
 }
 
@@ -3508,6 +3547,7 @@ main (int argc,
     g_test_add_func ("/MM/sit/carrier-config/reference-database", test_carrier_config_reference_database);
     g_test_add_func ("/MM/sit/boot/cell-broadcast-is-derived", test_boot_cell_broadcast_is_derived);
     g_test_add_func ("/MM/sit/boot/primary-only-requests", test_boot_primary_only_requests);
+    g_test_add_func ("/MM/sit/boot/repeat-counts", test_boot_repeat_counts);
     g_test_add_func ("/MM/sit/boot/requests-are-named", test_boot_requests_are_named);
     g_test_add_func ("/MM/sit/port/command-and-indication", test_port_command_and_indication);
     g_test_add_func ("/MM/sit/port/stale-response", test_port_drops_a_stale_response);
