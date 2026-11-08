@@ -171,6 +171,21 @@ mm_sit_cp_prefer_data_stack (MMSitCp *self, guint stack)
     mm_sit_client_command (self->clients[0], request, 10, NULL, NULL, NULL);
 }
 
+/*
+ * A bearer connect names the preference as its own first step, on its own
+ * client, without coming through here. Record it so the check above is reading
+ * what the CP was actually told: left stale, the next data context would see a
+ * preference it disagreed with and send a redundant switch, which is the flap
+ * this is all here to avoid.
+ */
+void
+mm_sit_cp_note_data_stack (MMSitCp *self, guint stack)
+{
+    if (!self || stack >= 2)
+        return;
+    self->data_pref = (gint) stack;
+}
+
 static void
 prepare_complete (MMSitCp *self, const GError *error)
 {

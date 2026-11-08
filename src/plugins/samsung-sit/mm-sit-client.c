@@ -3186,6 +3186,8 @@ connect_build_request (MMSitClient   *self,
 
     switch (ctx->step) {
     case CONNECT_STEP_PREFERRED_MODEM:
+        /* See mm_sit_cp_note_data_stack(): this is the other sender. */
+        mm_sit_cp_note_data_stack (self->priv->cp, self->priv->stack);
         return mm_sit_request_new_set_preferred_modem (mm_sit_client_next_token (control_client (self)), self->priv->stack);
     case CONNECT_STEP_DATA_PROFILE:
         return mm_sit_request_new_set_data_profile (mm_sit_client_next_token (self), ctx->apn, ctx->pdp, ctx->apn_types, ctx->bearers, &ctx->auth, error);
@@ -3809,18 +3811,26 @@ mm_sit_client_setup_data_call (MMSitClient        *self,
     }
 
     /*
-     * The CP has to know which stack owns the data subscription before it is
-     * asked to create a context. Captured on hardware: with the preference
-     * still unsent, this call was answered cause=0 and empty -- no assigned
-     * address, no P-CSCF -- where the stock stack's answer to a byte-identical
-     * request carries both. The stock stack re-asserts the preference seconds
-     * before its own IMS context, which is what this mirrors.
+     * Name the stack that owns the data subscription -- but only for a context
+     * that carries data. Which SIM mobile data belongs to is a subscription-wide
+     * choice; it is not a property of whatever context happens to be going up,
+     * and an IMS context says nothing about it.
      *
-     * A bearer connect names it as its own first step, so this is only for the
-     * paths that do not go through one. A no-op when the CP already knows.
+     * Asserting it from every setup made the two stacks fight over it. Each
+     * one claimed data for itself on the way to its own IMS context, so a
+     * two-SIM boot sent 0x0740 four times -- 01, 00, 01, 01 -- where stock
+     * sends it twice, 00 then 01, and never again around either of its IMS
+     * contexts. The CP does real work for a switch, and the redundant toggle
+     * away and back cost 2690ms on the critical path to stack 0's IMS request
+     * while stack 1's reply to the same message took 8ms.
      *
+     * This was first added because an IMS context came back cause=0 and empty,
+     * with no address and no P-CSCF, and the unsent preference was the theory.
+     * That turned out to be truncated carrier config and is fixed at its own
+     * root, so the theory this mirrored is gone; what remains is the real rule,
+     * which is stock's. A bearer connect still names it as its own first step.
      */
-    if (self->priv->cp)
+    if (self->priv->cp && (apn_types & MM_SIT_APN_TYPE_DEFAULT))
         mm_sit_cp_prefer_data_stack (self->priv->cp, self->priv->stack);
 
     ctx = g_new0 (SetupContext, 1);
