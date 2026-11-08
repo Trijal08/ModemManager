@@ -315,9 +315,14 @@ call_hangup (MMBaseCall          *_self,
     call_id = call_cp_id (_self);
 
     if (call_is_ims (self)) {
-        mm_obj_dbg (self, "hanging up IMS call %u (MM index %u)", call_id, index);
+        /* A call that was never answered is declined rather than hung up, and
+         * the CP is told which of the two it was. */
+        gboolean declined = (mm_base_call_get_state (_self) == MM_CALL_STATE_RINGING_IN);
+
+        mm_obj_dbg (self, "%s IMS call %u (MM index %u)",
+                    declined ? "declining" : "hanging up", call_id, index);
         mm_sit_ims_hangup (mm_broadband_modem_samsung_sit_peek_ims (MM_BROADBAND_MODEM_SAMSUNG_SIT (self->priv->modem)),
-                           (guint8) call_id,
+                           (guint8) call_id, declined,
                            (GAsyncReadyCallback) ims_simple_ready, task);
         return;
     }

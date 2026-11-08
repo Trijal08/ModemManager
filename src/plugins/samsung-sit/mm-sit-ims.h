@@ -165,6 +165,7 @@ gboolean mm_sit_ims_answer_finish (MMSitIms            *self,
                                    GError             **error);
 void     mm_sit_ims_hangup        (MMSitIms            *self,
                                    guint8               call_id,
+                                   gboolean             declined,
                                    GAsyncReadyCallback  callback,
                                    gpointer             user_data);
 gboolean mm_sit_ims_hangup_finish (MMSitIms            *self,

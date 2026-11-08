@@ -922,6 +922,7 @@ mm_sit_ims_answer_finish (MMSitIms      *self,
 void
 mm_sit_ims_hangup (MMSitIms            *self,
                    guint8               call_id,
+                   gboolean             declined,
                    GAsyncReadyCallback  callback,
                    gpointer             user_data)
 {
@@ -931,10 +932,17 @@ mm_sit_ims_hangup (MMSitIms            *self,
 
     g_return_if_fail (MM_IS_SIT_IMS (self));
 
-    /* Reason 0 is an ordinary local hang-up; the capture uses 2 for declining a
-     * call that is still ringing, which the interface does not distinguish. */
+    /*
+     * Reason 0 is an ordinary local hang-up, and the capture uses 2 for
+     * declining a call that is still ringing. Sending 0 for a decline tells
+     * the CP that a call it never answered ended normally, and it then stops
+     * registering IMS at all: the network keeps accepting calls and routing
+     * them to voicemail without ever paging, and nothing short of a reboot
+     * recovers it -- re-provisioning replays the identical AIMS sequence,
+     * every response succeeds, and the CP still never registers.
+     */
     status = samsung_aims_build_hangup (mm_sit_client_next_token (self->priv->client),
-                                        call_id, 0, &frame, &len);
+                                        call_id, declined ? 2 : 0, &frame, &len);
     send_simple (self, frame, len, status, "hangup", NULL, callback, user_data);
 }
 
