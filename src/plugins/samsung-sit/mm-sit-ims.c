@@ -97,26 +97,6 @@
  */
 #define RAT_GRACE_SECS 60
 
-/*
- * How long the CP needs after the radio comes up before it will grant a PDN
- * that is not the attach PDN.
- *
- * The CP announces its physical-channel configuration
- * (SIT_IND_PHYSICAL_CHANNEL_CONFIG) once the radio has carriers assigned, and
- * it is not ready for a second context the moment that lands. Measured across
- * six revisions and two carriers, with the gap from that first indication to
- * our SETUP_DATA_CALL on the x axis:
- *
- *     266-694ms   10 asks   10x cause 168 (a local refusal, back in 9-61ms)
- *     5065-6647ms  2 asks   2x granted    (stock, on this same firmware)
- *     7550-15066ms 2 asks   2x granted    (ours, once this wait was added)
- *
- * No ask inside 700ms has ever been granted and no ask past 5s has ever been
- * refused, so wait out stock's margin. This is a property of the modem, not of
- * any network: it is keyed to the CP's own indication and to our registration,
- * and no part of it depends on the operator.
- */
-#define PDN_SETTLE_MS 5000
 
 /*
  * How long a provisioned stack is given to register before the PDN is thrown
@@ -202,14 +182,6 @@ struct _MMSitImsPrivate {
     /* The modem's own registration -- the radio being up and settled. Distinct
      * from `registered` below, which is the CP's IMS/SIP registration. */
     gboolean                net_registered;
-    /*
-     * When the radio registered and when the CP first described its physical
-     * channel, plus the pending wake-up that lets PDN_SETTLE_MS pass after the
-     * later of the two before we ask for the IMS PDN.
-     */
-    gint64                  net_registered_us;
-    gint64                  phych_us;
-    guint                   settle_id;
     MMSitVopsSupport        vops_support;
 
     /* The context the CP granted, kept because every later step describes it --
@@ -1543,35 +1515,11 @@ indication_cb (MMSitClient        *client,
     case MM_SIT_MESSAGE_AIMS_CALL_STATUS:
         handle_call_status (self, message);
         break;
-    case MM_SIT_MESSAGE_PHYSICAL_CHANNEL_CONFIG:
-        /* The other mark of the settle window; see PDN_SETTLE_MS. Only the
-         * first one counts -- the CP repeats this throughout the session, and
-         * stock asks 600ms after a later one. */
-        if (!self->priv->phych_us) {
-            self->priv->phych_us = g_get_monotonic_time ();
-            mm_obj_dbg (self, "the CP described its physical channel; "
-                        "IMS may ask for a PDN %u ms from now",
-                        (guint) PDN_SETTLE_MS);
-            mm_sit_ims_reevaluate (self);
-        }
-        break;
     default:
         break;
     }
 }
 
-/*
- * Re-evaluates rather than starting directly: a physical-channel indication
- * that arrives while we are waiting moves the deadline out, and the gate below
- * re-arms this for whatever is left. See PDN_SETTLE_MS.
- */
-static gboolean
-settle_expired (MMSitIms *self)
-{
-    self->priv->settle_id = 0;
-    mm_sit_ims_reevaluate (self);
-    return G_SOURCE_REMOVE;
-}
 
 static gboolean
 rat_grace_expired (MMSitIms *self)
@@ -1631,8 +1579,6 @@ mm_sit_ims_update_access_tech (MMSitIms                *self,
     }
 
     if (possible && self->priv->state == IMS_STATE_STOPPED) {
-        gint64 ready_us;
-
         ensure_device_identity (self);
         if (!self->priv->have_identity) {
             mm_obj_dbg (self, "not starting IMS: no device identity for the User-Agent");
@@ -1648,29 +1594,6 @@ mm_sit_ims_update_access_tech (MMSitIms                *self,
         if (!self->priv->net_registered) {
             mm_obj_dbg (self, "not starting IMS yet: waiting for the radio to register");
             return;
-        }
-        /*
-         * And let the CP settle before asking for a context that is not the
-         * attach context; see PDN_SETTLE_MS. Both marks are first-event marks,
-         * so this cannot starve: if the CP never describes a physical channel,
-         * the registration mark still carries the deadline.
-         */
-        ready_us = MAX (self->priv->net_registered_us, self->priv->phych_us);
-        if (ready_us) {
-            gint64 waited_ms = (g_get_monotonic_time () - ready_us) / 1000;
-
-            if (waited_ms < PDN_SETTLE_MS) {
-                guint remaining = (guint) (PDN_SETTLE_MS - waited_ms);
-
-                if (self->priv->settle_id)
-                    g_source_remove (self->priv->settle_id);
-                mm_obj_dbg (self, "not starting IMS yet: letting the CP settle for %u ms more",
-                            remaining);
-                self->priv->settle_id = g_timeout_add (remaining,
-                                                       (GSourceFunc) settle_expired,
-                                                       self);
-                return;
-            }
         }
         mm_obj_dbg (self, "packet-switched RAT available; starting IMS");
         self->priv->state = IMS_STATE_STARTING;
@@ -1713,9 +1636,6 @@ mm_sit_ims_set_registered (MMSitIms *self,
     if (self->priv->net_registered == !!registered)
         return;
     self->priv->net_registered = !!registered;
-    /* The first mark of the settle window; see PDN_SETTLE_MS. */
-    if (registered && !self->priv->net_registered_us)
-        self->priv->net_registered_us = g_get_monotonic_time ();
 
     if (!registered) {
         /*
@@ -1983,10 +1903,6 @@ dispose (GObject *object)
 
     clear_cooldown (self);
     clear_retry (self);
-    if (self->priv->settle_id) {
-        g_source_remove (self->priv->settle_id);
-        self->priv->settle_id = 0;
-    }
     clear_rat_grace (self);
     if (self->priv->cancellable) {
         g_cancellable_cancel (self->priv->cancellable);

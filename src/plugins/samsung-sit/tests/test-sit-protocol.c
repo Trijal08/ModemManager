@@ -1847,6 +1847,13 @@ client_test_peer (ClientTestContext *ctx)
          * connect sequence.
          */
         MM_SIT_MESSAGE_GET_DATA_REGISTRATION,
+        /*
+         * The rest of the quartet stock issues on every registration check:
+         * its GET_OPERATOR and QUERY_NETWORK_SELECTION_MODE counts track its
+         * GET_DATA_REGISTRATION count across five boots.
+         */
+        MM_SIT_MESSAGE_GET_OPERATOR,
+        MM_SIT_MESSAGE_QUERY_NETWORK_SELECTION_MODE,
         MM_SIT_MESSAGE_SETUP_DATA_CALL,
         MM_SIT_MESSAGE_SET_FAST_DORMANCY_INFO,
     };
@@ -2735,11 +2742,15 @@ registration_camped_peer (ClientTestContext *ctx)
 {
     guint8 registration[86] = { 0 };
     guint8 operator[119] = { 0 };
+    guint8 selection[8] = { 0 };
 
     registration[15] = 14;
     memcpy (&operator[12], "26202#", 6);
     reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_DATA_REGISTRATION, registration, sizeof (registration));
     reply_request (ctx->peer_fd, MM_SIT_MESSAGE_GET_OPERATOR, operator, sizeof (operator));
+    /* The quartet's last member; the check asks but does not read the answer. */
+    reply_request (ctx->peer_fd, MM_SIT_MESSAGE_QUERY_NETWORK_SELECTION_MODE,
+                   selection, sizeof (selection));
     return NULL;
 }
 

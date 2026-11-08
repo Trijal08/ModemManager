@@ -1516,12 +1516,15 @@ mm_sit_client_set_logical_slot_mapping_finish (MMSitClient  *self,
 /* A serving PLMN is also available while camped without registration. Keep the
  * raw registration state: the enable path provisions attachment before core
  * waits for registration, and a roaming subscription must remain roaming. */
+static void get_registration_selection_ready (MMSitClient *self, GAsyncResult *res, GTask *task);
+
 static void
 get_registration_operator_ready (MMSitClient *self,
                                  GAsyncResult *res,
                                  GTask *task)
 {
     g_autoptr(MMSitMessage) response = NULL;
+    g_autoptr(GByteArray)   request = NULL;
     g_autoptr(GError)       error = NULL;
     MMSitRegistration      *registration = g_task_get_task_data (task);
     MMSitRegistration      *result;
@@ -1539,6 +1542,35 @@ get_registration_operator_ready (MMSitClient *self,
         mm_obj_dbg (self->priv->port, "registration check: no operator response (%s); reg state %u",
                     error ? error->message : "parse failed", registration->state);
     }
+
+    /*
+     * And the selection mode, which stock issues as part of the same check --
+     * 16-19 times on ch 0xf5 and 17-25 on 0xf6 across five boots, matching its
+     * other three. We sent it once per boot, which was the single largest
+     * count divergence left in the AP->CP stream.
+     */
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_QUERY_NETWORK_SELECTION_MODE,
+                                        mm_sit_client_next_token (self));
+    mm_sit_client_command (self, request, 5, g_task_get_cancellable (task),
+                           (GAsyncReadyCallback) get_registration_selection_ready,
+                           task);
+}
+
+/* Last of the quartet; its answer is not needed, only the asking. */
+static void
+get_registration_selection_ready (MMSitClient  *self,
+                                  GAsyncResult *res,
+                                  GTask        *task)
+{
+    g_autoptr(MMSitMessage)  response = NULL;
+    g_autoptr(GError)        error = NULL;
+    MMSitRegistration       *registration = g_task_get_task_data (task);
+    MMSitRegistration       *result;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (!response)
+        mm_obj_dbg (self->priv->port, "registration check: no selection mode (%s)",
+                    error->message);
 
     result = g_new (MMSitRegistration, 1);
     *result = *registration;
@@ -1565,12 +1597,13 @@ get_registration_ready (MMSitClient *self,
         return;
     }
 
-    if (registration->registered) {
-        g_task_return_pointer (task, registration, g_free);
-        g_object_unref (task);
-        return;
-    }
-
+    /*
+     * Stock queries the operator on every registration check, not only when
+     * the CP says it is not registered: across five boots on this baseband its
+     * GET_OPERATOR count tracks its GET_DATA_REGISTRATION count almost exactly
+     * (16-19 against 15-18 on ch 0xf5). Ours ran only on the unregistered
+     * path, so it fell behind.
+     */
     g_task_set_task_data (task, registration, g_free);
     request = mm_sit_request_new_query (MM_SIT_MESSAGE_GET_OPERATOR,
                                         mm_sit_client_next_token (self));
