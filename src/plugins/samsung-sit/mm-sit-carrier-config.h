@@ -5,6 +5,9 @@
 #define MM_SIT_CARRIER_CONFIG_H
 
 #include <gio/gio.h>
+#include <string.h>
+
+#include <samsung_sit_ffi.h>
 
 typedef struct {
     const gchar *imsi;

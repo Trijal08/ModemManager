@@ -45,6 +45,10 @@ plugins_test_udev_rules_dir_c_args = []
 plugins_test_keyfile_c_args = []
 
 if enable_tests and plugins_options['samsung-sit']
+  # Test-only: the suite builds its own stand-in for the vendor's databases, and
+  # writing one needs SQLite even though reading them is the Rust library's job.
+  # Nothing that ships links it.
+  samsung_sit_test_sqlite3_dep = dependency('sqlite3', required: true)
   samsung_sit_protocol_test = executable(
     'test-samsung-sit-protocol',
     sources: files(
@@ -59,7 +63,9 @@ if enable_tests and plugins_options['samsung-sit']
       'samsung-sit/tests/test-sit-protocol.c',
     ),
     include_directories: [top_inc, src_inc, include_directories('samsung-sit')],
-    dependencies: [libhelpers_dep, libport_dep, sqlite3_dep, samsung_sit_ffi_dep],
+    dependencies: [
+      libhelpers_dep, libport_dep, samsung_sit_ffi_dep, samsung_sit_test_sqlite3_dep,
+    ],
     c_args: ['-DMM_SIT_IMS_RETRY_TIMEOUT_SECS=1',
              '-DPROVISIONING_COOLDOWN_SECS=1'],
   )
@@ -1000,12 +1006,8 @@ if plugins_options['samsung-sit']
     },
   }}
 
-  # The common plugin build loop consumes one dependency list for all enabled
-  # modules. With --as-needed, SQLite is retained only by samsung-sit.
-  plugins_deps += sqlite3_dep
   plugins_deps += samsung_sit_ffi_dep
   if enable_builtin_plugins
-    deps += sqlite3_dep
     deps += samsung_sit_ffi_dep
   endif
 endif
