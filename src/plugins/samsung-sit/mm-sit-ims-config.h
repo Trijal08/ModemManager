@@ -92,6 +92,11 @@ const gchar *mm_sit_ims_config_get_carrier (const MMSitImsConfig *self);
  * most likely to reject us over, so it belongs in the log. */
 const gchar *mm_sit_ims_config_get_user_agent (const MMSitImsConfig *self);
 
+/* The emergency location's presence URI and ISO country, for
+ * SET_GEO_LOCATION_INFO. Either may be empty. Owned by `self`. */
+const gchar *mm_sit_ims_config_get_geo_entity  (const MMSitImsConfig *self);
+const gchar *mm_sit_ims_config_get_geo_country (const MMSitImsConfig *self);
+
 /*
  * The carrier's APN list, from the same database and resolved for the same SIM.
  *

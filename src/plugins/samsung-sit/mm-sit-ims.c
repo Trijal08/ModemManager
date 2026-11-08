@@ -474,6 +474,7 @@ typedef enum {
     STEP_PDN,
     STEP_REASSERT_FILTER,
     STEP_HIDDEN_MENU,
+    STEP_GEO_LOCATION,
     STEP_ADD_PDN_INFO,
     STEP_DONE,
 } Step;
@@ -865,6 +866,31 @@ sequence_step (GTask *task)
         send_frame (task, mframe, mlen, "pushing configuration");
         ctx->menu_sent++;
         return;
+    }
+
+    case STEP_GEO_LOCATION: {
+        /*
+         * The emergency location, which stock sends once per stack in this
+         * same window. It is a country and a device UUID, no position: it is
+         * what lets the network route an emergency call before any fix
+         * exists, which is why it goes out at registration rather than when
+         * a call is placed.
+         *
+         * A SIM that gave no IMSI, or an MCC with no country in the table,
+         * yields nothing to publish and the step is skipped rather than
+         * sending a document with a wrong or empty subject.
+         */
+        const gchar *entity = mm_sit_ims_config_get_geo_entity (ctx->config);
+        const gchar *country = mm_sit_ims_config_get_geo_country (ctx->config);
+
+        if (!entity || !entity[0]) {
+            ctx->step++;
+            sequence_step (task);
+            return;
+        }
+        status = samsung_aims_build_geo_location_info (mm_sit_client_next_token (self->priv->client),
+                                                       entity, country ?: "", &frame, &len);
+        break;
     }
 
     case STEP_ADD_PDN_INFO: {

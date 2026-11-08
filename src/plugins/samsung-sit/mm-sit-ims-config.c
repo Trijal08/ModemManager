@@ -129,6 +129,20 @@ mm_sit_ims_config_get_user_agent (const MMSitImsConfig *self)
     return samsung_ims_config_user_agent (self->handle);
 }
 
+const gchar *
+mm_sit_ims_config_get_geo_entity (const MMSitImsConfig *self)
+{
+    g_return_val_if_fail (self != NULL, NULL);
+    return samsung_ims_config_geo_entity (self->handle);
+}
+
+const gchar *
+mm_sit_ims_config_get_geo_country (const MMSitImsConfig *self)
+{
+    g_return_val_if_fail (self != NULL, NULL);
+    return samsung_ims_config_geo_country (self->handle);
+}
+
 static void
 apn_free (MMSitApn *apn)
 {
