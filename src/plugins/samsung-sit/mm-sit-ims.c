@@ -125,21 +125,33 @@
  * The CP registers within about 15 s of provisioning when it is going to at
  * all -- measured 14 s and 17 s on the boots that worked. What it cannot do is
  * register against a P-CSCF set the network will not answer on, and which set
- * arrives is the network's choice per establishment: on this device the pool
- * at 2001:568:fff2:300 has registered every time it appeared and the one at
- * 2001:568:ffff:3002 has never registered once, across eight captures.
+ * arrives is the network's choice per establishment.
  *
- * Nothing AP-side chooses that, and hardcoding a pool would be wrong anywhere
- * but here. What is portable is the observation: provisioned, and still not
- * registered long after the CP would have been. So tear the context down and
- * ask again -- a fresh establishment draws a fresh set. Carrier-neutral by
- * construction, because the condition is "did SIP registration happen", not
- * "which addresses came back".
+ * This was written for a theory that is now dead. It said the pool at
+ * 2001:568:fff2:300 registered every time and 2001:568:ffff:3002 never did, so
+ * a fresh establishment was worth it to draw a fresh set. Both halves are
+ * false: with requests pipelined, Telus registered on ffff:3002 twice, and on
+ * 2026-11-06 Fizz was granted the *same* P-CSCF three times and registered on
+ * the third. A fresh set of addresses is not what fixes this.
  *
- * Re-provisioning goes through mm_sit_ims_stop(), so the monotonic floor still
- * governs how often this can happen.
+ * What is left is narrower and still worth having: provisioned, and still not
+ * registered long after the CP would have been, is a state to get out of. But
+ * it is not a *provisioning* failure -- the PDN was granted -- so it must not
+ * grow the provisioning floor. On 2026-11-06 it did, and the two teardowns
+ * doubled the floor to ~240s, which is where 251s of Fizz's 6.9-minute
+ * registration went:
+ *
+ *      36s  provisioned        watchdog 81s   -> stop
+ *     110s  provisioned        watchdog 155s  -> stop, floor now ~240s
+ *     406s  provisioned        registered 413s
+ *
+ * So the restart no longer feeds the floor, and the period is set well clear
+ * of how long the CP actually takes: stock registers 23-44s after its own
+ * establishment across five captures, and 45s left one second of margin over
+ * its slowest. A CP merely slower than stock's worst case was being torn down
+ * mid-registration.
  */
-#define REGISTRATION_WATCHDOG_SECS 45
+#define REGISTRATION_WATCHDOG_SECS 180
 
 typedef enum {
     IMS_STATE_STOPPED,
@@ -221,6 +233,9 @@ struct _MMSitImsPrivate {
      * outlives the stop/start cycles that clear provisioning_failures. */
     gint64        last_start_us;
     guint         cooldown_secs;
+    /* Set when the next start comes from the registration watchdog rather than
+     * from a provisioning failure; see REGISTRATION_WATCHDOG_SECS. */
+    gboolean      after_registration_timeout;
     guint         cooldown_id;
     /* Armed when provisioning completes, disarmed by registration; see
      * REGISTRATION_WATCHDOG_SECS. */
@@ -664,6 +679,9 @@ registration_watchdog_cb (MMSitIms *self)
     mm_obj_info (self, "IMS provisioned %us ago and still not registered; "
                  "discarding the context and asking for a new one",
                  REGISTRATION_WATCHDOG_SECS);
+    /* Not a provisioning failure: the PDN was granted. The watchdog's own
+     * period already rate-limits this, so leave the floor where it is. */
+    self->priv->after_registration_timeout = TRUE;
     mm_sit_ims_stop (self);
     return G_SOURCE_REMOVE;
 }
@@ -982,9 +1000,13 @@ start_sequence (MMSitIms *self)
     clear_retry (self);
     clear_cooldown (self);
     self->priv->last_start_us = g_get_monotonic_time ();
-    self->priv->cooldown_secs = self->priv->cooldown_secs
-        ? MIN (self->priv->cooldown_secs * 2, PROVISIONING_COOLDOWN_MAX_SECS)
-        : PROVISIONING_COOLDOWN_SECS;
+    if (self->priv->after_registration_timeout) {
+        self->priv->after_registration_timeout = FALSE;
+    } else {
+        self->priv->cooldown_secs = self->priv->cooldown_secs
+            ? MIN (self->priv->cooldown_secs * 2, PROVISIONING_COOLDOWN_MAX_SECS)
+            : PROVISIONING_COOLDOWN_SECS;
+    }
 
     ctx = g_new0 (SequenceContext, 1);
     {
