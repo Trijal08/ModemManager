@@ -75,6 +75,10 @@ struct _MMBroadbandModemSamsungSitPrivate {
      * change while the CP is up, and three loaders want it. */
     MMSitNetworkGenerations  radio_capability;
     gboolean                 radio_capability_valid;
+    /* Watchdog for a CP that took the radio-on but never started searching,
+     * and how many radio cycles it has spent trying to shake it loose. */
+    guint        search_watchdog_id;
+    guint        search_retries;
 };
 
 typedef struct {
@@ -2874,6 +2878,9 @@ modem_set_power_finish (MMIfaceModem  *self,
 }
 
 static void power_up_radio (GTask *task);
+static void power_up_boot_config_ready (MMSitClient  *client,
+                                        GAsyncResult *res,
+                                        GTask        *task);
 
 static void
 default_attach_apn_ready (MMSitClient  *client,
@@ -2903,6 +2910,175 @@ modem_set_power_ready (MMSitClient *client,
     g_object_unref (task);
 }
 
+/* The CP refuses the radio-on until its own init finishes; retry the chain
+ * until it accepts. Never through OFF: taking the radio down inside that
+ * window leaves the CP not searching at all, and it does not recover. */
+#define POWER_UP_RETRY_ATTEMPTS 5
+#define POWER_UP_RETRY_SECS     3
+
+/*
+ * A CP that comes up with the AP already talking to it takes the radio-on
+ * (status 0) and then does nothing with it: GET_DATA_REGISTRATION reads
+ * state 0 with rat 0 -- not even a radio technology, so it is not searching.
+ * It stays that way indefinitely; only a radio cycle once its own init is
+ * done makes it camp (rat 14, then a serving PLMN a few seconds later).
+ * That cycle is safe here and only here: it happens a good while after the
+ * power-up, not inside the startup window where an OFF wedges the CP.
+ */
+#define SEARCH_WATCHDOG_SECS    20
+#define SEARCH_WATCHDOG_RETRIES 2
+
+static void power_up_chain_start (GTask *task);
+static void arm_search_watchdog  (MMBroadbandModemSamsungSit *self);
+
+static void
+search_watchdog_radio_off_ready (MMSitClient  *client,
+                                 GAsyncResult *res,
+                                 GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self;
+    g_autoptr(GError)           error = NULL;
+
+    self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
+    if (!mm_sit_client_set_radio_state_finish (client, res, &error))
+        mm_obj_dbg (self, "couldn't take the radio down before re-sending the bring-up: %s",
+                    error->message);
+    power_up_chain_start (task);
+}
+
+static void
+search_watchdog_registration_ready (MMSitClient                *client,
+                                    GAsyncResult               *res,
+                                    MMBroadbandModemSamsungSit *self)
+{
+    MMSitRegistration  registration = { 0 };
+    g_autoptr(GError)  error = NULL;
+    GTask             *task;
+
+    if (!mm_sit_client_get_registration_finish (client, res, &registration, &error)) {
+        mm_obj_dbg (self, "couldn't check whether the CP is searching: %s", error->message);
+        goto out;
+    }
+    /* Anything but "no radio technology at all" means the CP is doing
+     * something; leave it alone and let registration take its time. */
+    if (registration.registered || registration.radio_technology) {
+        mm_obj_dbg (self, "CP is searching (rat %u); no radio cycle needed",
+                    registration.radio_technology);
+        self->priv->search_retries = 0;
+        goto out;
+    }
+
+    self->priv->search_retries++;
+    mm_obj_msg (self, "CP took the radio-on but never started searching; cycling the radio (%u/%u)",
+                self->priv->search_retries, SEARCH_WATCHDOG_RETRIES);
+    task = g_task_new (self, NULL, NULL, NULL);
+    mm_sit_client_set_radio_state (client, MM_SIT_RADIO_STATE_OFF, NULL,
+                                   (GAsyncReadyCallback) search_watchdog_radio_off_ready,
+                                   task);
+
+out:
+    g_object_unref (self);
+}
+
+static gboolean
+search_watchdog_expired (MMBroadbandModemSamsungSit *self)
+{
+    MMSitClient *client;
+
+    self->priv->search_watchdog_id = 0;
+    client = mm_broadband_modem_samsung_sit_peek_client (self, NULL);
+    if (!client)
+        return G_SOURCE_REMOVE;
+
+    mm_sit_client_get_registration (client, NULL,
+                                    (GAsyncReadyCallback) search_watchdog_registration_ready,
+                                    g_object_ref (self));
+    return G_SOURCE_REMOVE;
+}
+
+static void
+arm_search_watchdog (MMBroadbandModemSamsungSit *self)
+{
+    if (self->priv->search_watchdog_id)
+        g_source_remove (self->priv->search_watchdog_id);
+    if (self->priv->search_retries >= SEARCH_WATCHDOG_RETRIES) {
+        self->priv->search_watchdog_id = 0;
+        return;
+    }
+    self->priv->search_watchdog_id = g_timeout_add_seconds (SEARCH_WATCHDOG_SECS,
+                                                            (GSourceFunc) search_watchdog_expired,
+                                                            self);
+}
+
+/*
+ * A CP that is still coming up refuses SET_RADIO_POWER and keeps reporting the
+ * radio as already "on", so the bring-up chain above runs against a CP that
+ * took none of it: it attaches with no APN and every SETUP_DATA_CALL then fails
+ * with cause 133.  A refusal leaves the state untrusted (see mm-sit-client.c),
+ * which is the signal to re-send the whole chain a moment later.
+ */
+static gboolean
+power_up_retry_chain (GTask *task)
+{
+    power_up_chain_start (task);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+modem_power_up_ready (MMSitClient  *client,
+                      GAsyncResult *res,
+                      GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self;
+    GError                     *error = NULL;
+    guint                       attempts;
+
+    if (!mm_sit_client_set_radio_state_finish (client, res, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
+    attempts = GPOINTER_TO_UINT (g_task_get_task_data (task));
+    if (!mm_sit_client_radio_state_trusted (client) &&
+        attempts + 1 < POWER_UP_RETRY_ATTEMPTS) {
+        g_task_set_task_data (task, GUINT_TO_POINTER (attempts + 1), NULL);
+        mm_obj_dbg (self, "CP refused the radio-on; re-sending the bring-up in %us (attempt %u)",
+                    POWER_UP_RETRY_SECS, attempts + 2);
+        g_timeout_add_seconds (POWER_UP_RETRY_SECS, (GSourceFunc) power_up_retry_chain, task);
+        return;
+    }
+
+    if (!mm_sit_client_radio_state_trusted (client)) {
+        mm_obj_warn (self, "CP kept refusing the radio-on; taking its reported state at face value");
+        mm_sit_client_assume_radio_state (client);
+    }
+
+    arm_search_watchdog (self);
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+power_up_chain_start (GTask *task)
+{
+    MMBroadbandModemSamsungSit *self;
+    MMSitClient                *client;
+    GError                     *error = NULL;
+
+    self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_send_boot_config (client, NULL,
+                                    (GAsyncReadyCallback) power_up_boot_config_ready,
+                                    task);
+}
+
 static void
 power_up_radio (GTask *task)
 {
@@ -2918,7 +3094,7 @@ power_up_radio (GTask *task)
         return;
     }
     mm_sit_client_set_radio_state (client, MM_SIT_RADIO_STATE_ON, NULL,
-                                   (GAsyncReadyCallback) modem_set_power_ready,
+                                   (GAsyncReadyCallback) modem_power_up_ready,
                                    task);
 }
 
@@ -2932,9 +3108,11 @@ attach_apn_from_settings_ready (MMBroadbandModemSamsungSit *self,
     g_autoptr(GError)             error = NULL;
     MMSitClient                  *client;
 
-    if (!mm_broadband_modem_samsung_sit_ensure_carrier_config_finish (self, res, &error))
+    if (!mm_broadband_modem_samsung_sit_ensure_carrier_config_finish (self, res, &error)) {
         mm_obj_warn (self, "couldn't provision carrier configuration before radio-on: %s",
                      error->message);
+        g_clear_error (&error);
+    }
 
     /*
      * The CP needs *an* attach APN or it never attaches, and it will not ask the
@@ -3026,9 +3204,7 @@ modem_set_power (MMIfaceModem        *iface,
      * and carrier manifest (radio reports "on" but never searches), so
      * mirror the downstream bring-up order before requesting the radio. */
     if (state == MM_SIT_RADIO_STATE_ON) {
-        mm_sit_client_send_boot_config (client, NULL,
-                                        (GAsyncReadyCallback) power_up_boot_config_ready,
-                                        task);
+        power_up_chain_start (task);
         return;
     }
     mm_sit_client_set_radio_state (client, state, NULL,
@@ -5563,6 +5739,10 @@ dispose (GObject *object)
     if (self->priv->reject_retry_id) {
         g_source_remove (self->priv->reject_retry_id);
         self->priv->reject_retry_id = 0;
+    }
+    if (self->priv->search_watchdog_id) {
+        g_source_remove (self->priv->search_watchdog_id);
+        self->priv->search_watchdog_id = 0;
     }
     g_clear_object (&self->priv->initial_eps_bearer_settings);
     g_clear_object (&self->priv->ims);

@@ -2203,6 +2203,48 @@ client_radio_test_peer (ClientTestContext *ctx)
     return NULL;
 }
 
+/* Same exchange, but the CP refuses the SET (12-byte reply, status 2 at @10)
+ * and still reports the target state -- a fresh, parked CP. */
+static gpointer
+client_radio_refused_test_peer (ClientTestContext *ctx)
+{
+    static const guint16 expected_ids[] = {
+        MM_SIT_MESSAGE_SET_RADIO_POWER,
+        MM_SIT_MESSAGE_GET_RADIO_POWER,
+    };
+    guint i;
+
+    for (i = 0; i < G_N_ELEMENTS (expected_ids); i++) {
+        guint8  header[MM_SIT_HEADER_SIZE];
+        guint8  response[16] = { 0 };
+        guint16 request_len;
+        guint16 response_len;
+
+        g_assert_true (read_all (ctx->peer_fd, header, sizeof (header)));
+        request_len = header[4] | (((guint16) header[5]) << 8);
+        g_assert_cmpuint (header[2] | (((guint16) header[3]) << 8), ==, expected_ids[i]);
+        if (request_len > MM_SIT_HEADER_SIZE) {
+            g_autofree guint8 *body = g_malloc (request_len - MM_SIT_HEADER_SIZE);
+
+            g_assert_true (read_all (ctx->peer_fd, body, request_len - MM_SIT_HEADER_SIZE));
+        }
+
+        response_len = (expected_ids[i] == MM_SIT_MESSAGE_GET_RADIO_POWER) ? 16 : 12;
+        response[0] = MM_SIT_MESSAGE_TYPE_RESPONSE;
+        response[2] = header[2];
+        response[3] = header[3];
+        response[4] = response_len;
+        response[6] = header[6];
+        response[7] = header[7];
+        if (response_len == 16)
+            response[12] = MM_SIT_RADIO_STATE_ON;
+        else
+            response[10] = 2;
+        g_assert_true (write_all (ctx->peer_fd, response, response_len));
+    }
+    return NULL;
+}
+
 static void
 client_radio_test_ready (MMSitClient       *client,
                          GAsyncResult      *res,
@@ -2305,6 +2347,53 @@ test_client_radio_transition (gconstpointer data)
 
     mm_sit_client_close (client);
     g_assert_false (mm_sit_client_radio_state_trusted (client));
+    close (ctx.peer_fd);
+    g_main_loop_unref (ctx.loop);
+}
+
+/* A refused SET must not make the polled state trustworthy: the core has to be
+ * able to see through the parked CP's "on" and run the power-up chain again. */
+static void
+test_client_radio_transition_refused (void)
+{
+    ClientTestContext          ctx = { 0 };
+    gint                       sockets[2];
+    guint                      timeout_id;
+    g_autoptr(GError)          error = NULL;
+    g_autoptr(MMPortSerialSit) port = NULL;
+    g_autoptr(MMSitClient)     client = NULL;
+    GThread                   *peer;
+
+    g_assert_cmpint (socketpair (AF_UNIX, SOCK_STREAM, 0, sockets), ==, 0);
+    ctx.peer_fd = sockets[1];
+    ctx.loop = g_main_loop_new (NULL, FALSE);
+    port = MM_PORT_SERIAL_SIT (g_object_new (MM_TYPE_PORT_SERIAL_SIT,
+                                             MM_PORT_DEVICE, "test-sit-radio-refused",
+                                             MM_PORT_SUBSYS, MM_PORT_SUBSYS_WWAN,
+                                             MM_PORT_TYPE, MM_PORT_TYPE_SIT,
+                                             MM_PORT_SERIAL_FD, sockets[0],
+                                             NULL));
+    client = mm_sit_client_new_from_port (port);
+    g_assert_true (mm_sit_client_open (client, &error));
+    g_assert_no_error (error);
+
+    peer = g_thread_new ("sit-radio-refused-test-peer",
+                         (GThreadFunc) client_radio_refused_test_peer, &ctx);
+    mm_sit_client_set_radio_state (client, MM_SIT_RADIO_STATE_ON, NULL,
+                                   (GAsyncReadyCallback) client_radio_test_ready, &ctx);
+    timeout_id = g_timeout_add_seconds (5, (GSourceFunc) client_test_timeout, &ctx);
+    g_main_loop_run (ctx.loop);
+
+    if (!ctx.timed_out)
+        g_source_remove (timeout_id);
+    g_thread_join (g_steal_pointer (&peer));
+
+    g_assert_false (ctx.timed_out);
+    g_assert_no_error (ctx.error);
+    g_assert_true (ctx.completed);
+    g_assert_false (mm_sit_client_radio_state_trusted (client));
+
+    mm_sit_client_close (client);
     close (ctx.peer_fd);
     g_main_loop_unref (ctx.loop);
 }
@@ -3186,6 +3275,7 @@ main (int argc,
     g_test_add_data_func ("/MM/sit/ims/vops-gating", GUINT_TO_POINTER (2), test_ims_provisioning_retries);
     g_test_add_data_func ("/MM/sit/client/radio-transition", NULL, test_client_radio_transition);
     g_test_add_data_func ("/MM/sit/client/same-profile-after-empty", GUINT_TO_POINTER (1), test_client_radio_transition);
+    g_test_add_func ("/MM/sit/client/radio-transition-refused", test_client_radio_transition_refused);
     g_test_add_func ("/MM/sit/client/boot-config", test_client_boot_config);
     g_test_add_func ("/MM/sit/dsds/data-ownership", test_dsds_data_ownership);
     g_test_add_data_func ("/MM/sit/dsds/prepare-coalesced", NULL, test_cp_prepare_coalesced);

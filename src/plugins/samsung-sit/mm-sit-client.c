@@ -408,6 +408,17 @@ mm_sit_client_radio_state_trusted (MMSitClient *self)
     return self->priv->radio_state_trusted;
 }
 
+/* The distrust only exists to force the bring-up chain to run once. Once it
+ * has, the CP's report is all there is, and keeping it distrusted would pin
+ * the core's power state at "low" forever -- every later power-down then
+ * becomes a no-op and the radio can never be cycled at all. */
+void
+mm_sit_client_assume_radio_state (MMSitClient *self)
+{
+    g_return_if_fail (MM_IS_SIT_CLIENT (self));
+    self->priv->radio_state_trusted = TRUE;
+}
+
 static void
 port_command_ready (MMPortSerialSit *port,
                     GAsyncResult    *res,
@@ -538,6 +549,7 @@ typedef struct {
     MMSitRadioState state;
     guint           poll_attempts;
     guint           retry_id;
+    gboolean        request_accepted;
 } SetRadioContext;
 
 static void set_radio_poll (GTask *task);
@@ -576,7 +588,13 @@ set_radio_poll_ready (MMSitClient *self,
         return;
     }
     if (state == ctx->state) {
-        self->priv->radio_state_trusted = TRUE;
+        /* Only a transition the CP accepted proves the state is real. A fresh
+         * CP refuses the request and still reports the target state, and
+         * trusting that hollow answer defeats the guard in load_power_state --
+         * the core then never re-runs the power-up chain, so the CP attaches
+         * with no APN and every SETUP_DATA_CALL fails with cause 133. */
+        if (ctx->request_accepted)
+            self->priv->radio_state_trusted = TRUE;
         if (state == MM_SIT_RADIO_STATE_OFF && self->priv->cp) {
             mm_sit_cp_release_stack_data (self->priv->cp, self->priv->stack);
             g_clear_pointer (&self->priv->cids, g_hash_table_unref);
@@ -610,9 +628,13 @@ set_radio_request_ready (MMSitClient *self,
      * the resulting state either way, so note the refusal and carry on; a state
      * that genuinely never arrives still fails there.
      */
+    SetRadioContext *ctx = g_task_get_task_data (task);
+
     if (!g_task_propagate_boolean (G_TASK (res), &error))
         mm_obj_dbg (self->priv->port, "radio power request refused (%s); polling the state anyway",
                     error->message);
+    else
+        ctx->request_accepted = TRUE;
 
     set_radio_poll (task);
 }

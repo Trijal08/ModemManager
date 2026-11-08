@@ -74,6 +74,7 @@ MMSitCarrierSimInfo *mm_sit_client_query_carrier_sim_info_finish (MMSitClient   
                                                                   GAsyncResult  *res,
                                                                   GError       **error);
 gboolean mm_sit_client_radio_state_trusted  (MMSitClient         *self);
+void     mm_sit_client_assume_radio_state   (MMSitClient         *self);
 
 /* The next request token. Public because AIMS frames are built outside this
  * client -- by a different codec -- but must share its token sequence, since
