@@ -4492,12 +4492,36 @@ static const guint8 uicc_aid_pkcs15[] = { 0xa0, 0x00, 0x00, 0x00, 0x63, 0x50, 0x
                                           0x53, 0x2d, 0x31, 0x35 };
 static const guint8 uicc_aid_gpac[]   = { 0xa0, 0x00, 0x00, 0x00, 0x18, 0x47, 0x50, 0x41,
                                           0x43, 0x2d, 0x31, 0x35 };
+/* GSMA ARA-D, the delegated access-rule applet: "...QDAC" to the same scheme
+ * that makes ARA-M "...QACL". Stock asks for it only after a no-AID open has
+ * been refused. */
+static const guint8 uicc_aid_ara_d[]  = { 0xa0, 0x00, 0x00, 0x01, 0x51, 0x44, 0x41, 0x43,
+                                          0x00 };
+/*
+ * SGP.22 ISD-R, the eUICC's root security domain: A0000005591010FFFFFFFF8900000100.
+ * A standardised AID, not this card's own.
+ *
+ * This is the one that works where a no-AID open does not. Measured on the
+ * capture, ch 0xf6: no-AID answers 6b00, ARA-D and a retried ARA-M answer
+ * 6a82, and this returns channel 2 with 9000. The card is an eSIM, so it has
+ * an ISD-R to open; ch 0xf5 never needs any of this because its no-AID open
+ * succeeds.
+ */
+static const guint8 uicc_aid_isdr[]   = { 0xa0, 0x00, 0x00, 0x05, 0x59, 0x10, 0x10, 0xff,
+                                          0xff, 0xff, 0xff, 0x89, 0x00, 0x00, 0x01, 0x00 };
 
 typedef enum {
     UICC_STEP_OPEN_ARA_M,
     UICC_STEP_OPEN_PKCS15,
     UICC_STEP_OPEN_GPAC,
     UICC_STEP_OPEN_PLAIN,
+    /*
+     * Only reached when nothing above handed back a channel, which on our two
+     * cards means only the eSIM. Stock's order.
+     */
+    UICC_STEP_OPEN_ARA_D,
+    UICC_STEP_OPEN_ARA_M_AGAIN,
+    UICC_STEP_OPEN_ISDR,
     UICC_STEP_SELECT_MF,
     UICC_STEP_SELECT_EF_DIR,
     UICC_STEP_READ_RECORD,
@@ -4577,36 +4601,43 @@ uicc_probe_ready (MMSitClient  *self,
 
     response = mm_sit_client_command_finish (self, res, &error);
 
-    if (ctx->step == UICC_STEP_OPEN_PLAIN) {
-        /* The only answer this sequence reads: the channel to work on. The
-         * named-AID opens before it are expected to fail with 6a82 on a card
-         * that carries no access-rule applet, which is both of ours. */
+    if (ctx->step <= UICC_STEP_OPEN_ISDR) {
+        /*
+         * Every open can hand back the channel, so every one is read. A card
+         * with an access-rule applet answers the first; ours have none, so
+         * both fall through to the no-AID open, and the eSIM falls through
+         * that to the ISD-R. The first channel wins and the rest are skipped.
+         */
         const guint8 *payload = NULL;
         gsize         payload_len = 0;
+        guint32       channel = UICC_NO_CHANNEL;
+        guint16       sw = 0;
 
         if (response)
             payload = mm_sit_message_get_payload (response, &payload_len);
         /* get_payload() is frame+8, so the four status bytes come first and
          * the channel the CP assigned sits at +4, its SW at +8. */
         if (payload && payload_len >= 10) {
-            guint32 channel;
-            guint16 sw;
-
             memcpy (&channel, payload + 4, 4);
             memcpy (&sw, payload + 8, 2);
-            if (channel != UICC_NO_CHANNEL && sw == 0x0090) {
-                ctx->channel = channel;
-                mm_obj_dbg (self->priv->port, "UICC access rules: reading EF_DIR on channel %u",
-                            channel);
-            } else {
-                mm_obj_dbg (self->priv->port, "UICC access rules: no channel (sw %04x); done",
-                            sw);
-                ctx->step = UICC_STEP_DONE;
-            }
-        } else {
-            ctx->step = UICC_STEP_DONE;
         }
-    } else if (!response && ctx->channel != UICC_NO_CHANNEL && ctx->step < UICC_STEP_CLOSE) {
+
+        if (channel != UICC_NO_CHANNEL && sw == 0x0090) {
+            ctx->channel = channel;
+            mm_obj_dbg (self->priv->port, "UICC access rules: reading EF_DIR on channel %u",
+                        channel);
+            ctx->step = UICC_STEP_SELECT_MF;
+        } else if (ctx->step == UICC_STEP_OPEN_ISDR) {
+            mm_obj_dbg (self->priv->port, "UICC access rules: no channel (sw %04x); done", sw);
+            ctx->step = UICC_STEP_DONE;
+        } else {
+            ctx->step++;
+        }
+        uicc_probe_step (task);
+        return;
+    }
+
+    if (!response && ctx->channel != UICC_NO_CHANNEL && ctx->step < UICC_STEP_CLOSE) {
         /* Never leave a channel open because a read failed. */
         mm_obj_dbg (self->priv->port, "UICC access rules: step %d failed (%s); closing the channel",
                     (int) ctx->step, error ? error->message : "no response");
@@ -4643,6 +4674,15 @@ uicc_probe_step (GTask *task)
         break;
     case UICC_STEP_OPEN_PLAIN:
         request = uicc_build_open (self, NULL, 0, &error);
+        break;
+    case UICC_STEP_OPEN_ARA_D:
+        request = uicc_build_open (self, uicc_aid_ara_d, sizeof (uicc_aid_ara_d), &error);
+        break;
+    case UICC_STEP_OPEN_ARA_M_AGAIN:
+        request = uicc_build_open (self, uicc_aid_ara_m, sizeof (uicc_aid_ara_m), &error);
+        break;
+    case UICC_STEP_OPEN_ISDR:
+        request = uicc_build_open (self, uicc_aid_isdr, sizeof (uicc_aid_isdr), &error);
         break;
     case UICC_STEP_SELECT_MF:
         request = uicc_build_apdu (self, ctx->channel, 0xa4, 0x00, 0x04, 0x02,
