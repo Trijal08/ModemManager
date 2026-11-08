@@ -6429,6 +6429,23 @@ modem_voice_check_support (MMIfaceModemVoice   *self,
 
     /* Every SIT CP speaks the CS call group; there is no capability query
      * for it, and the port is the same one already in use. */
+
+    /*
+     * And no call-list polling. The generic interface polls GET_CALL_LIST on a
+     * timer unless told the modem reports call state on its own, and the CP
+     * does: CALL_STATE_CHANGED arrives unsolicited and
+     * mm_iface_modem_voice_reload_all_calls() already runs from it.
+     *
+     * The AT path that would normally decide this never runs here, because it
+     * hangs off the +CLCC probe in the check_support we are replacing, so the
+     * property keeps its polling default. Measured cost of that default
+     * against the capture: 20 GET_CALL_LIST requests in 220s where stock
+     * sends 4.
+     */
+    g_object_set (self,
+                  MM_IFACE_MODEM_VOICE_PERIODIC_CALL_LIST_CHECK_DISABLED, TRUE,
+                  NULL);
+
     task = g_task_new (self, NULL, callback, user_data);
     g_task_return_boolean (task, TRUE);
     g_object_unref (task);
