@@ -357,9 +357,7 @@ mm_port_serial_at_command (MMPortSerialAt *self,
 
     buf = at_command_to_byte_array (command,
                                     is_raw,
-                                    (mm_port_get_subsys (MM_PORT (self)) == MM_PORT_SUBSYS_TTY ?
-                                     self->priv->send_lf :
-                                     TRUE));
+                                    self->priv->send_lf);
     g_return_if_fail (buf != NULL);
 
     task = g_task_new (self, NULL, callback, user_data);
