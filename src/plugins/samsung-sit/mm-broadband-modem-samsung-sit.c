@@ -323,6 +323,15 @@ sit_registration_state (const MMSitRegistration *registration)
     case 5:
         state = MM_MODEM_3GPP_REGISTRATION_STATE_ROAMING;
         break;
+    /* The s5400 firmware reports the camped state as 20, not 0 (confirmed on
+     * device 2026-08-30: stable state=20 rat=14 while camped on the home PLMN
+     * 24202 at ~-97 dBm, no reject indication), where state 0 instead means
+     * "no serving cell" (empty PLMN). Upstream dropped the promote-to-
+     * registered hack this used to extend, so name the state here instead --
+     * which also keeps a roaming subscription roaming, the reason it went. */
+    case 20:
+        state = MM_MODEM_3GPP_REGISTRATION_STATE_HOME;
+        break;
     case 10:
     case 12:
     case 13:
