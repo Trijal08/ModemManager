@@ -943,6 +943,35 @@ mm_sit_ims_hangup_finish (MMSitIms      *self,
     return g_task_propagate_boolean (G_TASK (res), error);
 }
 
+void
+mm_sit_ims_send_dtmf (MMSitIms            *self,
+                      guint8               call_id,
+                      guint8               kind,
+                      gchar                digit,
+                      GAsyncReadyCallback  callback,
+                      gpointer             user_data)
+{
+    guint8          *frame = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    g_return_if_fail (MM_IS_SIT_IMS (self));
+
+    /* The digit goes on the wire as its character, not its value -- the
+     * vendor's field is a Java char written as one byte. */
+    status = samsung_aims_build_send_dtmf (mm_sit_client_next_token (self->priv->client),
+                                           call_id, kind, (guint8) digit, &frame, &len);
+    send_simple (self, frame, len, status, "send dtmf", NULL, callback, user_data);
+}
+
+gboolean
+mm_sit_ims_send_dtmf_finish (MMSitIms      *self,
+                             GAsyncResult  *res,
+                             GError       **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
 GList *
 mm_sit_ims_get_call_list (MMSitIms *self)
 {

@@ -33,6 +33,9 @@ G_DEFINE_TYPE (MMCallSamsungSit, mm_call_samsung_sit, MM_TYPE_BASE_CALL)
 
 struct _MMCallSamsungSitPrivate {
     MMBaseModem *modem;
+    /* The key currently held down, so the matching release names the same
+     * digit.  0 when no key is down. */
+    gchar        dtmf_pressed;
 };
 
 /*****************************************************************************/
@@ -247,6 +250,21 @@ call_accept (MMBaseCall          *_self,
     mm_sit_client_answer (client, NULL, (GAsyncReadyCallback) answer_ready, task);
 }
 
+/*
+ * The CP's id for this call.  ModemManager indices are the CP's ids shifted by
+ * one (0 means "no index assigned" there, but is a valid id here), so shift
+ * back.  A call dialled but not yet seen in a call list still has index 0;
+ * fall back to id 0, the first call, and let the CP reject it if that is
+ * wrong.
+ */
+static guint8
+call_cp_id (MMBaseCall *self)
+{
+    guint index = mm_base_call_get_index (self);
+
+    return (guint8) (index ? index - 1 : 0);
+}
+
 /*****************************************************************************/
 /* Hang up the call */
 
@@ -293,13 +311,8 @@ call_hangup (MMBaseCall          *_self,
         return;
     }
 
-    /* HANGUP takes the CP's call id.  ModemManager indices are the CP's ids
-     * shifted by one (0 means "no index assigned" there, but is a valid id
-     * here), so shift back.  A call dialled but not yet seen in a call list
-     * still has index 0; fall back to id 0, the first call, and let the CP
-     * reject it if that is wrong. */
     index = mm_base_call_get_index (_self);
-    call_id = index ? index - 1 : 0;
+    call_id = call_cp_id (_self);
 
     if (call_is_ims (self)) {
         mm_obj_dbg (self, "hanging up IMS call %u (MM index %u)", call_id, index);
@@ -312,6 +325,168 @@ call_hangup (MMBaseCall          *_self,
     mm_obj_dbg (self, "hanging up CS call %u (MM index %u)", call_id, index);
     mm_sit_client_hangup (client, call_id, NULL,
                           (GAsyncReadyCallback) hangup_ready, task);
+}
+
+/*****************************************************************************/
+/* DTMF */
+
+/*
+ * The two stacks spell a key press differently, so a call is served by the one
+ * it started on.
+ *
+ * AIMS carries it as two requests -- down, then up -- naming the same digit,
+ * and holds the tone in between.  That is the shape ModemManager's base call
+ * class already drives: send_dtmf, wait the call's configured tone duration,
+ * stop_dtmf, and it sequences a multi-character string itself.
+ *
+ * CS has no such pair.  Its DTMF (0x0003) is a self-timed burst: the CP is
+ * handed the digits and times each tone itself, so there is nothing to release
+ * and stop_dtmf has nothing to do.  The group does define DTMF_START (0x0005)
+ * and DTMF_STOP (0x0006), but the vendor builder for START writes a boolean
+ * nothing in any available library sets, so what it selects is unknown and
+ * using it would put an undefined byte on the wire.
+ *
+ * Either way one call here is one key, so these return 1 and let the base class
+ * advance the string.
+ */
+
+static gssize
+call_send_dtmf_finish (MMBaseCall    *self,
+                       GAsyncResult  *res,
+                       GError       **error)
+{
+    return g_task_propagate_int (G_TASK (res), error);
+}
+
+static void
+ims_send_dtmf_ready (MMSitIms     *ims,
+                     GAsyncResult *res,
+                     GTask        *task)
+{
+    GError *error = NULL;
+
+    if (!mm_sit_ims_send_dtmf_finish (ims, res, &error))
+        g_task_return_error (task, error);
+    else
+        /* One key per request; the base class advances the string by this. */
+        g_task_return_int (task, 1);
+    g_object_unref (task);
+}
+
+static void
+cs_send_dtmf_ready (MMSitClient  *client,
+                    GAsyncResult *res,
+                    GTask        *task)
+{
+    GError *error = NULL;
+
+    if (!mm_sit_client_send_dtmf_finish (client, res, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_int (task, 1);
+    g_object_unref (task);
+}
+
+static void
+call_send_dtmf (MMBaseCall          *_self,
+                const gchar         *dtmf,
+                GAsyncReadyCallback  callback,
+                gpointer             user_data)
+{
+    MMCallSamsungSit *self = MM_CALL_SAMSUNG_SIT (_self);
+    MMSitClient      *client;
+    GTask            *task;
+    GError           *error = NULL;
+    gchar             key[2];
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    if (!dtmf || !dtmf[0]) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_INVALID_ARGS,
+                                 "No DTMF tone to send");
+        g_object_unref (task);
+        return;
+    }
+
+    if (call_is_ims (self)) {
+        MMSitIms *ims = mm_broadband_modem_samsung_sit_peek_ims (MM_BROADBAND_MODEM_SAMSUNG_SIT (self->priv->modem));
+
+        if (!ims) {
+            g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                     "No IMS stack to send DTMF on");
+            g_object_unref (task);
+            return;
+        }
+
+        /* Remember the key so the release names the same digit. */
+        self->priv->dtmf_pressed = dtmf[0];
+        mm_obj_dbg (self, "pressing DTMF key '%c' on IMS call %u",
+                    dtmf[0], call_cp_id (_self));
+        mm_sit_ims_send_dtmf (ims, call_cp_id (_self), MM_SIT_IMS_DTMF_START, dtmf[0],
+                              (GAsyncReadyCallback) ims_send_dtmf_ready, task);
+        return;
+    }
+
+    client = peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    /* A burst needs no release, so leave dtmf_pressed clear. */
+    self->priv->dtmf_pressed = 0;
+    key[0] = dtmf[0];
+    key[1] = '\0';
+    mm_obj_dbg (self, "sending DTMF key '%c' on CS call %u", key[0], call_cp_id (_self));
+    mm_sit_client_send_dtmf (client, key, NULL,
+                             (GAsyncReadyCallback) cs_send_dtmf_ready, task);
+}
+
+static gboolean
+call_stop_dtmf_finish (MMBaseCall    *self,
+                       GAsyncResult  *res,
+                       GError       **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+call_stop_dtmf (MMBaseCall          *_self,
+                GAsyncReadyCallback  callback,
+                gpointer             user_data)
+{
+    MMCallSamsungSit *self = MM_CALL_SAMSUNG_SIT (_self);
+    MMSitIms         *ims;
+    GTask            *task;
+    gchar             digit;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    /* Nothing is being held: either the key was never pressed, or this is a CS
+     * burst the CP has already timed for us. */
+    digit = self->priv->dtmf_pressed;
+    if (!digit) {
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+    self->priv->dtmf_pressed = 0;
+
+    ims = self->priv->modem
+        ? mm_broadband_modem_samsung_sit_peek_ims (MM_BROADBAND_MODEM_SAMSUNG_SIT (self->priv->modem))
+        : NULL;
+    if (!ims) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "No IMS stack to release DTMF on");
+        g_object_unref (task);
+        return;
+    }
+
+    mm_obj_dbg (self, "releasing DTMF key '%c' on IMS call %u",
+                digit, call_cp_id (_self));
+    mm_sit_ims_send_dtmf (ims, call_cp_id (_self), MM_SIT_IMS_DTMF_STOP, digit,
+                          (GAsyncReadyCallback) ims_simple_ready, task);
 }
 
 /*****************************************************************************/
@@ -440,7 +615,8 @@ mm_call_samsung_sit_class_init (MMCallSamsungSitClass *klass)
     base_call_class->accept_finish = call_accept_finish;
     base_call_class->hangup        = call_hangup;
     base_call_class->hangup_finish = call_hangup_finish;
-    /* DTMF is left unimplemented: SIT has the messages but their payloads
-     * are not decoded yet, and the base class reports "unsupported" for a
-     * NULL vfunc. */
+    base_call_class->send_dtmf        = call_send_dtmf;
+    base_call_class->send_dtmf_finish = call_send_dtmf_finish;
+    base_call_class->stop_dtmf        = call_stop_dtmf;
+    base_call_class->stop_dtmf_finish = call_stop_dtmf_finish;
 }

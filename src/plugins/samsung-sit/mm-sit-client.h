@@ -408,6 +408,19 @@ gboolean mm_sit_client_answer_finish        (MMSitClient        *self,
                                              GAsyncResult       *res,
                                              GError            **error);
 
+/*
+ * DTMF on a CS call, as the self-timed burst the CP implements: it carries the
+ * digits and times each tone itself, so there is no release to pair with this.
+ */
+void     mm_sit_client_send_dtmf            (MMSitClient        *self,
+                                             const gchar        *digits,
+                                             GCancellable       *cancellable,
+                                             GAsyncReadyCallback callback,
+                                             gpointer            user_data);
+gboolean mm_sit_client_send_dtmf_finish     (MMSitClient        *self,
+                                             GAsyncResult       *res,
+                                             GError            **error);
+
 void     mm_sit_client_hangup               (MMSitClient        *self,
                                              guint32             call_id,
                                              GCancellable       *cancellable,

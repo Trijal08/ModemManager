@@ -634,6 +634,21 @@ mm_sit_request_new_answer (guint16 token)
 }
 
 GByteArray *
+mm_sit_request_new_dtmf (guint16       token,
+                         const gchar  *digits,
+                         GError      **error)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    g_return_val_if_fail (digits != NULL, NULL);
+
+    status = samsung_sit_build_dtmf (token, digits, &buffer, &len);
+    return finish_build (status, buffer, len, error);
+}
+
+GByteArray *
 mm_sit_request_new_hangup (guint16 token,
                            guint32 call_id)
 {

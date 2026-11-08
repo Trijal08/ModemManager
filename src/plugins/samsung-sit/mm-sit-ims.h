@@ -160,6 +160,30 @@ gboolean mm_sit_ims_hangup_finish (MMSitIms            *self,
                                    GAsyncResult        *res,
                                    GError             **error);
 
+/*
+ * DTMF on an established IMS call.
+ *
+ * The CP times nothing on the start/stop pair: the key is held down from
+ * MM_SIT_IMS_DTMF_START until MM_SIT_IMS_DTMF_STOP names the same digit
+ * again.  That is how Android drives its keypad -- the capture has the two
+ * about 60 ms apart -- and it is what ModemManager's base call class already
+ * sequences, so the tone duration stays the interface's to choose.
+ * MM_SIT_IMS_DTMF_BURST is the CP's own self-timed tone, unused here.
+ */
+#define MM_SIT_IMS_DTMF_BURST 0
+#define MM_SIT_IMS_DTMF_START 1
+#define MM_SIT_IMS_DTMF_STOP  2
+
+void     mm_sit_ims_send_dtmf        (MMSitIms            *self,
+                                      guint8               call_id,
+                                      guint8               kind,
+                                      gchar                digit,
+                                      GAsyncReadyCallback  callback,
+                                      gpointer             user_data);
+gboolean mm_sit_ims_send_dtmf_finish (MMSitIms            *self,
+                                      GAsyncResult        *res,
+                                      GError             **error);
+
 /* Stop the stack and drop the PDN; used on radio-off and at dispose. */
 void mm_sit_ims_stop (MMSitIms *self);
 

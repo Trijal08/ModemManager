@@ -2147,6 +2147,38 @@ mm_sit_client_answer_finish (MMSitClient  *self,
 }
 
 void
+mm_sit_client_send_dtmf (MMSitClient        *self,
+                         const gchar        *digits,
+                         GCancellable       *cancellable,
+                         GAsyncReadyCallback callback,
+                         gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GError               *error = NULL;
+
+    request = mm_sit_request_new_dtmf (mm_sit_client_next_token (self), digits, &error);
+    if (!request) {
+        GTask *task;
+
+        task = g_task_new (self, cancellable, callback, user_data);
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    run_checked_command (self, request, 10, cancellable, callback, user_data);
+}
+
+gboolean
+mm_sit_client_send_dtmf_finish (MMSitClient  *self,
+                                GAsyncResult *res,
+                                GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+void
 mm_sit_client_hangup (MMSitClient        *self,
                       guint32             call_id,
                       GCancellable       *cancellable,

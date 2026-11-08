@@ -604,6 +604,9 @@ GByteArray *mm_sit_request_new_get_data_call_list     (guint16                to
 GByteArray *mm_sit_request_new_dial                   (guint16                token,
                                                        const gchar           *number,
                                                        GError               **error);
+GByteArray *mm_sit_request_new_dtmf                   (guint16                token,
+                                                       const gchar           *digits,
+                                                       GError               **error);
 GByteArray *mm_sit_request_new_answer                 (guint16                token);
 GByteArray *mm_sit_request_new_hangup                 (guint16                token,
                                                        guint32                call_id);
