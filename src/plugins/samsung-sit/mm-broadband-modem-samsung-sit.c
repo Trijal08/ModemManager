@@ -97,6 +97,9 @@ struct _MMBroadbandModemSamsungSitPrivate {
     /* Set once a data PDN has been refused while the IMS attach was in
      * force, which settles the choice below in data's favour for good. */
     gboolean  attach_data_wins;
+    /* Per-stack: may a 2253 on the IMS PDN take the modem-wide attach APN?
+     * ID_MM_SIT_ESCALATE_ATTACH_TO_IMS; see ims_pdn_refused(). */
+    gboolean  escalate_attach_to_ims;
     /* Set once the CP has refused the IMS PDN; see attach_apn_resolve(). */
     gboolean     attach_ims_fallback;
     /* The carrier's APN list while it is being registered with the CP, one
@@ -1052,6 +1055,31 @@ attach_pcscf_request (MMBroadbandModemSamsungSit *self)
 }
 
 /*
+ * Per-stack escalation policy, from the port's ID_MM_SIT_ESCALATE_ATTACH_TO_IMS.
+ *
+ * Default FALSE, which is what the stock stack does -- it never moves the
+ * attach APN and still gets its IMS PDN. The escalation is a workaround for
+ * 2253 and it is not free: it takes the modem-wide attach APN, so the CP then
+ * refuses that stack's data APN and the SIM loses data.
+ *
+ * On a dual-SIM device that trade only makes sense on the SIM you want VoLTE
+ * on. Setting it globally makes *both* stacks escalate -- the second one gets
+ * there before NetworkManager has brought its bearer up, so the
+ * "don't escalate over a live connection" guard below never sees it, and the
+ * device ends up with no data on either SIM. Hence per stack, set by the
+ * device package next to ID_MM_SIT_LOGICAL_STACK.
+ */
+static gboolean
+escalate_property (MMPort *port)
+{
+    const gchar *v;
+
+    v = mm_kernel_device_get_property (mm_port_peek_kernel_device (port),
+                                       "ID_MM_SIT_ESCALATE_ATTACH_TO_IMS");
+    return v && (g_str_equal (v, "1") || !g_ascii_strcasecmp (v, "true"));
+}
+
+/*
  * The CP refused the IMS PDN. Escalate once: re-attach on the carrier's IMS
  * APN, which is the only way this CP will produce an IMS context.
  *
@@ -1071,18 +1099,10 @@ attach_pcscf_request (MMBroadbandModemSamsungSit *self)
  * CP or firmware that accepts the DNN never reaches this path. The IMS sequence
  * retries on its own timer, so the next attempt uses the new attach APN.
  */
-/*
- * Whether a 2253 on the IMS PDN moves the modem-wide attach APN to the IMS
- * entry. FALSE matches the stock stack; see ims_pdn_refused().
- *
- * TRUE for now, deliberately. Stock does not need this and neither should we,
- * but until 2253 is understood, FALSE means no VoLTE at all on a SIM whose IMS
- * PDN is refused -- which is every SIM, every boot. The escalation is a poor
- * workaround: it costs that SIM its data, and the P-CSCF pool it yields
- * registers only about one boot in five. A poor workaround still beats no
- * telephony. Flip to FALSE to see the refusal unmasked.
- */
-static const gboolean escalate_attach_to_ims = TRUE;
+
+static void search_watchdog_radio_off_ready (MMSitClient  *client,
+                                             GAsyncResult *res,
+                                             GTask        *task);
 
 static void
 ims_pdn_refused (MMSitIms                   *ims,
@@ -1093,6 +1113,7 @@ ims_pdn_refused (MMSitIms                   *ims,
     MMSitPdpType  pdp;
     const gchar  *apn;
     MMSitClient  *client;
+    GTask        *task;
     MMModemState  state = MM_MODEM_STATE_UNKNOWN;
 
     if (cause != MM_SIT_REJECT_CAUSE_MATCH_ALL_RULE_NOT_ALLOWED)
@@ -1127,7 +1148,7 @@ ims_pdn_refused (MMSitIms                   *ims,
      * being papered over by a context that cannot register, and the SIM keeps
      * its data. Re-enabling the old behaviour is flipping the gate below.
      */
-    if (!escalate_attach_to_ims) {
+    if (!self->priv->escalate_attach_to_ims) {
         mm_obj_info (self, "the CP refused the IMS PDN (cause %u); leaving the attach APN "
                      "alone -- the stock stack never escalates and still gets the PDN",
                      cause);
@@ -1167,7 +1188,7 @@ ims_pdn_refused (MMSitIms                   *ims,
      * goes; data_pdn_refused() is the backstop if it fails for its own reasons.
      */
     g_object_get (self, MM_IFACE_MODEM_STATE, &state, NULL);
-    if (state >= MM_MODEM_STATE_CONNECTING) {
+    if (state >= MM_MODEM_STATE_CONNECTING && !self->priv->escalate_attach_to_ims) {
         mm_obj_info (self, "the CP refused the IMS PDN (cause %u), but data is %s; "
                      "leaving the attach APN alone", cause,
                      state == MM_MODEM_STATE_CONNECTING ? "connecting" : "connected");
@@ -1184,6 +1205,39 @@ ims_pdn_refused (MMSitIms                   *ims,
                  cause, apn);
     mm_sit_client_set_initial_attach_apn (client, apn, pdp, attach_pcscf_request (self),
                                           &auth, NULL, NULL, NULL);
+
+    /*
+     * Sending the attach APN is not enough on its own -- the same thing the
+     * back-out below has always known: "the CP keeps serving the attach it
+     * already has, so a change only takes effect at the next attach." The
+     * escalation never produced one, so the APN was accepted on the wire and
+     * then ignored.
+     *
+     * Measured 2026-11-04, exynos-modem r23 / MM r30, ch0xf5: SET_INITIAL_
+     * ATTACH_APN 'ims' went out at t=21.8 s and every later IMS request that
+     * boot was still refused 2253 -- 5 of them -- because the CP was still
+     * attached on 'sp.telus.com'. The journal shows no "applying attach APN
+     * ... before radio-on" for that stack, while the back-out at t=72 s does
+     * log one. That asymmetry is the whole bug, and it is why a grant looked
+     * like a dice roll: it only ever happened when something *else* (a
+     * registration blip, the search watchdog) produced a re-attach.
+     *
+     * Only once registered. power_up_chain_start() takes the radio down first,
+     * and an OFF inside the startup window parks the CP with cp_active 1;
+     * REGISTERED means an attach has already completed, so that window is
+     * closed. If we are not there yet the retry timer comes back round.
+     */
+    if (state < MM_MODEM_STATE_REGISTERED) {
+        mm_obj_dbg (self, "not cycling the radio for the IMS attach yet (state %d); "
+                    "the next provisioning retry will", (int) state);
+        return;
+    }
+
+    mm_obj_info (self, "cycling the radio so the '%s' attach takes effect", apn);
+    task = g_task_new (self, NULL, NULL, NULL);
+    mm_sit_client_set_radio_state (client, MM_SIT_RADIO_STATE_OFF, NULL,
+                                   (GAsyncReadyCallback) search_watchdog_radio_off_ready,
+                                   task);
 }
 
 /*
@@ -1214,6 +1268,33 @@ data_pdn_refused (MMSitClient                *client,
         return;
     if (!self->priv->attach_ims_fallback)
         return;
+
+    /*
+     * On the stack the device package designated as the VoLTE stack
+     * (ID_MM_SIT_ESCALATE_ATTACH_TO_IMS) data does not outrank VoLTE: losing
+     * that SIM's data is exactly the trade the designation asks for. Backing
+     * out here threw the trade away 44 s after taking it -- measured on
+     * hardware 2026-11-04 with exynos-modem r23 / MM r30:
+     *
+     *   11:14:35 [modem0] the CP refused the IMS PDN (2253); attaching on 'ims'
+     *   11:15:19 [modem0] a data PDN was refused (2253) while attached on the
+     *                     IMS APN; going back to 'sp.telus.com'
+     *
+     * and every later IMS request on that stack was refused for the rest of
+     * the boot -- 7 of them, all 2253 -- because the attach was no longer
+     * 'ims'. The SIM ended up with neither VoLTE nor (wanted) data.
+     *
+     * So on the designated stack keep the IMS attach and let that SIM's data
+     * APN stay refused. attach_data_wins is deliberately left clear, so a
+     * later refusal does not permanently block re-escalation either. The stack
+     * that carries data is the one *without* the property.
+     */
+    if (self->priv->escalate_attach_to_ims) {
+        mm_obj_info (self, "a data PDN was refused (cause %u) while attached on the IMS APN, "
+                     "but this stack is designated for VoLTE; keeping the IMS attach",
+                     cause);
+        return;
+    }
 
     self->priv->attach_ims_fallback = FALSE;
     self->priv->attach_data_wins = TRUE;
@@ -2271,6 +2352,7 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
                 mm_kernel_device_get_property (mm_port_peek_kernel_device (port), "ID_MM_SIT_DEVICE_MODEL"),
                 mm_kernel_device_get_property (mm_port_peek_kernel_device (port), "ID_MM_SIT_DEVICE_BUILD"),
                 mm_kernel_device_get_property (mm_port_peek_kernel_device (port), "ID_MM_SIT_DEVICE_CODENAME"));
+            self->priv->escalate_attach_to_ims = escalate_property (port);
             mm_obj_info (self, "DSDS logical stack %d on %s", self->priv->logical_stack,
                          mm_port_get_device (port));
         }
@@ -2306,6 +2388,8 @@ mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsungSit  *self,
                                            "ID_MM_SIT_DEVICE_BUILD"),
             mm_kernel_device_get_property (mm_port_peek_kernel_device (port),
                                            "ID_MM_SIT_DEVICE_CODENAME"));
+        if (escalate_property (port))
+            self->priv->escalate_attach_to_ims = TRUE;
         if (!mm_sit_client_open (client, error)) {
             g_object_unref (client);
             self->priv->client = NULL;
