@@ -3678,8 +3678,19 @@ mm_sit_client_build_parity_request (MMSitClient              *self,
  * before the request, so a refused row is still a row the CP saw, and nothing
  * here may fail the context that follows.
  */
+/*
+ * Stock runs this whole block in 518ms on ch 0xf5 and 618ms on 0xf6, so give it
+ * a budget a few times that and no more. Nothing here may delay the context
+ * that follows: every row is advisory, and a row whose reply the CP sits on
+ * must cost the request that matters nothing. Per row, stock is never silent
+ * for more than 124ms with a request outstanding during boot.
+ */
+#define PREAMBLE_BUDGET_MS   2000
+#define PREAMBLE_ROW_TIMEOUT 1
+
 typedef struct {
-    guint index;
+    guint  index;
+    gint64 deadline_us;
 } PreambleContext;
 
 static void preamble_step (GTask *task);
@@ -3710,6 +3721,14 @@ preamble_step (GTask *task)
     gsize                     n_table = 0;
 
     table = mm_sit_parity_requests_for_stack (self->priv->stack, &n_table);
+    if (g_get_monotonic_time () >= ctx->deadline_us) {
+        mm_obj_dbg (self->priv->port, "pdn preamble: out of budget after %u ms with "
+                    "%u row(s) to go; going on to the context",
+                    (guint) PREAMBLE_BUDGET_MS, (guint) (n_table - ctx->index));
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
     while (ctx->index < n_table) {
         const MMSitParityRequest *req = &table[ctx->index];
 
@@ -3734,7 +3753,8 @@ preamble_step (GTask *task)
         return;
     }
 
-    mm_sit_client_command (self, request, 10, g_task_get_cancellable (task),
+    mm_sit_client_command (self, request, PREAMBLE_ROW_TIMEOUT,
+                           g_task_get_cancellable (task),
                            (GAsyncReadyCallback) preamble_ready, task);
 }
 
@@ -3746,8 +3766,12 @@ mm_sit_client_run_pdn_preamble (MMSitClient        *self,
 {
     GTask *task;
 
+    PreambleContext *ctx;
+
     task = g_task_new (self, cancellable, callback, user_data);
-    g_task_set_task_data (task, g_new0 (PreambleContext, 1), g_free);
+    ctx = g_new0 (PreambleContext, 1);
+    ctx->deadline_us = g_get_monotonic_time () + (PREAMBLE_BUDGET_MS * 1000);
+    g_task_set_task_data (task, ctx, g_free);
     preamble_step (task);
 }
 

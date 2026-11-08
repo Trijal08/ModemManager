@@ -371,7 +371,15 @@ static const MMSitParityRequest mm_sit_parity_requests_stack1[] = {
     { 0x0d3c, MM_SIT_PARITY_PHASE_PRE_PDN, MM_SIT_PARITY_SUB_NONE, 2, mm_sit_parity_pay_048 }, /* t=11.016 ? */
     { 0x0d3c, MM_SIT_PARITY_PHASE_PRE_PDN, MM_SIT_PARITY_SUB_NONE, 2, mm_sit_parity_pay_046 }, /* t=11.020 ? */
     { 0x0d3b, MM_SIT_PARITY_PHASE_PRE_PDN, MM_SIT_PARITY_SUB_NONE, 2, mm_sit_parity_pay_046 }, /* t=11.071 ? */
-    { 0x0d17, MM_SIT_PARITY_PHASE_PRE_PDN, MM_SIT_PARITY_SUB_WALLCLOCK, 19, mm_sit_parity_pay_049 }, /* t=11.074 ? */
+    /*
+     * AIMS_SET_CALL_WAITING. A supplementary-service setting, not a step in
+     * bringing up a context -- and stack 0 carries the same message in the
+     * RADIO phase (see above). The capture put it either side of the ask by
+     * jitter alone: 666ms before it on 0xf5, 258ms before it on 0xf6. Left in
+     * PRE_PDN it is on the critical path to the IMS request, where a reply the
+     * CP sat on cost stack 1 ten seconds and stack 0 nothing.
+     */
+    { 0x0d17, MM_SIT_PARITY_PHASE_RADIO, MM_SIT_PARITY_SUB_WALLCLOCK, 19, mm_sit_parity_pay_049 }, /* t=11.074 ? */
     { 0x0d3b, MM_SIT_PARITY_PHASE_PRE_PDN, MM_SIT_PARITY_SUB_NONE, 2, mm_sit_parity_pay_046 }, /* t=11.200 ? */
     { 0x0d39, MM_SIT_PARITY_PHASE_PRE_PDN, MM_SIT_PARITY_SUB_NONE, 2, mm_sit_parity_pay_046 }, /* t=11.285 ? */
     { 0x0d0b, MM_SIT_PARITY_PHASE_PRE_PDN, MM_SIT_PARITY_SUB_NONE, 10, mm_sit_parity_pay_050 }, /* t=11.288 ? */
