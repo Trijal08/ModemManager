@@ -116,7 +116,22 @@ static const guint8 cfg_set_vonr_capa[4] = { 0x01, 0x00, 0x00, 0x00 };
 static const guint8 cfg_set_allowed_network_type_bitmap[4] = { 0xf8, 0x01, 0x04, 0x00 };
 static const guint8 cfg_sit_set_gps_supl_ni_ready[2] = { 0x6b, 0x1c };
 static const guint8 cfg_set_fast_dormancy_info[4] = { 0x0a, 0x0a, 0x0a, 0x0a };
+/*
+ * The AIMS stack requests: byte 0 is the flag the vendor sets, byte 1 the
+ * 1-based stack index, rewritten per stack in mm-sit-client.c.
+ *
+ * Stock stops the stack before it starts it, and does it twice -- once with
+ * the flag set and once clear. Checked against all seven Android captures on
+ * this baseband, both stacks, with no exceptions: STACK_STOP twice per stack,
+ * XCAPM_STOP two or three times, where we sent none at all and only ever
+ * started. Starting a stack the CP still holds state for is the one thing in
+ * that block we were not doing.
+ */
 static const guint8 pre_aims_stack_start_req[2] = { 0x01, 0x01 };
+static const guint8 pre_aims_stack_stop_req[2]  = { 0x01, 0x01 };
+static const guint8 pre_aims_stack_stop_off[2]  = { 0x00, 0x01 };
+static const guint8 pre_aims_xcapm_stop_req[2]  = { 0x01, 0x01 };
+static const guint8 pre_aims_xcapm_stop_off[2]  = { 0x00, 0x01 };
 static const guint8 pre_aims_set_frame_time[10] = { 0x00, 0x02, 0x20, 0x04, 0xa9, 0xa8, 0xa1, 0x01, 0x00, 0x00 };
 static const guint8 pre_aims_xcapm_start_req[2] = { 0x01, 0x01 };
 static const guint8 pre_set_voice_operation[4] = { 0x03, 0x00, 0x00, 0x00 };
@@ -342,12 +357,37 @@ static const MMSitBootRequest boot_requests[] = {
      * Since r60 the first ask is granted 6 times out of 6, so that experiment
      * is now cheap and worth running.
      */
+    /*
+     * Stock's order, per stack, from the captures: stop, start, xcapm stop,
+     * xcapm start, then the pair again with the flag clear, then a second
+     * xcapm start. The second STACK_START is the one mm-sit-ims.c sends.
+     */
+    { 0x0d3a, "aims stack stop req", MM_SIT_BOOT_PHASE_PRE_PDN,
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_stack_stop_req },
     { 0x0d39, "aims stack start req", MM_SIT_BOOT_PHASE_PRE_PDN,
       { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_stack_start_req },
+    { 0x0d3c, "aims xcapm stop req", MM_SIT_BOOT_PHASE_PRE_PDN,
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_xcapm_stop_req },
     { 0x0d0b, "aims set frame time", MM_SIT_BOOT_PHASE_PRE_PDN,
       { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 10, pre_aims_set_frame_time },
     { 0x0d3b, "aims xcapm start req", MM_SIT_BOOT_PHASE_PRE_PDN,
       { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_xcapm_start_req },
+    { 0x0d3a, "aims stack stop req (flag clear)", MM_SIT_BOOT_PHASE_PRE_PDN,
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_stack_stop_off },
+    { 0x0d3c, "aims xcapm stop req (flag clear)", MM_SIT_BOOT_PHASE_PRE_PDN,
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_xcapm_stop_off },
+    { 0x0d3b, "aims xcapm start req", MM_SIT_BOOT_PHASE_PRE_PDN,
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_xcapm_start_req },
+    /*
+     * And the stack comes back up.  Stock's block ends on a START, not on the
+     * flag-clear STOP above it: leave it off and the CP holds an IMS stack that
+     * is down, accepts every later request, and never emits AIMS_REGISTRATION
+     * (0x0d05) -- provisioning completes, registration never arrives, and the
+     * watchdog recycles the context forever.  mm-sit-ims.c's own START cannot
+     * stand in for this one; it runs before this table, not after it.
+     */
+    { 0x0d39, "aims stack start req", MM_SIT_BOOT_PHASE_PRE_PDN,
+      { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_stack_start_req },
     { 0x091a, "set voice operation", MM_SIT_BOOT_PHASE_PRE_PDN,
       { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 4, pre_set_voice_operation },
     { 0x0d0b, "aims set frame time", MM_SIT_BOOT_PHASE_PRE_PDN,

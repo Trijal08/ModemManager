@@ -2951,6 +2951,7 @@ build_test_ims_db (void)
 typedef struct {
     guint setups;
     guint stops;
+    gboolean deregistered;  /* a teardown is in progress; see 0x0d06 */
     guint pdn_infos;
     guint deactivations;
     guint succeed_on;
@@ -2998,6 +2999,14 @@ ims_retry_peer_ready (gint fd, GIOCondition condition, ImsRetryPeer *peer)
          * A plain success here; the caller carries on either way. */
         break;
     case 0x0d06: /* AIMS_DEREGISTRATION */
+        /*
+         * The teardown deregisters before it stops the stack; the PRE_PDN
+         * replay never does. That is the only thing that tells the two
+         * STACK_STOPs apart -- both carry flag 1 and the stack index -- so
+         * it is what arms the stop counter below.
+         */
+        peer->deregistered = TRUE;
+        break;
     case 0x0d39: /* AIMS_STACK_START_REQ */
     case 0x0d07: /* AIMS_HIDDEN_MENU */
         break;
@@ -3028,7 +3037,11 @@ ims_retry_peer_ready (gint fd, GIOCondition condition, ImsRetryPeer *peer)
     case MM_SIT_MESSAGE_GET_OPERATOR:
         break;
     case 0x0d3a: /* AIMS_STACK_STOP_REQ */
-        peer->stops++;
+        /* Only the teardown's, not the two the PRE_PDN block replays. */
+        if (peer->deregistered) {
+            peer->stops++;
+            peer->deregistered = FALSE;
+        }
         break;
     case 0x0d08: /* AIMS_ADD_PDN_INFO */
         peer->pdn_infos++;
