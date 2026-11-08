@@ -147,13 +147,13 @@ static const guint8 pre_aims_0d96[1] = { 0x01 };
  * replay is obvious if the sub is ever dropped. The 0x03 at +17 is a constant
  * stock always sends and we sent as zero.
  */
-static const guint8 pre_aims_set_call_waiting[24] = {
+static const guint8 pre_aims_set_call_waiting[19] = {
     0x01, 0x00, 0x00, 0x00,
     0x01, 0x00, 0x00, 0x00,
     0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x03,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00,
 };
 static const guint8 pre_aims_xcapm_start_req[2] = { 0x01, 0x01 };
 static const guint8 pre_set_voice_operation[4] = { 0x03, 0x00, 0x00, 0x00 };
@@ -409,7 +409,7 @@ static const MMSitBootRequest boot_requests[] = {
      * rule, and the opposite of what made the old replay table go stale.
      */
     { 0x0d17, "aims set call waiting", MM_SIT_BOOT_PHASE_PRE_PDN,
-      { 0, 0 }, MM_SIT_BOOT_SUB_WALLCLOCK, MM_SIT_BOOT_STACKS_ALL, 24, pre_aims_set_call_waiting },
+      { 0, 0 }, MM_SIT_BOOT_SUB_WALLCLOCK, MM_SIT_BOOT_STACKS_ALL, 19, pre_aims_set_call_waiting },
     { 0x0d3b, "aims xcapm start req", MM_SIT_BOOT_PHASE_PRE_PDN,
       { 0, 0 }, MM_SIT_BOOT_SUB_NONE, MM_SIT_BOOT_STACKS_ALL, 2, pre_aims_xcapm_start_req },
     { 0x0d3a, "aims stack stop req (flag clear)", MM_SIT_BOOT_PHASE_PRE_PDN,

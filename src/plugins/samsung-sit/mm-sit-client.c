@@ -4559,9 +4559,11 @@ uicc_build_open (MMSitClient *self, const guint8 *aid, gsize aid_len, GError **e
      * not (Fizz answers 6b00, we got no channel, and the EF_DIR read and its
      * close never happened at all).
      *
-     * 24-byte payload, as stock sends: [u8 aid_len][aid, 16][7 pad].
+     * 18-byte payload: [u8 aid_len][aid, 16][u8 p2]. Stock declares 18 and
+     * pads the frame to 24; the padding is the builder's job now, so passing
+     * 24 here would declare six bytes of padding as payload.
      */
-    guint8 body[4 + 24] = { 0 };
+    guint8 body[4 + 18] = { 0 };
 
     if (aid && aid_len) {
         body[4] = (guint8) aid_len;
@@ -4580,11 +4582,12 @@ uicc_build_apdu (MMSitClient *self, guint32 channel, guint8 ins, guint8 p1, guin
      * Writing from body[0] sent the channel in the reserved field and shifted
      * everything else, so the CP read the channel from our class byte.
      *
-     * Stock's payload is 32 bytes whatever the APDU: the six u32 parameters,
-     * a u16 data length, then the data padded out. Sending a short frame for
-     * a short APDU is a divergence with nothing to gain.
+     * Stock declares the six u32 parameters, a u16 data length and the data
+     * itself -- 26 + data -- and pads the frame to 32 from there. The padding
+     * is the builder's job, so only the real length is passed.
      */
     guint8 body[4 + 32] = { 0 };
+    gsize  len = 4 + 26;
 
     memcpy (&body[4],  &channel, 4);
     body[4 + 4]  = 1;  /* the class byte stock uses on this channel */
@@ -4593,10 +4596,12 @@ uicc_build_apdu (MMSitClient *self, guint32 channel, guint8 ins, guint8 p1, guin
     body[4 + 16] = p2;
     body[4 + 20] = p3;
     body[4 + 24] = (guint8) data_len;
-    if (data && data_len)
+    if (data && data_len) {
         memcpy (&body[4 + 26], data, MIN (data_len, 4));
+        len += MIN (data_len, 4);
+    }
     return mm_sit_request_new (MM_SIT_MESSAGE_TRANSMIT_APDU_CHANNEL,
-                               mm_sit_client_next_token (self), body, sizeof (body), error);
+                               mm_sit_client_next_token (self), body, len, error);
 }
 
 static void
@@ -4710,12 +4715,12 @@ uicc_probe_step (GTask *task)
             break;
         {
             /*
-             * Reserved field, then stock's 8-byte payload: the channel and
-             * four bytes of padding. Passing the bare channel put it in the
-             * reserved field and left the payload empty, so the CP was told
-             * to close nothing.
+             * Reserved field, then the channel. Stock declares 4 and pads
+             * the frame to 8, which the builder now does. Passing the bare
+             * channel put it in the reserved field and left the payload
+             * empty, so the CP was told to close nothing.
              */
-            guint8 close_body[4 + 8] = { 0 };
+            guint8 close_body[4 + 4] = { 0 };
 
             memcpy (&close_body[4], &ctx->channel, 4);
             request = mm_sit_request_new (MM_SIT_MESSAGE_CLOSE_LOGICAL_CHANNEL,
