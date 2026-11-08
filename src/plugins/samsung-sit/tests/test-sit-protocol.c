@@ -1839,8 +1839,13 @@ client_test_peer (ClientTestContext *ctx)
         MM_SIT_MESSAGE_SET_DATA_PROFILE,
         MM_SIT_MESSAGE_SET_INITIAL_ATTACH_APN,
         0x0900,
-        0x0106,
-        0x0107,
+        /*
+         * No cell broadcast here. Configuring it is not part of bringing up a
+         * context, the boot configuration has already done it with the full
+         * channel set, and what used to be sent here named one range and so
+         * switched CMAS back off on the data stack. Stock sends neither in a
+         * connect sequence.
+         */
         MM_SIT_MESSAGE_GET_DATA_REGISTRATION,
         MM_SIT_MESSAGE_SETUP_DATA_CALL,
         MM_SIT_MESSAGE_SET_FAST_DORMANCY_INFO,
