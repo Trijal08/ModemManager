@@ -19,6 +19,8 @@ gboolean mm_sit_cp_prepare_finish (MMSitCp *self, GAsyncResult *res, GError **er
 /* Reservations cover pending connects as well as connected internet contexts.
  * Internal IMS setup does not claim the internet-data preference. */
 gboolean mm_sit_cp_claim_data (MMSitCp *self, guint stack, guint8 cid, GError **error);
+/* Name the stack that owns mobile data to the CP; a no-op if unchanged. */
+void mm_sit_cp_prefer_data_stack (MMSitCp *self, guint stack);
 gboolean mm_sit_cp_data_reserved (MMSitCp *self, guint8 cid);
 void mm_sit_cp_commit_data (MMSitCp *self, guint8 cid);
 void mm_sit_cp_release_data (MMSitCp *self, guint8 cid);

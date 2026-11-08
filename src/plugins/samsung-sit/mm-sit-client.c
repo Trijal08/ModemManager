@@ -3359,6 +3359,20 @@ mm_sit_client_setup_data_call (MMSitClient        *self,
         return;
     }
 
+    /*
+     * The CP has to know which stack owns the data subscription before it is
+     * asked to create a context. Captured on hardware: with the preference
+     * still unsent, this call was answered cause=0 and empty -- no assigned
+     * address, no P-CSCF -- where the stock stack's answer to a byte-identical
+     * request carries both. The stock stack re-asserts the preference seconds
+     * before its own IMS context, which is what this mirrors.
+     *
+     * A bearer connect names it as its own first step, so this is only for the
+     * paths that do not go through one. A no-op when the CP already knows.
+     */
+    if (self->priv->cp)
+        mm_sit_cp_prefer_data_stack (self->priv->cp, self->priv->stack);
+
     ctx = g_new0 (SetupContext, 1);
     ctx->cid = cid;
     ctx->apn = g_strdup (apn);

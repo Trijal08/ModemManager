@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "mm-log.h"
 #include "mm-port-serial-sit.h"
 #include "mm-sit-carrier-config.h"
 #include "mm-sit-client.h"
@@ -3250,6 +3251,22 @@ main (int argc,
       char **argv)
 {
     g_test_init (&argc, &argv, NULL);
+
+    /*
+     * Without this, mm_obj_warn() and mm_obj_err() jump to a NULL
+     * log_backend: it is a static function pointer that only mm_log_setup()
+     * ever assigns, and _mm_log() filters debug messages out before reaching
+     * it but not warnings. Any code under test that warns therefore crashes
+     * the binary rather than printing, which is how a warning in the SIT
+     * timeout handler became a SIGSEGV in dsds/secondary-connect -- the one
+     * test that lets a command time out.
+     */
+    {
+        g_autoptr(GError) error = NULL;
+
+        if (!mm_log_setup ("ERR", NULL, FALSE, FALSE, FALSE, FALSE, &error))
+            g_error ("cannot set up logging: %s", error->message);
+    }
 
     g_test_add_func ("/MM/sit/parse/header", test_parse_header);
     g_test_add_func ("/MM/sit/parse/invalid", test_parse_invalid);

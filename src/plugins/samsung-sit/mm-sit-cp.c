@@ -9,6 +9,7 @@ struct _MMSitCp {
     GHashTable *data_cids; /* CID -> 1 pending, 2 connected */
     gboolean ready;
     gboolean mapping_sent;
+    gint data_pref;        /* stack last named to the CP, -1 if never */
     gboolean secondary_off;
     guint attempts;
     MMSitLogicalSlotMapping mapping[2];
@@ -41,6 +42,7 @@ mm_sit_cp_class_init (MMSitCpClass *klass)
 static void
 mm_sit_cp_init (MMSitCp *self)
 {
+    self->data_pref = -1;
     self->data_cids = g_hash_table_new (g_direct_hash, g_direct_equal);
 }
 
@@ -99,6 +101,48 @@ mm_sit_cp_peek_client (MMSitCp *self, guint stack)
 {
     g_return_val_if_fail (stack < 2, NULL);
     return self->clients[stack];
+}
+
+/*
+ * Name the stack that owns mobile data to the CP (SET_PREFERRED_DATA_MODEM).
+ *
+ * This has to be in place *before* anything asks for a PDN. The stock stack
+ * sends it twice during boot and re-asserts it seconds before it sets up its
+ * IMS context; we only ever sent it as the first step of a data bearer
+ * connect, which on a captured boot landed twelve seconds *after* the IMS
+ * SETUP_DATA_CALL had already been answered. That answer came back cause=0
+ * and empty -- no address, no P-CSCF -- where the stock stack's carries both
+ * on a byte-identical request, so the context was created without the CP
+ * having been told which stack the data subscription belongs to.
+ *
+ * Called before a PDN is asked for, so the CP is never asked to create a
+ * context without knowing who owns data. That is what the stock stack does --
+ * it re-asserts the preference three seconds before its own IMS context --
+ * and is why this is not done once at coordinator-ready time, where there is
+ * no live port to send on. A bearer connect names it separately as its own
+ * first step, so this is the IMS path's counterpart to that.
+ *
+ * Sent on stack 0's client because that is where the capture shows it, and
+ * the payload names the stack rather than the port it arrives on. Only on a
+ * change: the CP is told once and then left alone.
+ *
+ * Fire and forget. If the CP refuses there is nothing useful to do about it
+ * here, and the caller is in the middle of something else.
+ */
+void
+mm_sit_cp_prefer_data_stack (MMSitCp *self, guint stack)
+{
+    g_autoptr(GByteArray) request = NULL;
+
+    if (stack >= 2 || !self->clients[0] || self->data_pref == (gint) stack)
+        return;
+
+    request = mm_sit_request_new_set_preferred_modem (
+        mm_sit_client_next_token (self->clients[0]), stack);
+    if (!request)
+        return;
+    self->data_pref = (gint) stack;
+    mm_sit_client_command (self->clients[0], request, 10, NULL, NULL, NULL);
 }
 
 static void
@@ -318,6 +362,11 @@ mm_sit_cp_claim_data (MMSitCp *self, guint stack, guint8 cid, GError **error)
         return FALSE;
     }
     g_hash_table_insert (self->data_cids, GUINT_TO_POINTER ((guint) cid), GUINT_TO_POINTER (1));
+    /*
+     * The preference is not sent from here. A bearer connect already names it
+     * as its own first step (CONNECT_STEP_PREFERRED_MODEM), so doing it on the
+     * claim as well put a second, unexpected frame ahead of that one.
+     */
     return TRUE;
 }
 
