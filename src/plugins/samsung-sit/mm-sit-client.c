@@ -4,6 +4,7 @@
 #include <string.h>
 #include <sys/utsname.h>
 
+#include "mm-charsets.h"
 #include "mm-log-object.h"
 #include "mm-sit-client.h"
 #include "mm-sit-boot-config.h"
@@ -4917,6 +4918,139 @@ mm_sit_client_get_facility_lock_for_aid (MMSitClient        *self,
                                                     aid, aid_len);
     mm_sit_client_command (self, request, 5, cancellable,
                            (GAsyncReadyCallback) get_facility_lock_ready, task);
+}
+
+/*
+ * USSD, the CS way.
+ *
+ * Stock sends it over CS even with IMS registered on both stacks -- logcat
+ * from the 2026-11-08 capture says so outright, `isUt=true useImsForUt=false`
+ * and "ImsPhoneMmiCode: Sending ussd string over CS pipe" -- so there is no
+ * AIMS path to prefer here even though XCAPM is running.
+ *
+ * SEND_USSD declares 185 bytes of payload:
+ *
+ *   +0  u8  flag   -- the bool BuildSendUssd takes; 0 in the capture
+ *   +1  u8  DCS    -- 0x0f, GSM 7-bit
+ *   +2  ..  the string, GSM 7-bit packed, LSB-first septets
+ *
+ * "*123#" packed to aa 98 6c 36 02 on the wire, which is exactly what
+ * mm_charset_gsm_pack() produces for it.
+ */
+#define SIT_USSD_DCS_GSM7  0x0f
+#define SIT_USSD_BODY_LEN  185
+#define SIT_USSD_TEXT_MAX  (SIT_USSD_BODY_LEN - 2)
+
+static void
+send_ussd_ready (MMSitClient  *self,
+                 GAsyncResult *res,
+                 GTask        *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    GError                 *error = NULL;
+
+    /*
+     * The response is only the CP taking the request; the network's answer
+     * arrives later as an ON_USSD indication. A refusal here is a real
+     * outcome, not a bug: on the capture Telus's CP answered status 2 and the
+     * vendor RIL reported MODEM_ERR with no indication to follow, while Fizz's
+     * accepted the same frame.
+     */
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (!response)
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_send_ussd (MMSitClient        *self,
+                         const gchar        *ussd,
+                         GCancellable       *cancellable,
+                         GAsyncReadyCallback callback,
+                         gpointer            user_data)
+{
+    g_autoptr(GByteArray) septets = NULL;
+    g_autoptr(GByteArray) request = NULL;
+    g_autofree guint8    *packed = NULL;
+    guint8                body[4 + SIT_USSD_BODY_LEN] = { 0 };
+    guint32               packed_len = 0;
+    GError               *error = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+
+    septets = mm_modem_charset_bytearray_from_utf8 (ussd, MM_MODEM_CHARSET_GSM, FALSE, &error);
+    if (!septets) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    packed = mm_charset_gsm_pack (septets->data, septets->len, 0, &packed_len);
+    if (!packed || packed_len > SIT_USSD_TEXT_MAX) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_INVALID_ARGS,
+                                 "USSD string is too long for one request (%u > %u packed bytes)",
+                                 packed_len, (guint) SIT_USSD_TEXT_MAX);
+        g_object_unref (task);
+        return;
+    }
+
+    body[4 + 1] = SIT_USSD_DCS_GSM7;
+    memcpy (&body[4 + 2], packed, packed_len);
+
+    request = mm_sit_request_new (MM_SIT_MESSAGE_SEND_USSD, mm_sit_client_next_token (self),
+                                  body, sizeof (body), &error);
+    if (!request) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    mm_obj_dbg (self->priv->port, "sending USSD (%u septets, %u packed bytes)",
+                septets->len, packed_len);
+    mm_sit_client_command (self, request, 30, cancellable,
+                           (GAsyncReadyCallback) send_ussd_ready, task);
+}
+
+gboolean
+mm_sit_client_send_ussd_finish (MMSitClient  *self,
+                                GAsyncResult *res,
+                                GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+void
+mm_sit_client_cancel_ussd (MMSitClient        *self,
+                           GCancellable       *cancellable,
+                           GAsyncReadyCallback callback,
+                           gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    /* Header only -- BuildCancelUssd's frame is 12 bytes. */
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_CANCEL_USSD,
+                                        mm_sit_client_next_token (self));
+    if (!request) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "Couldn't build the USSD cancel request");
+        g_object_unref (task);
+        return;
+    }
+    mm_sit_client_command (self, request, 10, cancellable,
+                           (GAsyncReadyCallback) send_ussd_ready, task);
+}
+
+gboolean
+mm_sit_client_cancel_ussd_finish (MMSitClient  *self,
+                                  GAsyncResult *res,
+                                  GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
 }
 
 gboolean

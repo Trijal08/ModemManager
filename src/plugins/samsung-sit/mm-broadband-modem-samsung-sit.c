@@ -14,6 +14,8 @@
 #include "mm-broadband-modem-samsung-sit.h"
 #include "mm-iface-modem.h"
 #include "mm-iface-modem-3gpp.h"
+#include "mm-iface-modem-3gpp-ussd.h"
+#include "mm-charsets.h"
 #include "mm-iface-modem-signal.h"
 #include "mm-iface-modem-time.h"
 #include "mm-log-object.h"
@@ -37,6 +39,10 @@ static void iface_modem_messaging_init (MMIfaceModemMessagingInterface *iface);
 static void iface_modem_signal_init (MMIfaceModemSignalInterface *iface);
 static void iface_modem_time_init (MMIfaceModemTimeInterface *iface);
 static void iface_modem_voice_init (MMIfaceModemVoiceInterface *iface);
+static void iface_modem_3gpp_ussd_init (MMIfaceModem3gppUssdInterface *iface);
+
+static void handle_on_ussd (MMBroadbandModemSamsungSit *self,
+                            const MMSitMessage         *message);
 
 /*
  * Delivered-SMS duplicate suppression.
@@ -67,6 +73,13 @@ typedef struct {
 } SmsDedupSlot;
 
 struct _MMBroadbandModemSamsungSitPrivate {
+    /*
+     * The USSD request in flight. SEND_USSD's own response only says the CP
+     * took it; the network's answer arrives later as an ON_USSD indication, so
+     * the task waits here in between.
+     */
+    GTask *ussd_task;
+    guint  ussd_timeout_id;
     MMSitCp     *cp;
     SmsDedupSlot sms_seen[SMS_DEDUP_SLOTS];
     guint        sms_seen_next;
@@ -161,6 +174,7 @@ G_DEFINE_TYPE_EXTENDED (MMBroadbandModemSamsungSit,
                         0,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM, iface_modem_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP, iface_modem_3gpp_init)
+                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_3GPP_USSD, iface_modem_3gpp_ussd_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_MESSAGING, iface_modem_messaging_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_SIGNAL, iface_modem_signal_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_TIME, iface_modem_time_init)
@@ -1850,6 +1864,9 @@ sit_indication (MMSitClient              *client,
 
     if (message->id == MM_SIT_MESSAGE_REGISTRATION_FAILED)
         handle_registration_failed (self, message);
+
+    if (message->id == MM_SIT_MESSAGE_ON_USSD)
+        handle_on_ussd (self, message);
 
     if (message->id == MM_SIT_MESSAGE_DATA_CALL_LIST_CHANGED)
         handle_data_call_list_changed (self, message);
@@ -6591,6 +6608,353 @@ modem_voice_load_call_list (MMIfaceModemVoice   *iface,
     mm_sit_client_get_call_list (client, NULL,
                                  (GAsyncReadyCallback) get_call_list_ready,
                                  task);
+}
+
+/*****************************************************************************/
+/* USSD (3GPP USSD interface) */
+
+/*
+ * Stock runs USSD over CS even with IMS registered -- the 2026-11-08 capture's
+ * logcat says `isUt=true useImsForUt=false` and "Sending ussd string over CS
+ * pipe" -- so SEND_USSD/CANCEL_USSD are the whole story and the AIMS USSD
+ * request is not used on this carrier config.
+ */
+
+#define USSD_REPLY_TIMEOUT_SECS 30
+
+static void
+ussd_task_complete (MMBroadbandModemSamsungSit *self,
+                    gchar                      *reply,
+                    GError                     *error)
+{
+    g_autoptr(GTask) task = g_steal_pointer (&self->priv->ussd_task);
+
+    if (self->priv->ussd_timeout_id) {
+        g_source_remove (self->priv->ussd_timeout_id);
+        self->priv->ussd_timeout_id = 0;
+    }
+    if (!task) {
+        /* A network-initiated notification, or one that arrived after we gave
+         * up. Nothing is waiting, so the interface's own state is the report. */
+        g_free (reply);
+        g_clear_error (&error);
+        return;
+    }
+    if (error) {
+        g_free (reply);
+        g_task_return_error (task, error);
+    } else {
+        g_task_return_pointer (task, reply, g_free);
+    }
+}
+
+static gboolean
+ussd_timed_out (MMBroadbandModemSamsungSit *self)
+{
+    self->priv->ussd_timeout_id = 0;
+    mm_obj_dbg (self, "no ON_USSD indication within %us; giving up on the session",
+                (guint) USSD_REPLY_TIMEOUT_SECS);
+    mm_iface_modem_3gpp_ussd_update_state (MM_IFACE_MODEM_3GPP_USSD (self),
+                                           MM_MODEM_3GPP_USSD_SESSION_STATE_IDLE);
+    ussd_task_complete (self, NULL,
+                        g_error_new (MM_CORE_ERROR, MM_CORE_ERROR_TIMEOUT,
+                                     "Timed out waiting for the network's USSD response"));
+    return G_SOURCE_REMOVE;
+}
+
+/*
+ * ON_USSD: the mode is the u32 at frame+8, which is where
+ * mm_sit_message_get_payload() starts, so the text follows at payload+4.
+ *
+ * ponytail: the text layout is inferred. Every capture so far answered
+ * NOT_SUPPORTED with the whole 181-byte field zeroed, so only the mode has
+ * been seen for real. It is read as [u8 dcs][packed septets] to mirror
+ * SEND_USSD, which is also what ProtocolUssdIndAdapter::GetDecodedUssd pairing
+ * with DecodingUssd(dcs, ...) implies. The raw bytes are logged so the first
+ * network that actually answers settles it.
+ */
+static void
+handle_on_ussd (MMBroadbandModemSamsungSit *self,
+                const MMSitMessage         *message)
+{
+    const guint8 *payload;
+    gsize         payload_len = 0;
+    guint32       mode;
+    g_autofree gchar *text = NULL;
+
+    payload = mm_sit_message_get_payload (message, &payload_len);
+    if (!payload || payload_len < 4) {
+        mm_obj_dbg (self, "ON_USSD with no mode; ignoring");
+        return;
+    }
+    memcpy (&mode, payload, 4);
+
+    if (payload_len > 5) {
+        const guint8 *packed = payload + 5;
+        gsize         n = payload_len - 5;
+        guint8        dcs = payload[4];
+
+        /* Trailing padding is zero, and a packed run that ends in a zero
+         * septet decodes to a trailing '@' at worst. */
+        while (n && !packed[n - 1])
+            n--;
+        if (n) {
+            g_autofree guint8 *unpacked = NULL;
+            guint32            unpacked_len = 0;
+
+            mm_obj_dbg (self, "ON_USSD mode %u, dcs 0x%02x, %" G_GSIZE_FORMAT " packed bytes",
+                        mode, dcs, n);
+            unpacked = mm_charset_gsm_unpack (packed, (n * 8) / 7, 0, &unpacked_len);
+            if (unpacked) {
+                g_autoptr(GByteArray) ba = g_byte_array_new ();
+
+                g_byte_array_append (ba, unpacked, unpacked_len);
+                text = mm_modem_charset_bytearray_to_utf8 (ba, MM_MODEM_CHARSET_GSM, FALSE, NULL);
+            }
+        }
+    }
+
+    switch (mode) {
+    case MM_SIT_USSD_MODE_NOTIFY:
+        mm_iface_modem_3gpp_ussd_update_state (MM_IFACE_MODEM_3GPP_USSD (self),
+                                               MM_MODEM_3GPP_USSD_SESSION_STATE_IDLE);
+        if (self->priv->ussd_task)
+            ussd_task_complete (self, g_steal_pointer (&text), NULL);
+        else if (text)
+            mm_iface_modem_3gpp_ussd_update_network_notification (MM_IFACE_MODEM_3GPP_USSD (self),
+                                                                  text);
+        break;
+    case MM_SIT_USSD_MODE_REQUEST:
+        /* The network wants an answer, so the session stays up. */
+        mm_iface_modem_3gpp_ussd_update_state (MM_IFACE_MODEM_3GPP_USSD (self),
+                                               MM_MODEM_3GPP_USSD_SESSION_STATE_USER_RESPONSE);
+        if (self->priv->ussd_task)
+            ussd_task_complete (self, g_steal_pointer (&text), NULL);
+        else if (text)
+            mm_iface_modem_3gpp_ussd_update_network_request (MM_IFACE_MODEM_3GPP_USSD (self),
+                                                             text);
+        break;
+    case MM_SIT_USSD_MODE_NW_RELEASE:
+    case MM_SIT_USSD_MODE_LOCAL_CLIENT:
+    case MM_SIT_USSD_MODE_NOT_SUPPORTED:
+    case MM_SIT_USSD_MODE_NW_TIMEOUT:
+    default:
+        mm_iface_modem_3gpp_ussd_update_state (MM_IFACE_MODEM_3GPP_USSD (self),
+                                               MM_MODEM_3GPP_USSD_SESSION_STATE_IDLE);
+        ussd_task_complete (self, NULL,
+                            g_error_new (MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                         "The network ended the USSD session (mode %u)", mode));
+        break;
+    }
+}
+
+static void
+modem_3gpp_ussd_unsolicited_events_noop (MMIfaceModem3gppUssd *self,
+                                         GAsyncReadyCallback   callback,
+                                         gpointer              user_data)
+{
+    GTask *task = g_task_new (self, NULL, callback, user_data);
+
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static gboolean
+modem_3gpp_ussd_unsolicited_events_noop_finish (MMIfaceModem3gppUssd  *self,
+                                                GAsyncResult          *res,
+                                                GError               **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+modem_3gpp_ussd_check_support (MMIfaceModem3gppUssd *self,
+                               GAsyncReadyCallback   callback,
+                               gpointer              user_data)
+{
+    GTask *task;
+
+    /* Every SIT CP carries the supplementary-service group; there is no
+     * capability query for it. */
+    task = g_task_new (self, NULL, callback, user_data);
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static gboolean
+modem_3gpp_ussd_check_support_finish (MMIfaceModem3gppUssd *self,
+                                      GAsyncResult         *res,
+                                      GError              **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+/*
+ * The charset work happens where the wire format is, in mm-sit-client.c, so
+ * there is nothing to translate on the way in or out.
+ */
+static gchar *
+modem_3gpp_ussd_encode (MMIfaceModem3gppUssd *self,
+                        const gchar          *command,
+                        guint                *scheme,
+                        GError              **error)
+{
+    *scheme = MM_MODEM_GSM_USSD_SCHEME_7BIT;
+    return g_strdup (command);
+}
+
+static gchar *
+modem_3gpp_ussd_decode (MMIfaceModem3gppUssd *self,
+                        const gchar          *reply,
+                        GError              **error)
+{
+    return g_strdup (reply);
+}
+
+static void
+send_ussd_ready (MMSitClient                *client,
+                 GAsyncResult               *res,
+                 MMBroadbandModemSamsungSit *self)
+{
+    GError *error = NULL;
+
+    if (!mm_sit_client_send_ussd_finish (client, res, &error)) {
+        /* The CP refused to send it at all -- Telus answered status 2 on the
+         * capture and no indication followed, so fail now rather than wait. */
+        mm_iface_modem_3gpp_ussd_update_state (MM_IFACE_MODEM_3GPP_USSD (self),
+                                               MM_MODEM_3GPP_USSD_SESSION_STATE_IDLE);
+        ussd_task_complete (self, NULL, error);
+        g_object_unref (self);
+        return;
+    }
+    /* Taken. The answer comes as an ON_USSD indication. */
+    mm_iface_modem_3gpp_ussd_update_state (MM_IFACE_MODEM_3GPP_USSD (self),
+                                           MM_MODEM_3GPP_USSD_SESSION_STATE_ACTIVE);
+    if (self->priv->ussd_task && !self->priv->ussd_timeout_id)
+        self->priv->ussd_timeout_id = g_timeout_add_seconds (USSD_REPLY_TIMEOUT_SECS,
+                                                             (GSourceFunc) ussd_timed_out,
+                                                             self);
+    g_object_unref (self);
+}
+
+static void
+modem_3gpp_ussd_send (MMIfaceModem3gppUssd *_self,
+                      const gchar          *command,
+                      GAsyncReadyCallback   callback,
+                      gpointer              user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (_self);
+    MMSitClient                *client;
+    GTask                      *task;
+    g_autoptr(GError)           error = NULL;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    if (self->priv->ussd_task) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_IN_PROGRESS,
+                                 "A USSD session is already waiting for the network");
+        g_object_unref (task);
+        return;
+    }
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, g_steal_pointer (&error));
+        g_object_unref (task);
+        return;
+    }
+
+    self->priv->ussd_task = task;
+    mm_sit_client_send_ussd (client, command, NULL,
+                             (GAsyncReadyCallback) send_ussd_ready, g_object_ref (self));
+}
+
+static gchar *
+modem_3gpp_ussd_send_finish (MMIfaceModem3gppUssd *self,
+                             GAsyncResult         *res,
+                             GError              **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+static void
+cancel_ussd_ready (MMSitClient  *client,
+                   GAsyncResult *res,
+                   GTask        *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    GError                     *error = NULL;
+
+    mm_iface_modem_3gpp_ussd_update_state (MM_IFACE_MODEM_3GPP_USSD (self),
+                                           MM_MODEM_3GPP_USSD_SESSION_STATE_IDLE);
+    /* Whatever the CP says, nothing is waiting on the network any more. */
+    ussd_task_complete (self, NULL,
+                        g_error_new (MM_CORE_ERROR, MM_CORE_ERROR_ABORTED,
+                                     "The USSD session was cancelled"));
+
+    if (!mm_sit_client_cancel_ussd_finish (client, res, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+modem_3gpp_ussd_cancel (MMIfaceModem3gppUssd *_self,
+                        GAsyncReadyCallback   callback,
+                        gpointer              user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (_self);
+    MMSitClient                *client;
+    GTask                      *task;
+    g_autoptr(GError)           error = NULL;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, g_steal_pointer (&error));
+        g_object_unref (task);
+        return;
+    }
+
+    mm_sit_client_cancel_ussd (client, NULL,
+                               (GAsyncReadyCallback) cancel_ussd_ready, task);
+}
+
+static gboolean
+modem_3gpp_ussd_cancel_finish (MMIfaceModem3gppUssd *self,
+                               GAsyncResult         *res,
+                               GError              **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+iface_modem_3gpp_ussd_init (MMIfaceModem3gppUssdInterface *iface)
+{
+    iface->check_support        = modem_3gpp_ussd_check_support;
+    iface->check_support_finish = modem_3gpp_ussd_check_support_finish;
+    /*
+     * ON_USSD arrives on the same control port as everything else and
+     * sit_indication() already dispatches it, so there is nothing to set up,
+     * enable, disable or tear down. These cannot be left NULL: unlike most
+     * interfaces, mm-iface-modem-3gpp-ussd.c calls them without a guard, and
+     * what we would inherit is the AT +CUSD path.
+     */
+    iface->setup_unsolicited_events          = modem_3gpp_ussd_unsolicited_events_noop;
+    iface->setup_unsolicited_events_finish   = modem_3gpp_ussd_unsolicited_events_noop_finish;
+    iface->enable_unsolicited_events         = modem_3gpp_ussd_unsolicited_events_noop;
+    iface->enable_unsolicited_events_finish  = modem_3gpp_ussd_unsolicited_events_noop_finish;
+    iface->disable_unsolicited_events        = modem_3gpp_ussd_unsolicited_events_noop;
+    iface->disable_unsolicited_events_finish = modem_3gpp_ussd_unsolicited_events_noop_finish;
+    iface->cleanup_unsolicited_events        = modem_3gpp_ussd_unsolicited_events_noop;
+    iface->cleanup_unsolicited_events_finish = modem_3gpp_ussd_unsolicited_events_noop_finish;
+    iface->encode               = modem_3gpp_ussd_encode;
+    iface->decode               = modem_3gpp_ussd_decode;
+    iface->send                 = modem_3gpp_ussd_send;
+    iface->send_finish          = modem_3gpp_ussd_send_finish;
+    iface->cancel               = modem_3gpp_ussd_cancel;
+    iface->cancel_finish        = modem_3gpp_ussd_cancel_finish;
 }
 
 static void

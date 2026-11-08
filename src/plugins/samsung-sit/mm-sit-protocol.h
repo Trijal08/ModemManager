@@ -33,6 +33,21 @@
 #define MM_SIT_IPV4_STRLEN          16
 #define MM_SIT_IPV6_STRLEN          46
 
+/*
+ * The mode an ON_USSD indication reports, as the u32 at frame+8 -- the slot a
+ * response uses for its status. Values are RIL's: logcat printed
+ * "UNSOL_ON_USSD 4" for the capture where the network rejected the code, and
+ * the dialler turned that into onUssdFinishedError.
+ */
+typedef enum {
+    MM_SIT_USSD_MODE_NOTIFY        = 0,
+    MM_SIT_USSD_MODE_REQUEST       = 1,
+    MM_SIT_USSD_MODE_NW_RELEASE    = 2,
+    MM_SIT_USSD_MODE_LOCAL_CLIENT  = 3,
+    MM_SIT_USSD_MODE_NOT_SUPPORTED = 4,
+    MM_SIT_USSD_MODE_NW_TIMEOUT    = 5,
+} MMSitUssdMode;
+
 typedef enum {
     MM_SIT_MESSAGE_TYPE_REQUEST    = 0,
     MM_SIT_MESSAGE_TYPE_RESPONSE   = 1,
@@ -86,6 +101,16 @@ typedef enum {
     MM_SIT_MESSAGE_GET_MANUAL_BAND_MODE        = 0x0730,
     MM_SIT_MESSAGE_SET_MANUAL_BAND_MODE        = 0x0731,
     MM_SIT_MESSAGE_GET_BASE_BAND_VERSION       = 0x0901,
+    /*
+     * Supplementary services. Ids read off ProtocolCallBuilder in
+     * vendor.radio.protocol.sit.stream.so, each of which loads its own as an
+     * inline immediate: BuildSendUssd and BuildSendEncodedUssd both use
+     * 0x0505, BuildCancelUssd 0x0506. ON_USSD is the matching indication,
+     * captured 2026-11-08.
+     */
+    MM_SIT_MESSAGE_SEND_USSD                   = 0x0505,
+    MM_SIT_MESSAGE_CANCEL_USSD                 = 0x0506,
+    MM_SIT_MESSAGE_ON_USSD                     = 0x0510,
     MM_SIT_MESSAGE_SETUP_DATA_CALL             = 0x0600,
     MM_SIT_MESSAGE_DEACTIVATE_DATA_CALL        = 0x0601,
     MM_SIT_MESSAGE_SET_INITIAL_ATTACH_APN      = 0x0603,

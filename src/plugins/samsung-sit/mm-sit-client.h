@@ -649,6 +649,23 @@ gboolean mm_sit_client_disconnect_data_finish (MMSitClient        *self,
                                                GAsyncResult       *res,
                                                GError            **error);
 
+void     mm_sit_client_send_ussd               (MMSitClient        *self,
+                                               const gchar        *ussd,
+                                               GCancellable       *cancellable,
+                                               GAsyncReadyCallback callback,
+                                               gpointer            user_data);
+gboolean mm_sit_client_send_ussd_finish        (MMSitClient        *self,
+                                               GAsyncResult       *res,
+                                               GError            **error);
+
+void     mm_sit_client_cancel_ussd             (MMSitClient        *self,
+                                               GCancellable       *cancellable,
+                                               GAsyncReadyCallback callback,
+                                               gpointer            user_data);
+gboolean mm_sit_client_cancel_ussd_finish      (MMSitClient        *self,
+                                               GAsyncResult       *res,
+                                               GError            **error);
+
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (MMSitClient, g_object_unref)
 
 #endif /* MM_SIT_CLIENT_H */
