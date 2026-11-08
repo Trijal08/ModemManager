@@ -59,7 +59,8 @@ if enable_tests and plugins_options['samsung-sit']
     ),
     include_directories: [top_inc, src_inc, include_directories('samsung-sit')],
     dependencies: [libhelpers_dep, libport_dep, sqlite3_dep, samsung_sit_ffi_dep],
-    c_args: ['-DMM_SIT_IMS_RETRY_TIMEOUT_SECS=1'],
+    c_args: ['-DMM_SIT_IMS_RETRY_TIMEOUT_SECS=1',
+             '-DPROVISIONING_COOLDOWN_SECS=1'],
   )
   # The suite waits on real timers -- the IMS provisioning retry chain alone is
   # ten attempts, compressed to a second each by the define above, and the DSDS
