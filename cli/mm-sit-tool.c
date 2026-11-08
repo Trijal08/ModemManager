@@ -858,6 +858,7 @@ static const gchar *command_summary =
     "  operator                      serving operator\n"
     "  slots                         SIM slot status\n"
     "  slot-map PHYSICAL_SLOT [PORT] map a logical stack onto a slot\n"
+    "  slot-maps SLOT[:PORT] ...     map every logical stack at once, stack 0 first\n"
     "  radio on|off                  set radio power\n"
     "  connect APN                   set up a data call\n"
     "  disconnect [CID]              tear one down\n"
@@ -1040,6 +1041,44 @@ main (int argc,
         if (success)
             g_print ("logical stack 0 mapped to physical slot %" G_GUINT64_FORMAT
                      " port %" G_GUINT64_FORMAT "\n", physical_slot, port);
+    } else if (g_str_equal (command, "slot-maps")) {
+        /* One SLOT[:PORT] per logical stack, in stack order: the mapping array
+         * index *is* the logical stack id on the wire. */
+        MMSitLogicalSlotMapping mappings[MM_SIT_MAX_SIM_SLOTS];
+        guint                   n_mappings = 0;
+        gint                    i;
+
+        if (argc < 3 || (argc - 2) > MM_SIT_MAX_SIM_SLOTS) {
+            g_set_error (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                         "slot-maps takes 1 to %u SLOT[:PORT] arguments, one per logical stack",
+                         MM_SIT_MAX_SIM_SLOTS);
+            goto out;
+        }
+        for (i = 2; i < argc; i++) {
+            g_auto(GStrv) parts = NULL;
+            guint64       physical_slot = 0;
+            guint64       port = 0;
+
+            parts = g_strsplit (argv[i], ":", 2);
+            if (!parse_uint64 (parts[0], MM_SIT_MAX_SIM_SLOTS, &physical_slot, &error))
+                goto out;
+            if (parts[1] && !parse_uint64 (parts[1], MM_SIT_MAX_SIM_PORTS - 1, &port, &error))
+                goto out;
+            if (!physical_slot) {
+                g_set_error_literal (&error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                                     "Physical slot numbers start at 1");
+                goto out;
+            }
+            mappings[n_mappings].physical_slot_id = physical_slot - 1;
+            mappings[n_mappings].port_id = port;
+            n_mappings++;
+        }
+        success = set_sim_slot_mapping_sync (client, mappings, n_mappings, &error);
+        if (success) {
+            for (i = 0; i < (gint) n_mappings; i++)
+                g_print ("logical stack %d mapped to physical slot %u port %u\n",
+                         i, mappings[i].physical_slot_id + 1, mappings[i].port_id);
+        }
     } else if (g_str_equal (command, "radio")) {
         MMSitRadioState state;
 
