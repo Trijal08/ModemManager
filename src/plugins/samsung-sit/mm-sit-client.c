@@ -346,6 +346,61 @@ mm_sit_client_get_carrier_sim_info (MMSitClient         *self,
     return TRUE;
 }
 
+/* The CP pushes CARRIER_CONFIG_SIM_INFO during boot; a client that opens
+ * after that burst has an empty cache.  The record is re-queried: the CP
+ * answers status 22 when it holds no record, in which case this errors and
+ * the caller falls back as before. */
+static void
+query_carrier_sim_info_ready (MMSitClient  *self,
+                              GAsyncResult *res,
+                              GTask        *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    g_autoptr(GError)       error = NULL;
+    MMSitCarrierSimInfo     info;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (response &&
+        mm_sit_message_parse_carrier_sim_info (response, &info, NULL)) {
+        self->priv->carrier_sim_info = info;
+        self->priv->has_carrier_sim_info = TRUE;
+        g_task_return_pointer (task,
+                               g_memdup (&info, sizeof (info)),
+                               g_free);
+    } else
+        g_task_return_error (task,
+                             error ? g_steal_pointer (&error)
+                                   : g_error_new (MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                                  "SIT CARRIER_CONFIG_SIM_INFO response is not parseable"));
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_query_carrier_sim_info (MMSitClient         *self,
+                                      GCancellable        *cancellable,
+                                      GAsyncReadyCallback  callback,
+                                      gpointer             user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+
+    g_return_if_fail (MM_IS_SIT_CLIENT (self));
+
+    request = mm_sit_request_new_query (MM_SIT_MESSAGE_CARRIER_CONFIG_SIM_INFO,
+                                        mm_sit_client_next_token (self));
+    mm_sit_client_command (self, request, 5, cancellable,
+                           (GAsyncReadyCallback) query_carrier_sim_info_ready,
+                           g_task_new (self, cancellable, callback, user_data));
+}
+
+MMSitCarrierSimInfo *
+mm_sit_client_query_carrier_sim_info_finish (MMSitClient   *self,
+                                             GAsyncResult  *res,
+                                             GError       **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), NULL);
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
 gboolean
 mm_sit_client_radio_state_trusted (MMSitClient *self)
 {

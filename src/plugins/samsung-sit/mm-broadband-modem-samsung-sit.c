@@ -1481,6 +1481,52 @@ setup_carrier_config_finish (MMIfaceModem  *self,
     return g_task_propagate_boolean (G_TASK (res), error);
 }
 
+static void setup_carrier_config (MMIfaceModem        *iface,
+                                  const gchar         *imsi,
+                                  const gchar         *carrier_config_database,
+                                  GAsyncReadyCallback  callback,
+                                  gpointer             user_data);
+
+typedef struct {
+    GAsyncReadyCallback callback;
+    gpointer            user_data;
+    gchar              *database;
+} EnsureCarrierConfigContext;
+
+static void
+ensure_carrier_config_context_free (EnsureCarrierConfigContext *ctx)
+{
+    g_free (ctx->database);
+    g_free (ctx);
+}
+
+static void
+carrier_sim_info_queried (MMSitClient  *client,
+                          GAsyncResult *res,
+                          gpointer      user_data)
+{
+    GTask *task = user_data;
+
+    MMBroadbandModemSamsungSit *self;
+    MMSitCarrierSimInfo        *info = NULL;
+    g_autoptr(GError)           error = NULL;
+    EnsureCarrierConfigContext *ctx;
+
+    self = MM_BROADBAND_MODEM_SAMSUNG_SIT (g_task_get_source_object (task));
+    ctx = g_task_get_task_data (task);
+
+    info = mm_sit_client_query_carrier_sim_info_finish (client, res, &error);
+    if (!info) {
+        g_task_return_error (task, g_steal_pointer (&error));
+        g_object_unref (task);
+        return;
+    }
+    g_object_unref (task);
+    setup_carrier_config (MM_IFACE_MODEM (self), info->imsi,
+                          ctx->database, ctx->callback, ctx->user_data);
+    g_free (info);
+}
+
 void
 mm_broadband_modem_samsung_sit_ensure_carrier_config (MMBroadbandModemSamsungSit *self,
                                                        GAsyncReadyCallback          callback,
@@ -1515,11 +1561,31 @@ mm_broadband_modem_samsung_sit_ensure_carrier_config (MMBroadbandModemSamsungSit
     if (self->priv->carrier_config_ready)
         invalidate_carrier_config (self);
 
-    if (!database || !database[0] || !imsi || !imsi[0]) {
+    if (!database || !database[0]) {
         task = g_task_new (self, NULL, callback, user_data);
         g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_NOT_FOUND,
-                                 "Samsung carrier configuration requires a database and SIM identity");
+                                 "Samsung carrier configuration requires a database");
         g_object_unref (task);
+        return;
+    }
+
+    /* The SIM object's IMSI load can lose the CP's park/wake race during
+     * enabling, so it may be empty even with a provisioned SIM.  The CP still
+     * holds the identity -- ask it directly before giving up. */
+    if (!imsi || !imsi[0]) {
+        EnsureCarrierConfigContext *ctx;
+
+        ctx = g_new0 (EnsureCarrierConfigContext, 1);
+        ctx->callback = callback;
+        ctx->user_data = user_data;
+        ctx->database = g_steal_pointer (&database);
+
+        task = g_task_new (self, NULL, NULL, NULL);
+        g_task_set_task_data (task, ctx,
+                              (GDestroyNotify) ensure_carrier_config_context_free);
+        mm_sit_client_query_carrier_sim_info (self->priv->client, NULL,
+                                              (GAsyncReadyCallback) carrier_sim_info_queried,
+                                              task);
         return;
     }
 

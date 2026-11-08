@@ -66,6 +66,13 @@ void     mm_sit_client_get_device_identity (MMSitClient  *self,
 
 gboolean mm_sit_client_get_carrier_sim_info (MMSitClient         *self,
                                              MMSitCarrierSimInfo *out_info);
+void     mm_sit_client_query_carrier_sim_info        (MMSitClient         *self,
+                                                      GCancellable        *cancellable,
+                                                      GAsyncReadyCallback  callback,
+                                                      gpointer             user_data);
+MMSitCarrierSimInfo *mm_sit_client_query_carrier_sim_info_finish (MMSitClient   *self,
+                                                                  GAsyncResult  *res,
+                                                                  GError       **error);
 gboolean mm_sit_client_radio_state_trusted  (MMSitClient         *self);
 
 /* The next request token. Public because AIMS frames are built outside this
