@@ -3128,6 +3128,9 @@ test_ims_provisioning_retries (gconstpointer data)
     peer_id = g_unix_fd_add (sockets[1], G_IO_IN | G_IO_HUP | G_IO_ERR,
                              (GUnixFDSourceFunc) ims_retry_peer_ready, &peer);
     ims = mm_sit_ims_new (client, 0, database);
+    /* Provisioning waits for the stack's boot sequence, which the modem
+     * normally reports; there is no modem here, so say so directly. */
+    mm_sit_client_set_boot_sequence_done (client);
     mm_sit_ims_set_device_identity (ims, &test_device);
     if (vops) {
         ims_test_vops_updates (ims, &peer);

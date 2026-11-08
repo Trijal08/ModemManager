@@ -82,11 +82,54 @@
  */
 #define RAT_GRACE_SECS 60
 
+/*
+ * How long the CP needs after the radio comes up before it will grant a PDN
+ * that is not the attach PDN.
+ *
+ * The CP announces its physical-channel configuration
+ * (SIT_IND_PHYSICAL_CHANNEL_CONFIG) once the radio has carriers assigned, and
+ * it is not ready for a second context the moment that lands. Measured across
+ * six revisions and two carriers, with the gap from that first indication to
+ * our SETUP_DATA_CALL on the x axis:
+ *
+ *     266-694ms   10 asks   10x cause 168 (a local refusal, back in 9-61ms)
+ *     5065-6647ms  2 asks   2x granted    (stock, on this same firmware)
+ *     7550-15066ms 2 asks   2x granted    (ours, once this wait was added)
+ *
+ * No ask inside 700ms has ever been granted and no ask past 5s has ever been
+ * refused, so wait out stock's margin. This is a property of the modem, not of
+ * any network: it is keyed to the CP's own indication and to our registration,
+ * and no part of it depends on the operator.
+ */
+#define PDN_SETTLE_MS 5000
+
+/*
+ * How long a provisioned stack is given to register before the PDN is thrown
+ * away and asked for again.
+ *
+ * The CP registers within about 15 s of provisioning when it is going to at
+ * all -- measured 14 s and 17 s on the boots that worked. What it cannot do is
+ * register against a P-CSCF set the network will not answer on, and which set
+ * arrives is the network's choice per establishment: on this device the pool
+ * at 2001:568:fff2:300 has registered every time it appeared and the one at
+ * 2001:568:ffff:3002 has never registered once, across eight captures.
+ *
+ * Nothing AP-side chooses that, and hardcoding a pool would be wrong anywhere
+ * but here. What is portable is the observation: provisioned, and still not
+ * registered long after the CP would have been. So tear the context down and
+ * ask again -- a fresh establishment draws a fresh set. Carrier-neutral by
+ * construction, because the condition is "did SIP registration happen", not
+ * "which addresses came back".
+ *
+ * Re-provisioning goes through mm_sit_ims_stop(), so the monotonic floor still
+ * governs how often this can happen.
+ */
+#define REGISTRATION_WATCHDOG_SECS 45
+
 typedef enum {
     IMS_STATE_STOPPED,
     IMS_STATE_STARTING,
     IMS_STATE_STARTED,
-    IMS_STATE_FAILED,
 } ImsState;
 
 struct _MMSitImsPrivate {
@@ -132,6 +175,14 @@ struct _MMSitImsPrivate {
     /* The modem's own registration -- the radio being up and settled. Distinct
      * from `registered` below, which is the CP's IMS/SIP registration. */
     gboolean                net_registered;
+    /*
+     * When the radio registered and when the CP first described its physical
+     * channel, plus the pending wake-up that lets PDN_SETTLE_MS pass after the
+     * later of the two before we ask for the IMS PDN.
+     */
+    gint64                  net_registered_us;
+    gint64                  phych_us;
+    guint                   settle_id;
     MMSitVopsSupport        vops_support;
 
     /* The context the CP granted, kept because every later step describes it --
@@ -156,6 +207,9 @@ struct _MMSitImsPrivate {
     gint64        last_start_us;
     guint         cooldown_secs;
     guint         cooldown_id;
+    /* Armed when provisioning completes, disarmed by registration; see
+     * REGISTRATION_WATCHDOG_SECS. */
+    guint         registration_watchdog_id;
 };
 
 enum {
@@ -298,15 +352,47 @@ schedule_retry (MMSitIms    *self,
                 GError      *error)
 {
     clear_retry (self);
-    if (++self->priv->provisioning_failures >= MAX_PROVISIONING_ATTEMPTS) {
+    /*
+     * Only a refusal counts against the burst. "Serial command timed out" means
+     * the CP never answered, which is not a decision about the subscription --
+     * and it costs an attempt the stack usually needs: on one boot a timeout
+     * hit both stacks at once and ate the retry that normally succeeds. The
+     * cause is parsed out below for the same reason.
+     */
+    if (error && !strstr (error->message, "cause "))
+        mm_obj_dbg (self, "IMS %s attempt failed without a cause (%s); "
+                    "not counting it against the burst", what, error->message);
+    else
+        self->priv->provisioning_failures++;
+
+    if (self->priv->provisioning_failures >= MAX_PROVISIONING_ATTEMPTS) {
         mm_obj_info (self, "IMS %s failed after %u attempts (%s); giving up until the next registration cycle",
                      what, self->priv->provisioning_failures,
                      error ? error->message : "unknown");
         g_clear_error (&error);
-        /* Clean up any PDN or stack left by a failure after SETUP. Keep a
-         * distinct state so ordinary RAT/operator polls cannot restart us. */
+        /*
+         * Clean up any PDN or stack left by a failure after SETUP, and go back
+         * to STOPPED rather than a dead end.
+         *
+         * This used to set IMS_STATE_FAILED, which nothing ever compared
+         * against -- and the start gate only fires from STOPPED, so the stack
+         * could never come back. Recovery needed an outside event that happened
+         * to call stop() again (a VoPS drop, a RAT change); on a network where
+         * nothing churns there was none, so three refusals meant no IMS until
+         * ModemManager restarted. Measured repeatedly: Telus burns the burst
+         * with 168/168/36 and is then down for the boot, while the same request
+         * was granted on a later attempt at 48 s, 69 s and 464 s in other runs.
+         * It does not need fewer attempts, it needs a fourth.
+         *
+         * The CP is still protected, by the thing that was actually measured to
+         * protect it: the monotonic floor above, which doubles to
+         * PROVISIONING_COOLDOWN_MAX_SECS and which a stop/start cannot reset.
+         * So a burst can repeat, but only every few minutes -- not the
+         * unbounded loop that once put 26x Android's volume through the oem
+         * ring. mm_sit_ims_stop() leaves the state STOPPED and clears the
+         * failure count for us.
+         */
         mm_sit_ims_stop (self);
-        self->priv->state = IMS_STATE_FAILED;
         return;
     }
     mm_obj_dbg (self, "IMS %s attempt %u/%u failed (%s); retrying in %us",
@@ -400,6 +486,8 @@ sequence_context_free (SequenceContext *ctx)
 }
 
 static void sequence_step (GTask *task);
+static void arm_registration_watchdog (MMSitIms *self);
+static void clear_registration_watchdog (MMSitIms *self);
 
 /*
  * One profile is in. Keep going either way: a refused profile is the CP saying
@@ -522,6 +610,41 @@ reassert_filter_ready (MMSitClient  *client,
                                     g_task_get_cancellable (task),
                                     (GAsyncReadyCallback) reassert_screen_ready,
                                     task);
+}
+
+static void
+clear_registration_watchdog (MMSitIms *self)
+{
+    if (self->priv->registration_watchdog_id) {
+        g_source_remove (self->priv->registration_watchdog_id);
+        self->priv->registration_watchdog_id = 0;
+    }
+}
+
+static gboolean
+registration_watchdog_cb (MMSitIms *self)
+{
+    self->priv->registration_watchdog_id = 0;
+
+    if (self->priv->registered)
+        return G_SOURCE_REMOVE;
+
+    /* See REGISTRATION_WATCHDOG_SECS. Throw the context away and ask again;
+     * the floor decides how soon that may happen. */
+    mm_obj_info (self, "IMS provisioned %us ago and still not registered; "
+                 "discarding the context and asking for a new one",
+                 REGISTRATION_WATCHDOG_SECS);
+    mm_sit_ims_stop (self);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+arm_registration_watchdog (MMSitIms *self)
+{
+    clear_registration_watchdog (self);
+    self->priv->registration_watchdog_id =
+        g_timeout_add_seconds (REGISTRATION_WATCHDOG_SECS,
+                               (GSourceFunc) registration_watchdog_cb, self);
 }
 
 static void
@@ -735,6 +858,7 @@ sequence_ready (MMSitIms     *self,
     self->priv->state = IMS_STATE_STARTED;
     self->priv->provisioning_failures = 0;
     mm_obj_info (self, "IMS provisioned; waiting for the CP to register");
+    arm_registration_watchdog (self);
 }
 
 /*
@@ -922,6 +1046,8 @@ handle_registration (MMSitIms           *self,
 
     was = self->priv->registered;
     self->priv->registered = !!reg.registered;
+    if (self->priv->registered)
+        clear_registration_watchdog (self);
 
     g_free (self->priv->associated_uris);
     self->priv->associated_uris = reg.uris[0] ? g_strdup (reg.uris) : NULL;
@@ -1372,9 +1498,34 @@ indication_cb (MMSitClient        *client,
     case MM_SIT_MESSAGE_AIMS_CALL_STATUS:
         handle_call_status (self, message);
         break;
+    case MM_SIT_MESSAGE_PHYSICAL_CHANNEL_CONFIG:
+        /* The other mark of the settle window; see PDN_SETTLE_MS. Only the
+         * first one counts -- the CP repeats this throughout the session, and
+         * stock asks 600ms after a later one. */
+        if (!self->priv->phych_us) {
+            self->priv->phych_us = g_get_monotonic_time ();
+            mm_obj_dbg (self, "the CP described its physical channel; "
+                        "IMS may ask for a PDN %u ms from now",
+                        (guint) PDN_SETTLE_MS);
+            mm_sit_ims_reevaluate (self);
+        }
+        break;
     default:
         break;
     }
+}
+
+/*
+ * Re-evaluates rather than starting directly: a physical-channel indication
+ * that arrives while we are waiting moves the deadline out, and the gate below
+ * re-arms this for whatever is left. See PDN_SETTLE_MS.
+ */
+static gboolean
+settle_expired (MMSitIms *self)
+{
+    self->priv->settle_id = 0;
+    mm_sit_ims_reevaluate (self);
+    return G_SOURCE_REMOVE;
 }
 
 static gboolean
@@ -1385,6 +1536,21 @@ rat_grace_expired (MMSitIms *self)
                 (guint) RAT_GRACE_SECS);
     mm_sit_ims_stop (self);
     return G_SOURCE_REMOVE;
+}
+
+/*
+ * Re-run the start gate with whatever is already known.
+ *
+ * The gate only runs when the modem pushes an access-tech update, so a
+ * condition that becomes true in between -- the boot sequence finishing -- has
+ * to say so, or nothing would start until the next RAT indication happened to
+ * arrive.
+ */
+void
+mm_sit_ims_reevaluate (MMSitIms *self)
+{
+    g_return_if_fail (MM_IS_SIT_IMS (self));
+    mm_sit_ims_update_access_tech (self, self->priv->last_act);
 }
 
 void
@@ -1420,6 +1586,8 @@ mm_sit_ims_update_access_tech (MMSitIms                *self,
     }
 
     if (possible && self->priv->state == IMS_STATE_STOPPED) {
+        gint64 ready_us;
+
         ensure_device_identity (self);
         if (!self->priv->have_identity) {
             mm_obj_dbg (self, "not starting IMS: no device identity for the User-Agent");
@@ -1435,6 +1603,29 @@ mm_sit_ims_update_access_tech (MMSitIms                *self,
         if (!self->priv->net_registered) {
             mm_obj_dbg (self, "not starting IMS yet: waiting for the radio to register");
             return;
+        }
+        /*
+         * And let the CP settle before asking for a context that is not the
+         * attach context; see PDN_SETTLE_MS. Both marks are first-event marks,
+         * so this cannot starve: if the CP never describes a physical channel,
+         * the registration mark still carries the deadline.
+         */
+        ready_us = MAX (self->priv->net_registered_us, self->priv->phych_us);
+        if (ready_us) {
+            gint64 waited_ms = (g_get_monotonic_time () - ready_us) / 1000;
+
+            if (waited_ms < PDN_SETTLE_MS) {
+                guint remaining = (guint) (PDN_SETTLE_MS - waited_ms);
+
+                if (self->priv->settle_id)
+                    g_source_remove (self->priv->settle_id);
+                mm_obj_dbg (self, "not starting IMS yet: letting the CP settle for %u ms more",
+                            remaining);
+                self->priv->settle_id = g_timeout_add (remaining,
+                                                       (GSourceFunc) settle_expired,
+                                                       self);
+                return;
+            }
         }
         mm_obj_dbg (self, "packet-switched RAT available; starting IMS");
         self->priv->state = IMS_STATE_STARTING;
@@ -1477,6 +1668,9 @@ mm_sit_ims_set_registered (MMSitIms *self,
     if (self->priv->net_registered == !!registered)
         return;
     self->priv->net_registered = !!registered;
+    /* The first mark of the settle window; see PDN_SETTLE_MS. */
+    if (registered && !self->priv->net_registered_us)
+        self->priv->net_registered_us = g_get_monotonic_time ();
 
     if (!registered) {
         /*
@@ -1676,6 +1870,7 @@ mm_sit_ims_stop (MMSitIms *self)
     if (self->priv->state == IMS_STATE_STOPPED)
         return;
     self->priv->state = IMS_STATE_STOPPED;
+    clear_registration_watchdog (self);
     self->priv->registered = FALSE;
     g_clear_pointer (&self->priv->associated_uris, g_free);
 
@@ -1743,6 +1938,10 @@ dispose (GObject *object)
 
     clear_cooldown (self);
     clear_retry (self);
+    if (self->priv->settle_id) {
+        g_source_remove (self->priv->settle_id);
+        self->priv->settle_id = 0;
+    }
     clear_rat_grace (self);
     if (self->priv->cancellable) {
         g_cancellable_cancel (self->priv->cancellable);

@@ -54,6 +54,10 @@ void mm_sit_ims_set_device_identity (MMSitIms                     *self,
  * placed is [`mm_sit_ims_is_registered`], never this, because the network can
  * refuse IMS on a perfectly good LTE cell.
  */
+/* Re-run the start gate with what is already known, for a condition that
+ * became true between access-tech updates. */
+void mm_sit_ims_reevaluate (MMSitIms *self);
+
 void mm_sit_ims_update_access_tech (MMSitIms                   *self,
                                     MMModemAccessTechnology     act);
 

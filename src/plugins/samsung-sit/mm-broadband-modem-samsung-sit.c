@@ -3888,6 +3888,12 @@ parity_step (GTask *task, MMSitParityPhase phase)
         if (phase == MM_SIT_PARITY_PHASE_BOOT) {
             apply_attach_apn (task);
         } else {
+            /* The stack's boot sequence is done; IMS provisioning waits on
+             * this. See mm_sit_client_boot_sequence_done(). */
+            if (client)
+                mm_sit_client_set_boot_sequence_done (client);
+            if (self->priv->ims)
+                mm_sit_ims_reevaluate (self->priv->ims);
             arm_search_watchdog (self);
             g_task_return_boolean (task, TRUE);
             g_object_unref (task);

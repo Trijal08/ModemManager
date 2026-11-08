@@ -54,6 +54,12 @@ struct _MMSitClientPrivate {
     gboolean             has_carrier_sim_info;
     MMSitCarrierSimInfo  carrier_sim_info;
     gboolean             boot_config_done;
+    /*
+     * The whole per-stack boot sequence, not just the config batch: the modem
+     * sets this when its post-radio-on replay finishes. IMS provisioning waits
+     * for it; see mm_sit_client_boot_sequence_done().
+     */
+    gboolean             boot_sequence_done;
     /* The struct versions the CP announced when answering 0x0922, and whether
      * it has answered yet. Every field reads "supported" until it has, so a CP
      * that never got the question is never blocked on its answer. */
@@ -384,6 +390,7 @@ mm_sit_client_close (MMSitClient *self)
     mm_sit_client_invalidate_sim (self);
     memset (&self->priv->carrier_sim_info, 0, sizeof (self->priv->carrier_sim_info));
     self->priv->boot_config_done = FALSE;
+    self->priv->boot_sequence_done = FALSE;
     self->priv->struct_versions_known = FALSE;
     if (!mm_port_serial_is_open (MM_PORT_SERIAL (self->priv->port)))
         return;
@@ -400,6 +407,35 @@ mm_sit_client_is_open (MMSitClient *self)
 {
     g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
     return mm_port_serial_is_open (MM_PORT_SERIAL (self->priv->port));
+}
+
+/*
+ * Whether this stack's boot sequence has finished -- the config batch, the
+ * card reads, and the post-radio-on replay.
+ *
+ * Stock lets about five seconds pass between the network becoming known and
+ * asking for its IMS context, and it spends them finishing exactly this work:
+ * measured on identical firmware, ch 0xf5 learns the network at 6491ms and
+ * asks at 11238ms, ch 0xf6 at 5974ms and 11332ms. We asked 0.5-0.7s after the
+ * network was known and the first request was refused 168 on essentially every
+ * boot, where stock's first request is granted every time.
+ *
+ * So the condition is the work, not a delay: a faster or slower device asks
+ * whenever its own boot sequence has finished, which is the portable form of
+ * what stock does.
+ */
+gboolean
+mm_sit_client_boot_sequence_done (MMSitClient *self)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return self->priv->boot_sequence_done;
+}
+
+void
+mm_sit_client_set_boot_sequence_done (MMSitClient *self)
+{
+    g_return_if_fail (MM_IS_SIT_CLIENT (self));
+    self->priv->boot_sequence_done = TRUE;
 }
 
 void
@@ -4958,7 +4994,20 @@ read_os_build (void)
         version = os_release_value (keyfile, "VERSION_ID");
     if (!name && !version)
         return NULL;
-    return g_strdup_printf ("%s %s", name ?: "linux", version ?: "unknown");
+    /*
+     * One token, hyphenated -- "nura-edge", not "nura edge".
+     *
+     * This string is DEVICE_INFO's build field and the User-Agent's #BUILD#.
+     * A vendor build id is always a single token (CP2A.260605.016), and the UA
+     * path enforces that itself by replacing spaces, so a space here only ever
+     * reached the CP through DEVICE_INFO.
+     *
+     * It is not a fix for anything: the spaced form was briefly suspected of
+     * costing an IMS PDN and then exonerated -- the same build registered both
+     * stacks on the next boot, so that run was variance. This is only a
+     * well-formed value.
+     */
+    return g_strdup_printf ("%s-%s", name ?: "linux", version ?: "unknown");
 }
 
 static void

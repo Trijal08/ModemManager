@@ -65,6 +65,11 @@ gboolean mm_sit_client_is_open (MMSitClient  *self);
  * here rather than resolving them a second time. Any field may be NULL until
  * the boot configuration has run. Owned by the client.
  */
+/* Whether this stack's boot sequence has finished; IMS provisioning waits for
+ * it, the way stock does. */
+gboolean mm_sit_client_boot_sequence_done     (MMSitClient *self);
+void     mm_sit_client_set_boot_sequence_done (MMSitClient *self);
+
 void     mm_sit_client_get_device_identity (MMSitClient  *self,
                                             const gchar **out_manufacturer,
                                             const gchar **out_model,
