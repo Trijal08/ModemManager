@@ -2858,6 +2858,10 @@ ims_retry_peer_ready (gint fd, GIOCondition condition, ImsRetryPeer *peer)
             response[82] = 1;
         }
         break;
+    case MM_SIT_MESSAGE_SET_DATA_PROFILE:
+        /* The IMS PDN registers its profile before asking for the context.
+         * A plain success here; the caller carries on either way. */
+        break;
     case 0x0d06: /* AIMS_DEREGISTRATION */
     case 0x0d39: /* AIMS_STACK_START_REQ */
     case 0x0d07: /* AIMS_HIDDEN_MENU */
