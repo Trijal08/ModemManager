@@ -1708,8 +1708,29 @@ mm_sit_ims_send_dtmf (MMSitIms            *self,
     guint8          *frame = NULL;
     gsize            len = 0;
     SamsungSitStatus status;
+    ImsCall         *conference;
 
     g_return_if_fail (MM_IS_SIT_IMS (self));
+
+    /*
+     * A key pressed while a conference is up has to be addressed to the
+     * conference, like every other operation on one. Aimed at a leg the CP
+     * has swallowed it is refused with status 2 -- measured on hardware, on
+     * both legs, and on the survivor after the other leg hung up, because the
+     * CP still calls that a conference.
+     *
+     * The captured Android never pressed a key during a conference, so this
+     * is the one conference operation whose call id is not confirmed on the
+     * wire. It is the id Android uses for hold, resume and hangup, including
+     * once the party count is down to one, so it is the only candidate that
+     * is consistent with the rest.
+     */
+    conference = find_conference (self);
+    if (conference && conference->call_id != call_id) {
+        mm_obj_dbg (self, "call %u belongs to conference %u; sending the key there",
+                    call_id, conference->call_id);
+        call_id = conference->call_id;
+    }
 
     /* The digit goes on the wire as its character, not its value -- the
      * vendor's field is a Java char written as one byte. */
