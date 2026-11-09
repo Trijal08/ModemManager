@@ -21,6 +21,7 @@
 #include "mm-log-object.h"
 #include "mm-call-samsung-sit.h"
 #include "mm-iface-modem-voice.h"
+#include "mm-call-list.h"
 #include "mm-modem-helpers.h"
 #include "mm-iface-modem-messaging.h"
 #include "mm-sim-samsung-sit.h"
@@ -6976,6 +6977,328 @@ iface_modem_3gpp_ussd_init (MMIfaceModem3gppUssdInterface *iface)
     iface->cancel_finish        = modem_3gpp_ussd_cancel_finish;
 }
 
+/* Supplementary services: swap, conference, hang up all (Voice interface) */
+
+/*
+ * These three are sequences, not single frames, so they share one runner: a
+ * queue of CALL_MANAGE steps sent in order, failing the whole thing on the
+ * first refusal.
+ *
+ * The step order is the captured dialler's, which matters for the conference:
+ * it holds the active call and only then merges. A bare merge never appears
+ * on the wire. See mm_sit_ims_call_manage().
+ */
+typedef struct {
+    GArray *steps;   /* of SuppSvcStep */
+    guint   next;
+} SuppSvcContext;
+
+typedef struct {
+    guint8 op;
+    guint8 call_id;
+} SuppSvcStep;
+
+static void
+supp_svc_context_free (SuppSvcContext *ctx)
+{
+    g_array_unref (ctx->steps);
+    g_slice_free (SuppSvcContext, ctx);
+}
+
+static void supp_svc_step (GTask *task);
+
+static void
+supp_svc_step_ready (MMSitIms     *ims,
+                     GAsyncResult *res,
+                     GTask        *task)
+{
+    GError *error = NULL;
+
+    if (!mm_sit_ims_call_manage_finish (ims, res, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    supp_svc_step (task);
+}
+
+static void
+supp_svc_step (GTask *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    SuppSvcContext             *ctx = g_task_get_task_data (task);
+    MMSitIms                   *ims;
+    SuppSvcStep                *step;
+
+    if (ctx->next >= ctx->steps->len) {
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+
+    ims = mm_broadband_modem_samsung_sit_peek_ims (self);
+    if (!ims) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "No IMS stack to manage calls on");
+        g_object_unref (task);
+        return;
+    }
+
+    step = &g_array_index (ctx->steps, SuppSvcStep, ctx->next++);
+    mm_obj_dbg (self, "call manage: op %u on call %u", step->op, step->call_id);
+    mm_sit_ims_call_manage (ims, step->op, step->call_id,
+                            (GAsyncReadyCallback) supp_svc_step_ready, task);
+}
+
+typedef struct {
+    GArray *active;   /* of guint8 CP call ids */
+    GArray *held;
+    GArray *waiting;
+    GArray *all;
+} CallScan;
+
+static void
+call_scan_foreach (MMBaseCall *call,
+                   CallScan   *scan)
+{
+    guint  index = mm_base_call_get_index (call);
+    guint8 id = (guint8) (index ? index - 1 : 0);
+
+    g_array_append_val (scan->all, id);
+    switch (mm_base_call_get_state (call)) {
+    case MM_CALL_STATE_ACTIVE:
+        g_array_append_val (scan->active, id);
+        break;
+    case MM_CALL_STATE_HELD:
+        g_array_append_val (scan->held, id);
+        break;
+    case MM_CALL_STATE_WAITING:
+        g_array_append_val (scan->waiting, id);
+        break;
+    default:
+        break;
+    }
+}
+
+/* Sort the modem's calls by state, in the CP's own id space. */
+static void
+scan_calls (MMBroadbandModemSamsungSit *self,
+            CallScan                   *scan)
+{
+    MMCallList *list = NULL;
+
+    scan->active  = g_array_new (FALSE, FALSE, sizeof (guint8));
+    scan->held    = g_array_new (FALSE, FALSE, sizeof (guint8));
+    scan->waiting = g_array_new (FALSE, FALSE, sizeof (guint8));
+    scan->all     = g_array_new (FALSE, FALSE, sizeof (guint8));
+
+    g_object_get (self, MM_IFACE_MODEM_VOICE_CALL_LIST, &list, NULL);
+    if (list) {
+        mm_call_list_foreach (list, (MMCallListForeachFunc) call_scan_foreach, scan);
+        g_object_unref (list);
+    }
+}
+
+static void
+call_scan_clear (CallScan *scan)
+{
+    g_clear_pointer (&scan->active, g_array_unref);
+    g_clear_pointer (&scan->held, g_array_unref);
+    g_clear_pointer (&scan->waiting, g_array_unref);
+    g_clear_pointer (&scan->all, g_array_unref);
+}
+
+static GTask *
+supp_svc_task_new (MMBroadbandModemSamsungSit *self,
+                   GAsyncReadyCallback         callback,
+                   gpointer                    user_data)
+{
+    SuppSvcContext *ctx;
+    GTask          *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    ctx = g_slice_new0 (SuppSvcContext);
+    ctx->steps = g_array_new (FALSE, FALSE, sizeof (SuppSvcStep));
+    g_task_set_task_data (task, ctx, (GDestroyNotify) supp_svc_context_free);
+    return task;
+}
+
+static void
+supp_svc_push (GTask  *task,
+               guint8  op,
+               guint8  call_id)
+{
+    SuppSvcContext *ctx = g_task_get_task_data (task);
+    SuppSvcStep     step = { op, call_id };
+
+    g_array_append_val (ctx->steps, step);
+}
+
+static gboolean
+modem_voice_supp_svc_finish (MMIfaceModemVoice  *self,
+                             GAsyncResult       *res,
+                             GError            **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+/*
+ * Hold the active call(s) and make the other one current.
+ *
+ * The core decides what "the other one" is -- a waiting call if there is one,
+ * otherwise a held call -- and applies the state changes itself once this
+ * succeeds; see prepare_hold_and_accept_foreach() in mm-iface-modem-voice.c.
+ * This only has to put the same choice on the wire.
+ */
+static void
+modem_voice_hold_and_accept (MMIfaceModemVoice   *_self,
+                             GAsyncReadyCallback  callback,
+                             gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (_self);
+    CallScan                    scan = { 0 };
+    GTask                      *task;
+    guint                       i;
+
+    task = supp_svc_task_new (self, callback, user_data);
+    scan_calls (self, &scan);
+
+    for (i = 0; i < scan.active->len; i++)
+        supp_svc_push (task, MM_SIT_IMS_CALL_MANAGE_HOLD,
+                       g_array_index (scan.active, guint8, i));
+
+    /*
+     * A waiting call is answered rather than resumed, and answering is not a
+     * CALL_MANAGE at all -- so that case is refused here instead of being
+     * silently turned into a resume of the wrong call.
+     */
+    if (scan.waiting->len) {
+        call_scan_clear (&scan);
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_UNSUPPORTED,
+                                 "Accepting a waiting call this way is not implemented; "
+                                 "answer it on the call object instead");
+        g_object_unref (task);
+        return;
+    }
+    if (scan.held->len)
+        supp_svc_push (task, MM_SIT_IMS_CALL_MANAGE_RESUME,
+                       g_array_index (scan.held, guint8, 0));
+
+    call_scan_clear (&scan);
+    supp_svc_step (task);
+}
+
+/*
+ * Hang up everything.
+ *
+ * Not a CALL_MANAGE operation -- there is no "hangup all" op in the capture,
+ * so this is the ordinary per-call hangup repeated. Each is reported as a
+ * local hang-up rather than a decline: a decline reason on a call the CP
+ * never saw answered stops it registering IMS, which is why
+ * mm_sit_ims_hangup() takes the distinction at all.
+ */
+typedef struct {
+    GArray *ids;
+    guint   next;
+} HangupAllContext;
+
+static void
+hangup_all_context_free (HangupAllContext *ctx)
+{
+    g_array_unref (ctx->ids);
+    g_slice_free (HangupAllContext, ctx);
+}
+
+static void hangup_all_step (GTask *task);
+
+static void
+hangup_all_step_ready (MMSitIms     *ims,
+                       GAsyncResult *res,
+                       GTask        *task)
+{
+    GError *error = NULL;
+
+    if (!mm_sit_ims_hangup_finish (ims, res, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    hangup_all_step (task);
+}
+
+static void
+hangup_all_step (GTask *task)
+{
+    MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    HangupAllContext           *ctx = g_task_get_task_data (task);
+    MMSitIms                   *ims;
+    guint8                      id;
+
+    if (ctx->next >= ctx->ids->len) {
+        g_task_return_boolean (task, TRUE);
+        g_object_unref (task);
+        return;
+    }
+
+    ims = mm_broadband_modem_samsung_sit_peek_ims (self);
+    if (!ims) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_FAILED,
+                                 "No IMS stack to hang up on");
+        g_object_unref (task);
+        return;
+    }
+
+    id = g_array_index (ctx->ids, guint8, ctx->next++);
+    mm_obj_dbg (self, "hanging up call %u as part of hangup-all", id);
+    mm_sit_ims_hangup (ims, id, FALSE,
+                       (GAsyncReadyCallback) hangup_all_step_ready, task);
+}
+
+static void
+modem_voice_hangup_all (MMIfaceModemVoice   *_self,
+                        GAsyncReadyCallback  callback,
+                        gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (_self);
+    HangupAllContext           *ctx;
+    CallScan                    scan = { 0 };
+    GTask                      *task;
+
+    task = g_task_new (self, NULL, callback, user_data);
+    scan_calls (self, &scan);
+
+    ctx = g_slice_new0 (HangupAllContext);
+    ctx->ids = g_array_ref (scan.all);
+    g_task_set_task_data (task, ctx, (GDestroyNotify) hangup_all_context_free);
+    call_scan_clear (&scan);
+
+    hangup_all_step (task);
+}
+
+/* Merge every call into one conference. */
+static void
+modem_voice_join_multiparty (MMIfaceModemVoice   *_self,
+                             GAsyncReadyCallback  callback,
+                             gpointer             user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (_self);
+    CallScan                    scan = { 0 };
+    GTask                      *task;
+    guint                       i;
+
+    task = supp_svc_task_new (self, callback, user_data);
+    scan_calls (self, &scan);
+
+    /* The captured order: hold what is active, then merge. */
+    for (i = 0; i < scan.active->len; i++)
+        supp_svc_push (task, MM_SIT_IMS_CALL_MANAGE_HOLD,
+                       g_array_index (scan.active, guint8, i));
+    supp_svc_push (task, MM_SIT_IMS_CALL_MANAGE_CONFERENCE, MM_SIT_IMS_CALL_ID_ALL);
+
+    call_scan_clear (&scan);
+    supp_svc_step (task);
+}
+
 static void
 iface_modem_voice_init (MMIfaceModemVoiceInterface *iface)
 {
@@ -6988,14 +7311,14 @@ iface_modem_voice_init (MMIfaceModemVoiceInterface *iface)
      * implementation and none of them can work here, so say so rather than
      * letting a caller get "No AT port available to run command" -- an
      * unimplemented vfunc is reported as Unsupported, which is the truth. */
-    iface->hold_and_accept                = NULL;
-    iface->hold_and_accept_finish         = NULL;
+    iface->hold_and_accept                = modem_voice_hold_and_accept;
+    iface->hold_and_accept_finish         = modem_voice_supp_svc_finish;
     iface->hangup_and_accept              = NULL;
     iface->hangup_and_accept_finish       = NULL;
-    iface->hangup_all                     = NULL;
-    iface->hangup_all_finish              = NULL;
-    iface->join_multiparty                = NULL;
-    iface->join_multiparty_finish         = NULL;
+    iface->hangup_all                     = modem_voice_hangup_all;
+    iface->hangup_all_finish              = modem_voice_supp_svc_finish;
+    iface->join_multiparty                = modem_voice_join_multiparty;
+    iface->join_multiparty_finish         = modem_voice_supp_svc_finish;
     iface->leave_multiparty               = NULL;
     iface->leave_multiparty_finish        = NULL;
     iface->transfer                       = NULL;

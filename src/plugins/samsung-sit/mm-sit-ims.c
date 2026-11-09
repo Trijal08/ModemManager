@@ -1593,6 +1593,40 @@ mm_sit_ims_hangup (MMSitIms            *self,
     send_simple (self, frame, len, status, "hangup", NULL, callback, user_data);
 }
 
+/*
+ * Hold, resume, or merge into a conference (CALL_MANAGE).
+ *
+ * `op` is 1 hold, 2 resume, 6 conference, and a conference is addressed to
+ * MM_SIT_IMS_CALL_ID_ALL rather than to one call. The captured dialler holds
+ * the active call and only then merges, so a caller wanting a conference
+ * sends two of these, not one.
+ */
+void
+mm_sit_ims_call_manage (MMSitIms            *self,
+                        guint8               op,
+                        guint8               call_id,
+                        GAsyncReadyCallback  callback,
+                        gpointer             user_data)
+{
+    guint8          *frame = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    g_return_if_fail (MM_IS_SIT_IMS (self));
+
+    status = samsung_aims_build_call_manage (mm_sit_client_next_token (self->priv->client),
+                                             op, call_id, &frame, &len);
+    send_simple (self, frame, len, status, "call manage", NULL, callback, user_data);
+}
+
+gboolean
+mm_sit_ims_call_manage_finish (MMSitIms      *self,
+                               GAsyncResult  *res,
+                               GError       **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
 gboolean
 mm_sit_ims_hangup_finish (MMSitIms      *self,
                           GAsyncResult  *res,

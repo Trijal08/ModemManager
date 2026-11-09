@@ -174,6 +174,22 @@ void     mm_sit_ims_hangup        (MMSitIms            *self,
                                    gboolean             declined,
                                    GAsyncReadyCallback  callback,
                                    gpointer             user_data);
+/* CALL_MANAGE operations, in the CP's numbering. */
+#define MM_SIT_IMS_CALL_MANAGE_HOLD       1
+#define MM_SIT_IMS_CALL_MANAGE_RESUME     2
+#define MM_SIT_IMS_CALL_MANAGE_CONFERENCE 6
+/* A conference is addressed to every call, not a particular one. */
+#define MM_SIT_IMS_CALL_ID_ALL            0xff
+
+void     mm_sit_ims_call_manage        (MMSitIms            *self,
+                                        guint8               op,
+                                        guint8               call_id,
+                                        GAsyncReadyCallback  callback,
+                                        gpointer             user_data);
+gboolean mm_sit_ims_call_manage_finish (MMSitIms            *self,
+                                        GAsyncResult        *res,
+                                        GError             **error);
+
 gboolean mm_sit_ims_hangup_finish (MMSitIms            *self,
                                    GAsyncResult        *res,
                                    GError             **error);
