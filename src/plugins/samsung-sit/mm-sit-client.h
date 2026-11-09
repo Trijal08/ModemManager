@@ -510,6 +510,14 @@ void     mm_sit_client_set_screen_state        (MMSitClient        *self,
                                                 GCancellable       *cancellable,
                                                 GAsyncReadyCallback callback,
                                                 gpointer            user_data);
+void     mm_sit_client_set_mobile_data_state        (MMSitClient         *self,
+                                                    gboolean             enabled,
+                                                    GCancellable        *cancellable,
+                                                    GAsyncReadyCallback  callback,
+                                                    gpointer             user_data);
+gboolean mm_sit_client_set_mobile_data_state_finish (MMSitClient         *self,
+                                                    GAsyncResult        *res,
+                                                    GError             **error);
 gboolean mm_sit_client_set_screen_state_finish (MMSitClient        *self,
                                                 GAsyncResult       *res,
                                                 GError            **error);

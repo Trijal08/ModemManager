@@ -510,6 +510,25 @@ update_ps_registration (MMBroadbandModemSamsungSit *self,
         self->priv->reject_retries = 0;
     }
 
+    /*
+     * The serving cell, for the Location interface's 3GPP-LAC-CI source.
+     *
+     * MMBroadbandModem already advertises that source for any 3GPP modem and
+     * the core already enables it, so nothing here had to be added for it to
+     * appear -- only this, because the core has no way to learn the cell on a
+     * modem with no AT port. It costs no traffic: the registration response
+     * this came out of is one the registration check already asks for.
+     *
+     * There is no LAC. The field the responses carry is a tracking area code,
+     * which is what an LTE/NR cell has, and reporting it as a LAC as well
+     * would be inventing a 2G/3G identity the CP never gave.
+     */
+    if (registration->registered && registration->cell_id)
+        mm_iface_modem_3gpp_update_location (MM_IFACE_MODEM_3GPP (self),
+                                             0,
+                                             registration->tac,
+                                             registration->cell_id);
+
     mm_iface_modem_3gpp_update_ps_registration_state (MM_IFACE_MODEM_3GPP (self), state, TRUE);
     mm_iface_modem_3gpp_update_eps_registration_state (MM_IFACE_MODEM_3GPP (self), state, TRUE);
     mm_iface_modem_3gpp_update_5gs_registration_state (MM_IFACE_MODEM_3GPP (self), state, TRUE);
@@ -6053,6 +6072,70 @@ iface_modem_init (MMIfaceModemInterface *iface)
     iface->setup_carrier_config_finish = setup_carrier_config_finish;
 }
 
+/* Packet service state (3GPP interface) */
+
+static gboolean
+modem_3gpp_set_packet_service_state_finish (MMIfaceModem3gpp  *self,
+                                            GAsyncResult      *res,
+                                            GError           **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+set_mobile_data_state_ready (MMSitClient  *client,
+                             GAsyncResult *res,
+                             GTask        *task)
+{
+    GError *error = NULL;
+
+    if (!mm_sit_client_set_mobile_data_state_finish (client, res, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+modem_3gpp_set_packet_service_state (MMIfaceModem3gpp              *_self,
+                                     MMModem3gppPacketServiceState  state,
+                                     GAsyncReadyCallback            callback,
+                                     gpointer                       user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (_self);
+    MMSitClient                *client;
+    GTask                      *task;
+    g_autoptr(GError)           error = NULL;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    /*
+     * Only the two the CP can be told. UNKNOWN is what the core reports when
+     * it has not learned the state, not something to ask for.
+     */
+    if (state != MM_MODEM_3GPP_PACKET_SERVICE_STATE_ATTACHED &&
+        state != MM_MODEM_3GPP_PACKET_SERVICE_STATE_DETACHED) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_INVALID_ARGS,
+                                 "Cannot ask for packet service state %u", (guint) state);
+        g_object_unref (task);
+        return;
+    }
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, g_steal_pointer (&error));
+        g_object_unref (task);
+        return;
+    }
+
+    mm_sit_client_set_mobile_data_state (
+        client,
+        state == MM_MODEM_3GPP_PACKET_SERVICE_STATE_ATTACHED,
+        NULL,
+        (GAsyncReadyCallback) set_mobile_data_state_ready,
+        task);
+}
+
 static void
 iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface)
 {
@@ -6066,6 +6149,8 @@ iface_modem_3gpp_init (MMIfaceModem3gppInterface *iface)
     iface->load_initial_eps_bearer_finish = load_initial_eps_bearer_finish;
     iface->run_registration_checks = registration_checks;
     iface->run_registration_checks_finish = registration_checks_finish;
+    iface->set_packet_service_state = modem_3gpp_set_packet_service_state;
+    iface->set_packet_service_state_finish = modem_3gpp_set_packet_service_state_finish;
     iface->register_in_network = register_in_network;
     iface->register_in_network_finish = register_in_network_finish;
     iface->load_enabled_facility_locks = load_enabled_facility_locks;

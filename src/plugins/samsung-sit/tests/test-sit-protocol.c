@@ -632,6 +632,60 @@ test_parse_radio (void)
     g_assert_cmpuint (state, ==, MM_SIT_RADIO_STATE_UNKNOWN);
 }
 
+/*
+ * The serving cell in a registration response. Pinned at the offsets the live
+ * modem put them at -- tac D6E2 and ci 861075B from GET_CELL_INFO_LIST turned
+ * up at exactly these places in both registration responses from the same
+ * stack -- and the voice/data pair asserts the one-byte shift between them,
+ * which is the same shift the radio technology already has.
+ */
+static void
+test_parse_registration_cell (void)
+{
+    guint8 voice[88] = { MM_SIT_MESSAGE_TYPE_RESPONSE, 0, 0x00, 0x07, 88 };
+    guint8 data[88]  = { MM_SIT_MESSAGE_TYPE_RESPONSE, 0, 0x01, 0x07, 88 };
+    g_autoptr(GError) error = NULL;
+    MMSitMessage     *message = NULL;
+    MMSitRegistration reg;
+
+    /* tac u16 then ci u32 eight bytes on; data sits one byte later. */
+    voice[12] = 1; voice[14] = 14;
+    voice[24] = 0xe2; voice[25] = 0xd6;
+    voice[32] = 0x5b; voice[33] = 0x07; voice[34] = 0x61; voice[35] = 0x08;
+    message = mm_sit_message_parse (voice, sizeof (voice), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_registration (message, &reg, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (reg.tac, ==, 0xd6e2);
+    g_assert_cmpuint (reg.cell_id, ==, 0x0861075b);
+    g_clear_pointer (&message, mm_sit_message_free);
+
+    data[12] = 1; data[15] = 14;
+    data[25] = 0xe2; data[26] = 0xd6;
+    data[33] = 0x5b; data[34] = 0x07; data[35] = 0x61; data[36] = 0x08;
+    message = mm_sit_message_parse (data, sizeof (data), &error);
+    g_assert_no_error (error);
+    g_assert_true (mm_sit_message_parse_registration (message, &reg, &error));
+    g_assert_no_error (error);
+    g_assert_cmpuint (reg.tac, ==, 0xd6e2);
+    g_assert_cmpuint (reg.cell_id, ==, 0x0861075b);
+    g_clear_pointer (&message, mm_sit_message_free);
+
+    /* A response too short to hold the field reports no cell, not garbage. */
+    {
+        guint8 short_data[36] = { MM_SIT_MESSAGE_TYPE_RESPONSE, 0, 0x01, 0x07, 36 };
+
+        short_data[12] = 1; short_data[15] = 14;
+        message = mm_sit_message_parse (short_data, sizeof (short_data), &error);
+        g_assert_no_error (error);
+        g_assert_true (mm_sit_message_parse_registration (message, &reg, &error));
+        g_assert_no_error (error);
+        g_assert_cmpuint (reg.tac, ==, 0);
+        g_assert_cmpuint (reg.cell_id, ==, 0);
+        g_clear_pointer (&message, mm_sit_message_free);
+    }
+}
+
 static void
 test_parse_registration_failed (void)
 {
@@ -3701,6 +3755,7 @@ main (int argc,
     g_test_add_func ("/MM/sit/build/boot-config", test_build_boot_config_requests);
     g_test_add_func ("/MM/sit/decode/radio", test_parse_radio);
     g_test_add_func ("/MM/sit/decode/sim-registration", test_parse_status_and_registration);
+    g_test_add_func ("/MM/sit/decode/registration-cell", test_parse_registration_cell);
     g_test_add_func ("/MM/sit/decode/sim-slot-status", test_parse_sim_slot_status);
     g_test_add_func ("/MM/sit/decode/signal", test_parse_signal);
     g_test_add_func ("/MM/sit/decode/nitz-time", test_parse_nitz_time);

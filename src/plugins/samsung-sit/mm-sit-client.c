@@ -2688,6 +2688,50 @@ mm_sit_client_set_screen_state (MMSitClient        *self,
     run_checked_command (self, request, 5, cancellable, callback, user_data);
 }
 
+/*
+ * Whether this stack's packet service may carry data (SET_MOBILE_DATA_STATE).
+ *
+ * The payload is <stack><enabled>, which is what the boot configuration
+ * already sends -- byte 0 is the 0-based stack index, substituted there by
+ * MM_SIT_BOOT_SUB_STACK, and byte 1 the flag. Both bytes are byte-identical
+ * to stock in the parity capture, so this reuses a shape the CP is known to
+ * accept rather than a new one.
+ */
+void
+mm_sit_client_set_mobile_data_state (MMSitClient        *self,
+                                     gboolean            enabled,
+                                     GCancellable       *cancellable,
+                                     GAsyncReadyCallback callback,
+                                     gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    g_autoptr(GError)     error = NULL;
+    guint8                body[4 + 2] = { 0 };
+
+    body[4] = (guint8) self->priv->stack;
+    body[5] = enabled ? 1 : 0;
+
+    request = mm_sit_request_new (MM_SIT_MESSAGE_SET_MOBILE_DATA_STATE,
+                                  mm_sit_client_next_token (self),
+                                  body, sizeof (body), &error);
+    if (!request) {
+        g_task_report_error (self, callback, user_data,
+                             mm_sit_client_set_mobile_data_state,
+                             g_steal_pointer (&error));
+        return;
+    }
+    run_checked_command (self, request, 5, cancellable, callback, user_data);
+}
+
+gboolean
+mm_sit_client_set_mobile_data_state_finish (MMSitClient  *self,
+                                            GAsyncResult *res,
+                                            GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
 gboolean
 mm_sit_client_set_screen_state_finish (MMSitClient  *self,
                                        GAsyncResult *res,

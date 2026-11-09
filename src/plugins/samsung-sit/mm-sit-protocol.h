@@ -117,6 +117,7 @@ typedef enum {
     MM_SIT_MESSAGE_DATA_CALL_LIST_CHANGED      = 0x0604,
     MM_SIT_MESSAGE_GET_DATA_CALL_LIST          = 0x0602,
     MM_SIT_MESSAGE_SET_FAST_DORMANCY_INFO      = 0x0605,
+    MM_SIT_MESSAGE_SET_MOBILE_DATA_STATE       = 0x0625,
     MM_SIT_MESSAGE_SET_DATA_PROFILE            = 0x0613,
     MM_SIT_MESSAGE_GET_VOICE_REGISTRATION      = 0x0700,
     MM_SIT_MESSAGE_GET_DATA_REGISTRATION       = 0x0701,
@@ -383,6 +384,12 @@ typedef struct {
     gboolean endc_available;
     gboolean dcnr_restricted;
     gboolean nr_available;
+    /*
+     * The serving cell's identity, zero when the response does not carry one
+     * (not registered, or a response too short to hold the field).
+     */
+    guint32  tac;
+    guint32  cell_id;
 } MMSitRegistration;
 
 /* Reported for a cause the CP says it does not have. */

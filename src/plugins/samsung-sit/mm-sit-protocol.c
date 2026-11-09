@@ -1452,6 +1452,21 @@ mm_sit_message_parse_carrier_sim_info (const MMSitMessage  *message,
 #define REG_NR_AVAILABLE    53
 #define REG_NR_MIN_LEN      54
 
+/*
+ * The serving cell's identity. A u16 TAC, then the u32 cell id eight bytes
+ * later, and the data response carries one byte more than the voice one ahead
+ * of both -- the same one-byte shift the radio technology has (14 against 15),
+ * which is what makes the pair credible rather than coincidental.
+ *
+ * Pinned against the live modem rather than the adapter: with the serving cell
+ * reporting tac D6E2 and ci 861075B through GET_CELL_INFO_LIST, those exact
+ * values appear at these offsets in both registration responses from the same
+ * stack, and nowhere else in them.
+ */
+#define REG_TAC_VOICE       24
+#define REG_TAC_DATA        25
+#define REG_CI_FROM_TAC      8
+
 gboolean
 mm_sit_message_parse_registration (const MMSitMessage *message,
                                    MMSitRegistration  *out_registration,
@@ -1494,6 +1509,19 @@ mm_sit_message_parse_registration (const MMSitMessage *message,
         out_registration->endc_available  = (data[REG_ENDC_AVAILABLE] == 1);
         out_registration->dcnr_restricted = (data[REG_DCNR_RESTRICTED] == 1);
         out_registration->nr_available    = (data[REG_NR_AVAILABLE] == 1);
+    }
+
+    out_registration->tac     = 0;
+    out_registration->cell_id = 0;
+    if (data) {
+        gsize tac_off = (message->id == MM_SIT_MESSAGE_GET_VOICE_REGISTRATION ?
+                         REG_TAC_VOICE : REG_TAC_DATA);
+        gsize ci_off  = tac_off + REG_CI_FROM_TAC;
+
+        if (len >= ci_off + 4) {
+            out_registration->tac     = read_le16 (data + tac_off);
+            out_registration->cell_id = read_le32 (data + ci_off);
+        }
     }
 
     switch (reg.vops_support) {
