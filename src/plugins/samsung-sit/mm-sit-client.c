@@ -2696,6 +2696,15 @@ mm_sit_client_set_screen_state (MMSitClient        *self,
  * MM_SIT_BOOT_SUB_STACK, and byte 1 the flag. Both bytes are byte-identical
  * to stock in the parity capture, so this reuses a shape the CP is known to
  * accept rather than a new one.
+ *
+ * This is a mobile-data *policy* flag, not an attach or a detach. Measured on
+ * hardware: sending it with the flag clear is answered status 0 and changes
+ * nothing -- the stack stays attached, the modem stays registered and IMS is
+ * untouched. So it is the wrong message for
+ * MMIfaceModem3gpp's set_packet_service_state, which was briefly wired to it
+ * and reported success while doing nothing. The PS domain has its own:
+ * DETACH is 0x0608 and ALLOW_DATA 0x0710, both one int, neither implemented
+ * here. Nothing calls this yet; it is kept because the frame itself is right.
  */
 void
 mm_sit_client_set_mobile_data_state (MMSitClient        *self,
