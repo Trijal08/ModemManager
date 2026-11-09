@@ -60,6 +60,17 @@ MMSitClient *mm_broadband_modem_samsung_sit_peek_client (MMBroadbandModemSamsung
                                                           GError                     **error);
 
 /* The CP's IMS stack, or NULL before a control port is up. Borrowed. */
+/*
+ * Hold every active call. The CP refuses a new call while one is active, so
+ * the dial path runs this first; see the implementation for the capture.
+ */
+void     mm_broadband_modem_samsung_sit_hold_active_calls        (MMBroadbandModemSamsungSit  *self,
+                                                                  GAsyncReadyCallback          callback,
+                                                                  gpointer                     user_data);
+gboolean mm_broadband_modem_samsung_sit_hold_active_calls_finish (MMBroadbandModemSamsungSit  *self,
+                                                                  GAsyncResult                *res,
+                                                                  GError                     **error);
+
 MMSitIms *mm_broadband_modem_samsung_sit_peek_ims (MMBroadbandModemSamsungSit *self);
 
 void     mm_broadband_modem_samsung_sit_ensure_carrier_config        (MMBroadbandModemSamsungSit *self,

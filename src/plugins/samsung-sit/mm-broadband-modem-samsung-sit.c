@@ -7275,6 +7275,51 @@ modem_voice_hangup_all (MMIfaceModemVoice   *_self,
     hangup_all_step (task);
 }
 
+/*
+ * Hold every active call, so a new one can be dialled.
+ *
+ * The CP refuses a second call while one is active: the AIMS_DIAL is answered
+ * status 0 and the new call is then released by the CP itself, cause 187, in
+ * the same second -- no client involved. Stock holds first. In the captured
+ * Android sequence the hold goes out 0.44 s before the dial:
+ *
+ *     354.80s  CALL_MANAGE op 1 call 0
+ *     355.24s  AIMS_DIAL
+ *
+ * The call being started is in DIALING, not ACTIVE, so it is excluded by
+ * state and does not need naming -- which is just as well, since a call that
+ * has not been seen in a call list yet has index 0 and would be
+ * indistinguishable from a real call id 0.
+ *
+ * Completes immediately when nothing is active, so the first call of a
+ * session pays nothing for this.
+ */
+void
+mm_broadband_modem_samsung_sit_hold_active_calls (MMBroadbandModemSamsungSit *self,
+                                                  GAsyncReadyCallback         callback,
+                                                  gpointer                    user_data)
+{
+    CallScan  scan = { 0 };
+    GTask    *task;
+    guint     i;
+
+    task = supp_svc_task_new (self, callback, user_data);
+    scan_calls (self, &scan);
+    for (i = 0; i < scan.active->len; i++)
+        supp_svc_push (task, MM_SIT_IMS_CALL_MANAGE_HOLD,
+                       g_array_index (scan.active, guint8, i));
+    call_scan_clear (&scan);
+    supp_svc_step (task);
+}
+
+gboolean
+mm_broadband_modem_samsung_sit_hold_active_calls_finish (MMBroadbandModemSamsungSit  *self,
+                                                         GAsyncResult                *res,
+                                                         GError                     **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
 /* Merge every call into one conference. */
 static void
 modem_voice_join_multiparty (MMIfaceModemVoice   *_self,

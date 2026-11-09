@@ -138,6 +138,39 @@ ims_simple_ready (MMSitIms     *ims,
     g_object_unref (task);
 }
 
+/* The dial itself, once anything that was active is held. */
+static void
+ims_hold_before_dial_ready (MMBroadbandModemSamsungSit *modem,
+                            GAsyncResult               *res,
+                            GTask                      *task)
+{
+    MMCallSamsungSit  *self = g_task_get_source_object (task);
+    MMSitIms          *ims;
+    g_autoptr(GError)  error = NULL;
+
+    /*
+     * A failed hold is reported and the dial goes out anyway. The CP's own
+     * refusal says more about why than anything inferred here would, and
+     * stopping would turn a recoverable call into no call at all.
+     */
+    if (!mm_broadband_modem_samsung_sit_hold_active_calls_finish (modem, res, &error))
+        mm_obj_dbg (self, "couldn't hold the active call before dialling: %s", error->message);
+
+    ims = mm_broadband_modem_samsung_sit_peek_ims (modem);
+    mm_sit_ims_dial (ims,
+                     mm_gdbus_call_get_number (MM_GDBUS_CALL (self)),
+                     g_task_get_cancellable (task),
+                     (GAsyncReadyCallback) ims_dial_ready,
+                     task);
+    /*
+     * Android's order after the dial: the frame time, then the setup media
+     * state.  Both go out behind the dial request because the SIT port
+     * serialises commands.
+     */
+    mm_sit_ims_set_frame_time (ims);
+    mm_sit_ims_media_state (ims, MM_SIT_IMS_MEDIA_SETUP);
+}
+
 static void
 call_start (MMBaseCall          *_self,
             GCancellable        *cancellable,
@@ -164,22 +197,16 @@ call_start (MMBaseCall          *_self,
      * by number. */
     if (call_is_ims (self)) {
         mm_obj_dbg (self, "starting IMS call");
-        {
-            MMSitIms *ims = mm_broadband_modem_samsung_sit_peek_ims (MM_BROADBAND_MODEM_SAMSUNG_SIT (self->priv->modem));
-
-            mm_sit_ims_dial (ims,
-                             mm_gdbus_call_get_number (MM_GDBUS_CALL (self)),
-                             cancellable,
-                             (GAsyncReadyCallback) ims_dial_ready,
-                             task);
-            /*
-             * Android's order after the dial: the frame time, then the setup
-             * media state.  Both go out behind the dial request because the
-             * SIT port serialises commands.
-             */
-            mm_sit_ims_set_frame_time (ims);
-            mm_sit_ims_media_state (ims, MM_SIT_IMS_MEDIA_SETUP);
-        }
+        /*
+         * Any call already up has to be held before this one is dialled: the
+         * CP answers the DIAL status 0 and then releases the new call itself,
+         * cause 187, if something is still active. Stock does the same, 0.44 s
+         * ahead of its dial. Completes immediately when nothing is active.
+         */
+        mm_broadband_modem_samsung_sit_hold_active_calls (
+            MM_BROADBAND_MODEM_SAMSUNG_SIT (self->priv->modem),
+            (GAsyncReadyCallback) ims_hold_before_dial_ready,
+            task);
         return;
     }
 
