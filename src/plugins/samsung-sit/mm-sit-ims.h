@@ -181,6 +181,11 @@ void     mm_sit_ims_hangup        (MMSitIms            *self,
 /* A conference is addressed to every call, not a particular one. */
 #define MM_SIT_IMS_CALL_ID_ALL            0xff
 
+/* CONF_CALL_ADD_REMOVE_USER operations. Dropping one member of a conference
+ * goes through mm_sit_ims_hangup(), which picks this over a plain hangup. */
+#define MM_SIT_IMS_CONF_CALL_ADD          0
+#define MM_SIT_IMS_CONF_CALL_REMOVE       1
+
 void     mm_sit_ims_call_manage        (MMSitIms            *self,
                                         guint8               op,
                                         guint8               call_id,

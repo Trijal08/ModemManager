@@ -1610,12 +1610,33 @@ mm_sit_ims_hangup (MMSitIms            *self,
      * ignored by the CP: the request goes unanswered, times out after 30 s,
      * and MM marks the call terminated locally -- leaving a live call it
      * believes is gone and no object left to end it. Measured on hardware;
-     * the conference had to be killed with mm-sit-tool. So the conference is
-     * what gets addressed whenever one exists.
+     * the conference had to be killed with mm-sit-tool.
+     *
+     * Dropping one member is CONF_CALL_ADD_REMOVE_USER instead, which the
+     * captured dialler used for exactly this and which leaves the conference
+     * up for everybody else. Once a single member is left the CP still calls
+     * it a conference and still answers to the conference's id, so that last
+     * hangup is an ordinary one addressed there -- which is what the capture
+     * shows Android doing too.
      */
     conference = find_conference (self);
     if (conference && conference->call_id != call_id) {
-        mm_obj_dbg (self, "call %u belongs to conference %u; hanging up the conference",
+        ImsCall *member = find_call (self, call_id);
+
+        if (member && member->number && conference->user_count > 1) {
+            mm_obj_dbg (self, "dropping call %u from conference %u (%u parties)",
+                        call_id, conference->call_id, conference->user_count);
+            status = samsung_aims_build_conf_call_add_remove_user (
+                         mm_sit_client_next_token (self->priv->client),
+                         MM_SIT_IMS_CONF_CALL_REMOVE,
+                         conference->call_id, member->call_id, member->number,
+                         &frame, &len);
+            send_simple (self, frame, len, status, "conference remove user", NULL,
+                         callback, user_data);
+            return;
+        }
+
+        mm_obj_dbg (self, "call %u is the last of conference %u; hanging up the conference",
                     call_id, conference->call_id);
         call_id = conference->call_id;
     }
