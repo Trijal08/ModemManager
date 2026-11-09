@@ -254,6 +254,12 @@ typedef struct {
     guint8      call_id;
     gchar      *number;
     MMCallState state;
+    /*
+     * Set on the pseudo-call the CP makes for a conference, and on each leg
+     * once it has been merged into one. See mm_sit_ims_get_call_list().
+     */
+    gboolean    multiparty;
+    guint8      user_count;
 } ImsCall;
 
 static void
@@ -1365,6 +1371,22 @@ handle_call_status (MMSitIms           *self,
         g_free (call->number);
         call->number = g_strdup (st.connected_number);
     }
+    /*
+     * Changes to the conference membership have to be published even when the
+     * state byte has not moved: a leg joining or the party count changing is
+     * what decides how this list is reported.
+     */
+    if (call->multiparty != (st.multiparty ? TRUE : FALSE) ||
+        call->user_count != st.user_count) {
+        call->multiparty = st.multiparty ? TRUE : FALSE;
+        call->user_count = st.user_count;
+        call->state      = state;
+        mm_obj_dbg (self, "IMS call %u is %s, %u part%s",
+                    st.call_id, call->multiparty ? "multiparty" : "single",
+                    st.user_count, st.user_count == 1 ? "y" : "ies");
+        g_signal_emit (self, signals[SIGNAL_CALLS_CHANGED], 0);
+        return;
+    }
     if (call->state == state)
         return;
     call->state = state;
@@ -1566,6 +1588,8 @@ mm_sit_ims_answer_finish (MMSitIms      *self,
     return g_task_propagate_boolean (G_TASK (res), error);
 }
 
+
+static ImsCall *find_conference (MMSitIms *self);
 void
 mm_sit_ims_hangup (MMSitIms            *self,
                    guint8               call_id,
@@ -1577,7 +1601,24 @@ mm_sit_ims_hangup (MMSitIms            *self,
     gsize            len = 0;
     SamsungSitStatus status;
 
+    ImsCall *conference;
+
     g_return_if_fail (MM_IS_SIT_IMS (self));
+
+    /*
+     * A hangup addressed to a leg that has been merged into a conference is
+     * ignored by the CP: the request goes unanswered, times out after 30 s,
+     * and MM marks the call terminated locally -- leaving a live call it
+     * believes is gone and no object left to end it. Measured on hardware;
+     * the conference had to be killed with mm-sit-tool. So the conference is
+     * what gets addressed whenever one exists.
+     */
+    conference = find_conference (self);
+    if (conference && conference->call_id != call_id) {
+        mm_obj_dbg (self, "call %u belongs to conference %u; hanging up the conference",
+                    call_id, conference->call_id);
+        call_id = conference->call_id;
+    }
 
     /*
      * Reason 0 is an ordinary local hang-up, and the capture uses 2 for
@@ -1664,21 +1705,66 @@ mm_sit_ims_send_dtmf_finish (MMSitIms      *self,
     return g_task_propagate_boolean (G_TASK (res), error);
 }
 
+/*
+ * The conference, if one is up.
+ *
+ * The CP makes a pseudo-call of its own for a conference and marks it
+ * multiparty with a party count, while the legs it swallowed are reported
+ * multiparty too but with a count of zero. The count is what tells them
+ * apart.
+ */
+static ImsCall *
+find_conference (MMSitIms *self)
+{
+    guint i;
+
+    for (i = 0; i < self->priv->calls->len; i++) {
+        ImsCall *call = g_ptr_array_index (self->priv->calls, i);
+
+        if (call->multiparty && call->user_count > 0)
+            return call;
+    }
+    return NULL;
+}
+
 GList *
 mm_sit_ims_get_call_list (MMSitIms *self)
 {
-    GList *out = NULL;
-    guint  i;
+    GList   *out = NULL;
+    ImsCall *conference;
+    guint    i;
 
     g_return_val_if_fail (MM_IS_SIT_IMS (self), NULL);
+
+    /*
+     * The conference is not reported as a call of its own, and its state is
+     * what its members are reported with.
+     *
+     * ModemManager has no conference object -- its model is that the members
+     * *are* the calls, with multiparty set, which JoinMultiparty succeeding
+     * already arranges. And its core explicitly warns at and drops any
+     * unmatched *outgoing* call found in a reported list, which is exactly
+     * what the CP's pseudo-call looks like, so reporting it achieved nothing
+     * but an "unexpected outgoing call" every poll.
+     *
+     * Reporting the members with their own state is worse than useless: the
+     * CP says they are held, because they are -- they have been subsumed --
+     * so a live conference showed up as two held calls and nothing active,
+     * while the audio was fine. The conference's state is the one the user is
+     * actually on.
+     */
+    conference = find_conference (self);
 
     for (i = 0; i < self->priv->calls->len; i++) {
         ImsCall    *call = g_ptr_array_index (self->priv->calls, i);
         MMCallInfo *info;
 
+        if (call == conference)
+            continue;
+
         info = g_slice_new0 (MMCallInfo);
         info->index = call->call_id + 1;
-        info->state = call->state;
+        info->state = conference ? conference->state : call->state;
         info->direction = (call->state == MM_CALL_STATE_RINGING_IN ||
                            call->state == MM_CALL_STATE_WAITING)
             ? MM_CALL_DIRECTION_INCOMING : MM_CALL_DIRECTION_OUTGOING;
