@@ -21,11 +21,13 @@
 #include "mm-log-object.h"
 #include "mm-call-samsung-sit.h"
 #include "mm-iface-modem-voice.h"
+#include "mm-iface-modem-cell-broadcast.h"
 #include "mm-call-list.h"
 #include "mm-modem-helpers.h"
 #include "mm-iface-modem-messaging.h"
 #include "mm-sim-samsung-sit.h"
 #include "mm-sms-part-3gpp.h"
+#include "mm-cbm-part.h"
 #include "mm-sms-samsung-sit.h"
 #include "mm-sit-carrier-config.h"
 #include "mm-sit-ims-config.h"
@@ -40,6 +42,9 @@ static void iface_modem_messaging_init (MMIfaceModemMessagingInterface *iface);
 static void iface_modem_signal_init (MMIfaceModemSignalInterface *iface);
 static void iface_modem_time_init (MMIfaceModemTimeInterface *iface);
 static void iface_modem_voice_init (MMIfaceModemVoiceInterface *iface);
+static void iface_modem_cell_broadcast_init (MMIfaceModemCellBroadcastInterface *iface);
+static void handle_new_broadcast_sms (MMBroadbandModemSamsungSit *self,
+                                     const MMSitMessage         *message);
 static void iface_modem_3gpp_ussd_init (MMIfaceModem3gppUssdInterface *iface);
 
 static void handle_on_ussd (MMBroadbandModemSamsungSit *self,
@@ -179,7 +184,8 @@ G_DEFINE_TYPE_EXTENDED (MMBroadbandModemSamsungSit,
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_MESSAGING, iface_modem_messaging_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_SIGNAL, iface_modem_signal_init)
                         G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_TIME, iface_modem_time_init)
-                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_VOICE, iface_modem_voice_init))
+                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_VOICE, iface_modem_voice_init)
+                        G_IMPLEMENT_INTERFACE (MM_TYPE_IFACE_MODEM_CELL_BROADCAST, iface_modem_cell_broadcast_init))
 
 static gboolean
 sit_signal_get_lte_rssi (const MMSitSignal *signal,
@@ -1902,6 +1908,9 @@ sit_indication (MMSitClient              *client,
         message->id == MM_SIT_MESSAGE_NEW_SMS_STATUS_REPORT ||
         message->id == MM_SIT_MESSAGE_IMS_NEW_SMS)
         handle_new_sms (self, message);
+
+    if (message->id == MM_SIT_MESSAGE_NEW_BROADCAST_SMS)
+        handle_new_broadcast_sms (self, message);
 
     if (message->id == MM_SIT_MESSAGE_SIM_STATUS_CHANGED) {
         invalidate_carrier_config (self);
@@ -7344,6 +7353,430 @@ modem_voice_join_multiparty (MMIfaceModemVoice   *_self,
 
     call_scan_clear (&scan);
     supp_svc_step (task);
+}
+
+/*****************************************************************************/
+/* Cell broadcast: the emergency alert channels (CellBroadcast interface)
+ *
+ * Four SIT messages, all in the SMS group: 0x0105 reads which CBS message
+ * identifiers the CP accepts, 0x0106 writes them, 0x0107 turns reception on,
+ * and 0x0110 delivers a page. This device's own Android sends the config and
+ * the activation 5.77 s into every boot, once per stack, which is what the
+ * sequence here reproduces.
+ *
+ * A page needs no acknowledgement -- the vendor has no ack builder for 0x0110,
+ * unlike a delivered SMS, and the CP does not hold it.
+ */
+
+static void
+handle_new_broadcast_sms (MMBroadbandModemSamsungSit *self,
+                          const MMSitMessage         *message)
+{
+    g_autoptr(GError) error = NULL;
+    MMSitCbsPage      page;
+    MMCbmPart        *part;
+
+    if (!mm_sit_message_parse_new_broadcast_sms (message, &page, &error)) {
+        mm_obj_warn (self, "couldn't parse a cell broadcast page: %s", error->message);
+        return;
+    }
+
+    mm_obj_dbg (self, "cell broadcast page delivered, %u bytes", page.len);
+
+    part = mm_cbm_part_new_from_binary_pdu (page.page, page.len, self, &error);
+    if (!part) {
+        mm_obj_warn (self, "couldn't parse the cell broadcast PDU: %s", error->message);
+        return;
+    }
+
+    /*
+     * Received, not stored: the CP hands the page over as it arrives and keeps
+     * no copy, so there is no other state it could be in.
+     */
+    if (!mm_iface_modem_cell_broadcast_take_part (MM_IFACE_MODEM_CELL_BROADCAST (self),
+                                                  G_OBJECT (self), part,
+                                                  MM_CBM_STATE_RECEIVED, &error))
+        mm_obj_dbg (self, "couldn't take the cell broadcast part: %s", error->message);
+}
+
+static gboolean
+cell_broadcast_check_support_finish (MMIfaceModemCellBroadcast *self,
+                                     GAsyncResult              *res,
+                                     GError                   **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+check_support_config_ready (MMSitClient *client,
+                            GAsyncResult *res,
+                            GTask        *task)
+{
+    g_autoptr(GError) error = NULL;
+    guint             n_ranges = 0;
+
+    if (!mm_sit_client_get_broadcast_config_finish (client, res, NULL, &n_ranges, &error)) {
+        mm_obj_dbg (g_task_get_source_object (task),
+                    "cell broadcast unsupported: %s", error->message);
+        g_task_return_boolean (task, FALSE);
+    } else {
+        mm_obj_dbg (g_task_get_source_object (task),
+                    "cell broadcast supported (CP holds %u range%s)",
+                    n_ranges, n_ranges == 1 ? "" : "s");
+        g_task_return_boolean (task, TRUE);
+    }
+    g_object_unref (task);
+}
+
+static void
+cell_broadcast_check_support (MMIfaceModemCellBroadcast *_self,
+                              GAsyncReadyCallback        callback,
+                              gpointer                   user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (_self);
+    GTask                      *task;
+    MMSitClient                *client;
+    GError                     *error = NULL;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_clear_error (&error);
+        g_task_return_boolean (task, FALSE);
+        g_object_unref (task);
+        return;
+    }
+
+    /* Asking the CP for its config is the only support probe available, and it
+     * is harmless: a read. */
+    mm_sit_client_get_broadcast_config (client, NULL,
+                                        (GAsyncReadyCallback) check_support_config_ready,
+                                        task);
+}
+
+/* The indication arrives on the stream the plugin is already listening to, so
+ * there is nothing to set up or tear down per interface. */
+static gboolean
+cell_broadcast_unsolicited_events_noop_finish (MMIfaceModemCellBroadcast *self,
+                                               GAsyncResult              *res,
+                                               GError                   **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+cell_broadcast_unsolicited_events_noop (MMIfaceModemCellBroadcast *self,
+                                        GAsyncReadyCallback        callback,
+                                        gpointer                   user_data)
+{
+    GTask *task = g_task_new (self, NULL, callback, user_data);
+
+    g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static gboolean
+cell_broadcast_enable_unsolicited_events_finish (MMIfaceModemCellBroadcast *self,
+                                                 GAsyncResult              *res,
+                                                 GError                   **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+broadcast_activation_ready (MMSitClient  *client,
+                            GAsyncResult *res,
+                            GTask        *task)
+{
+    GError *error = NULL;
+
+    if (!mm_sit_client_set_broadcast_activation_finish (client, res, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+seed_broadcast_config_ready (MMSitClient  *client,
+                             GAsyncResult *res,
+                             GTask        *task)
+{
+    g_autoptr(GError) error = NULL;
+
+    /* A refusal here is not fatal: reception can still be turned on, and
+     * whatever the CP already holds stays in force. */
+    if (!mm_sit_client_set_broadcast_config_finish (client, res, &error))
+        mm_obj_warn (g_task_get_source_object (task),
+                     "couldn't write the cell broadcast config: %s", error->message);
+
+    mm_sit_client_set_broadcast_activation (client, TRUE, NULL,
+                                            (GAsyncReadyCallback) broadcast_activation_ready,
+                                            task);
+}
+
+static void
+enable_read_config_ready (MMSitClient  *client,
+                          GAsyncResult *res,
+                          GTask        *task)
+{
+    g_autoptr(GError)   error = NULL;
+    MMSitBroadcastRange ranges[MM_SIT_MAX_BROADCAST_RANGES];
+    guint               n_ranges = 0;
+    guint               i;
+    gboolean            any_selected = FALSE;
+
+    if (mm_sit_client_get_broadcast_config_finish (client, res, ranges, &n_ranges, &error)) {
+        for (i = 0; i < n_ranges; i++) {
+            if (ranges[i].selected) {
+                any_selected = TRUE;
+                break;
+            }
+        }
+    }
+
+    /*
+     * Seed the CP with Android's own range set only when it is accepting
+     * nothing, so a config the user has since chosen is not overwritten on
+     * every enable. A CP accepting nothing would silently never deliver an
+     * alert, which is the state worth fixing.
+     */
+    if (!any_selected) {
+        mm_obj_dbg (g_task_get_source_object (task),
+                    "CP accepts no broadcast ranges; writing the Android boot set");
+        mm_sit_client_set_broadcast_config (client, NULL, 0, NULL,
+                                            (GAsyncReadyCallback) seed_broadcast_config_ready,
+                                            task);
+        return;
+    }
+
+    mm_sit_client_set_broadcast_activation (client, TRUE, NULL,
+                                            (GAsyncReadyCallback) broadcast_activation_ready,
+                                            task);
+}
+
+static void
+cell_broadcast_enable_unsolicited_events (MMIfaceModemCellBroadcast *_self,
+                                          GAsyncReadyCallback        callback,
+                                          gpointer                   user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (_self);
+    GTask                      *task;
+    MMSitClient                *client;
+    GError                     *error = NULL;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    mm_sit_client_get_broadcast_config (client, NULL,
+                                        (GAsyncReadyCallback) enable_read_config_ready,
+                                        task);
+}
+
+static gboolean
+cell_broadcast_disable_unsolicited_events_finish (MMIfaceModemCellBroadcast *self,
+                                                  GAsyncResult              *res,
+                                                  GError                   **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+cell_broadcast_disable_unsolicited_events (MMIfaceModemCellBroadcast *_self,
+                                           GAsyncReadyCallback        callback,
+                                           gpointer                   user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (_self);
+    GTask                      *task;
+    MMSitClient                *client;
+    GError                     *error = NULL;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    mm_sit_client_set_broadcast_activation (client, FALSE, NULL,
+                                            (GAsyncReadyCallback) broadcast_activation_ready,
+                                            task);
+}
+
+static GArray *
+cell_broadcast_load_channels_finish (MMIfaceModemCellBroadcast *self,
+                                     GAsyncResult              *res,
+                                     GError                   **error)
+{
+    return g_task_propagate_pointer (G_TASK (res), error);
+}
+
+static void
+load_channels_ready (MMSitClient  *client,
+                     GAsyncResult *res,
+                     GTask        *task)
+{
+    GError              *error = NULL;
+    MMSitBroadcastRange  ranges[MM_SIT_MAX_BROADCAST_RANGES];
+    guint                n_ranges = 0;
+    guint                i;
+    GArray              *channels;
+
+    if (!mm_sit_client_get_broadcast_config_finish (client, res, ranges, &n_ranges, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    channels = g_array_new (FALSE, FALSE, sizeof (MMCellBroadcastChannels));
+    for (i = 0; i < n_ranges; i++) {
+        MMCellBroadcastChannels ch;
+
+        /* Only the accepted ranges are channels. The CP is also told about the
+         * ones it must refuse -- stock lists the test and exercise identifiers
+         * that way -- and reporting those as active would be a lie. */
+        if (!ranges[i].selected)
+            continue;
+        ch.start = ranges[i].from_service_id;
+        ch.end   = ranges[i].to_service_id;
+        g_array_append_val (channels, ch);
+    }
+
+    g_task_return_pointer (task, channels, (GDestroyNotify) g_array_unref);
+    g_object_unref (task);
+}
+
+static void
+cell_broadcast_load_channels (MMIfaceModemCellBroadcast *_self,
+                              GAsyncReadyCallback        callback,
+                              gpointer                   user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (_self);
+    GTask                      *task;
+    MMSitClient                *client;
+    GError                     *error = NULL;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    mm_sit_client_get_broadcast_config (client, NULL,
+                                        (GAsyncReadyCallback) load_channels_ready,
+                                        task);
+}
+
+static gboolean
+cell_broadcast_set_channels_finish (MMIfaceModemCellBroadcast *self,
+                                    GAsyncResult              *res,
+                                    GError                   **error)
+{
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+static void
+set_channels_ready (MMSitClient  *client,
+                    GAsyncResult *res,
+                    GTask        *task)
+{
+    GError *error = NULL;
+
+    if (!mm_sit_client_set_broadcast_config_finish (client, res, &error))
+        g_task_return_error (task, error);
+    else
+        g_task_return_boolean (task, TRUE);
+    g_object_unref (task);
+}
+
+static void
+cell_broadcast_set_channels (MMIfaceModemCellBroadcast *_self,
+                             GArray                    *channels,
+                             GAsyncReadyCallback        callback,
+                             gpointer                   user_data)
+{
+    MMBroadbandModemSamsungSit *self = MM_BROADBAND_MODEM_SAMSUNG_SIT (_self);
+    GTask                      *task;
+    MMSitClient                *client;
+    GError                     *error = NULL;
+    MMSitBroadcastRange         ranges[MM_SIT_MAX_BROADCAST_RANGES];
+    guint                       i;
+
+    task = g_task_new (self, NULL, callback, user_data);
+
+    client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
+    if (!client) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    if (!channels || !channels->len) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_INVALID_ARGS,
+                                 "No cell broadcast channels given");
+        g_object_unref (task);
+        return;
+    }
+    if (channels->len > MM_SIT_MAX_BROADCAST_RANGES) {
+        g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_INVALID_ARGS,
+                                 "Too many cell broadcast channels: %u, the CP takes %u",
+                                 channels->len, MM_SIT_MAX_BROADCAST_RANGES);
+        g_object_unref (task);
+        return;
+    }
+
+    for (i = 0; i < channels->len; i++) {
+        MMCellBroadcastChannels ch = g_array_index (channels, MMCellBroadcastChannels, i);
+
+        if (ch.start > ch.end) {
+            g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_INVALID_ARGS,
+                                     "Invalid channel range %u-%u", ch.start, ch.end);
+            g_object_unref (task);
+            return;
+        }
+        ranges[i].from_service_id  = ch.start;
+        ranges[i].to_service_id    = ch.end;
+        /* The whole coding-scheme span, as every captured entry uses: the CP
+         * is not asked to filter on the encoding. */
+        ranges[i].from_code_scheme = 0x00;
+        ranges[i].to_code_scheme   = 0xff;
+        ranges[i].selected         = TRUE;
+    }
+
+    mm_sit_client_set_broadcast_config (client, ranges, channels->len, NULL,
+                                        (GAsyncReadyCallback) set_channels_ready,
+                                        task);
+}
+
+static void
+iface_modem_cell_broadcast_init (MMIfaceModemCellBroadcastInterface *iface)
+{
+    iface->check_support                     = cell_broadcast_check_support;
+    iface->check_support_finish              = cell_broadcast_check_support_finish;
+    iface->setup_unsolicited_events          = cell_broadcast_unsolicited_events_noop;
+    iface->setup_unsolicited_events_finish   = cell_broadcast_unsolicited_events_noop_finish;
+    iface->cleanup_unsolicited_events        = cell_broadcast_unsolicited_events_noop;
+    iface->cleanup_unsolicited_events_finish = cell_broadcast_unsolicited_events_noop_finish;
+    iface->enable_unsolicited_events         = cell_broadcast_enable_unsolicited_events;
+    iface->enable_unsolicited_events_finish  = cell_broadcast_enable_unsolicited_events_finish;
+    iface->disable_unsolicited_events        = cell_broadcast_disable_unsolicited_events;
+    iface->disable_unsolicited_events_finish = cell_broadcast_disable_unsolicited_events_finish;
+    iface->load_channels                     = cell_broadcast_load_channels;
+    iface->load_channels_finish              = cell_broadcast_load_channels_finish;
+    iface->set_channels                      = cell_broadcast_set_channels;
+    iface->set_channels_finish               = cell_broadcast_set_channels_finish;
 }
 
 static void

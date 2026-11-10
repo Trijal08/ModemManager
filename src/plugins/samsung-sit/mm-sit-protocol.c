@@ -714,6 +714,60 @@ mm_sit_request_new_set_fast_dormancy_info (guint16 token)
 }
 
 GByteArray *
+mm_sit_request_new_get_broadcast_sms_config (guint16 token)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_get_broadcast_sms_config (token, &buffer, &len);
+    return finish_build (status, buffer, len, NULL);
+}
+
+GByteArray *
+mm_sit_request_new_set_broadcast_sms_config (guint16                    token,
+                                             const MMSitBroadcastRange *ranges,
+                                             guint                      n_ranges)
+{
+    guint8                      *buffer = NULL;
+    gsize                        len = 0;
+    SamsungSitStatus             status;
+    SamsungSitBroadcastRange     wire[MM_SIT_MAX_BROADCAST_RANGES];
+    guint                        i;
+
+    if (!ranges || !n_ranges) {
+        /* The codec sends Android's own boot set for an empty list. */
+        status = samsung_sit_build_set_broadcast_sms_config (token, NULL, 0, &buffer, &len);
+        return finish_build (status, buffer, len, NULL);
+    }
+
+    if (n_ranges > MM_SIT_MAX_BROADCAST_RANGES)
+        n_ranges = MM_SIT_MAX_BROADCAST_RANGES;
+    for (i = 0; i < n_ranges; i++) {
+        wire[i].from_service_id  = ranges[i].from_service_id;
+        wire[i].to_service_id    = ranges[i].to_service_id;
+        wire[i].from_code_scheme = ranges[i].from_code_scheme;
+        wire[i].to_code_scheme   = ranges[i].to_code_scheme;
+        wire[i].selected         = ranges[i].selected ? 1 : 0;
+    }
+    status = samsung_sit_build_set_broadcast_sms_config (token, wire, n_ranges, &buffer, &len);
+    return finish_build (status, buffer, len, NULL);
+}
+
+GByteArray *
+mm_sit_request_new_sms_broadcast_activation (guint16  token,
+                                             gboolean activate)
+{
+    guint8          *buffer = NULL;
+    gsize            len = 0;
+    SamsungSitStatus status;
+
+    status = samsung_sit_build_sms_broadcast_activation (token, activate ? 1 : 0,
+                                                         &buffer, &len);
+    return finish_build (status, buffer, len, NULL);
+}
+
+GByteArray *
 mm_sit_request_new_set_indication_filter (guint16 token,
                                           guint32 filter)
 {
@@ -980,6 +1034,63 @@ mm_sit_request_new_get_smsc_address (guint16 token)
 
     status = samsung_sit_build_get_smsc_address (token, &buffer, &len);
     return finish_build (status, buffer, len, NULL);
+}
+
+gboolean
+mm_sit_message_parse_new_broadcast_sms (const MMSitMessage *message,
+                                        MMSitCbsPage       *out_page,
+                                        GError            **error)
+{
+    const guint8     *data;
+    gsize             len;
+    gsize             page_len = 0;
+    SamsungSitStatus  status;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_page != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_new_broadcast_sms (data, len, out_page->page, &page_len);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+    out_page->len = page_len;
+    return TRUE;
+}
+
+gboolean
+mm_sit_message_parse_broadcast_sms_config (const MMSitMessage  *message,
+                                           MMSitBroadcastRange *out_ranges,
+                                           guint               *out_n_ranges,
+                                           GError             **error)
+{
+    const guint8             *data;
+    gsize                     len;
+    gsize                     n = 0;
+    SamsungSitStatus          status;
+    SamsungSitBroadcastRange  wire[MM_SIT_MAX_BROADCAST_RANGES];
+    gsize                     i;
+
+    g_return_val_if_fail (message != NULL, FALSE);
+    g_return_val_if_fail (out_ranges != NULL, FALSE);
+    g_return_val_if_fail (out_n_ranges != NULL, FALSE);
+
+    data = mm_sit_message_get_data (message, &len);
+    status = samsung_sit_parse_broadcast_sms_config (data, len, wire, &n);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        set_ffi_error (error, status);
+        return FALSE;
+    }
+    for (i = 0; i < n; i++) {
+        out_ranges[i].from_service_id  = wire[i].from_service_id;
+        out_ranges[i].to_service_id    = wire[i].to_service_id;
+        out_ranges[i].from_code_scheme = wire[i].from_code_scheme;
+        out_ranges[i].to_code_scheme   = wire[i].to_code_scheme;
+        out_ranges[i].selected         = wire[i].selected ? TRUE : FALSE;
+    }
+    *out_n_ranges = n;
+    return TRUE;
 }
 
 gboolean

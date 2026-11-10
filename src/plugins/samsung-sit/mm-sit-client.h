@@ -496,6 +496,33 @@ gboolean mm_sit_client_hangup_finish        (MMSitClient        *self,
                                              GAsyncResult       *res,
                                              GError            **error);
 
+void     mm_sit_client_get_broadcast_config         (MMSitClient        *self,
+                                                    GCancellable       *cancellable,
+                                                    GAsyncReadyCallback callback,
+                                                    gpointer            user_data);
+gboolean mm_sit_client_get_broadcast_config_finish  (MMSitClient        *self,
+                                                    GAsyncResult       *res,
+                                                    MMSitBroadcastRange *out_ranges,
+                                                    guint              *out_n_ranges,
+                                                    GError            **error);
+void     mm_sit_client_set_broadcast_config         (MMSitClient        *self,
+                                                    const MMSitBroadcastRange *ranges,
+                                                    guint               n_ranges,
+                                                    GCancellable       *cancellable,
+                                                    GAsyncReadyCallback callback,
+                                                    gpointer            user_data);
+gboolean mm_sit_client_set_broadcast_config_finish  (MMSitClient        *self,
+                                                    GAsyncResult       *res,
+                                                    GError            **error);
+void     mm_sit_client_set_broadcast_activation     (MMSitClient        *self,
+                                                    gboolean            activate,
+                                                    GCancellable       *cancellable,
+                                                    GAsyncReadyCallback callback,
+                                                    gpointer            user_data);
+gboolean mm_sit_client_set_broadcast_activation_finish (MMSitClient     *self,
+                                                    GAsyncResult       *res,
+                                                    GError            **error);
+
 void     mm_sit_client_set_indication_filter        (MMSitClient        *self,
                                                      guint32             filter,
                                                      GCancellable       *cancellable,

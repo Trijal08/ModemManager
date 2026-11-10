@@ -2653,6 +2653,131 @@ mm_sit_client_hangup_finish (MMSitClient  *self,
     return g_task_propagate_boolean (G_TASK (res), error);
 }
 
+/* The ranges a GET_BROADCAST_SMS_CONFIG reply carries, owned by the task. */
+typedef struct {
+    MMSitBroadcastRange ranges[MM_SIT_MAX_BROADCAST_RANGES];
+    guint               n_ranges;
+} BroadcastConfig;
+
+static void
+broadcast_config_free (BroadcastConfig *cfg)
+{
+    g_free (cfg);
+}
+
+static void
+get_broadcast_config_ready (MMSitClient  *self,
+                            GAsyncResult *res,
+                            GTask        *task)
+{
+    g_autoptr(MMSitMessage) response = NULL;
+    GError                 *error = NULL;
+    BroadcastConfig        *cfg;
+
+    response = mm_sit_client_command_finish (self, res, &error);
+    if (!response || !message_check_success (response, &error)) {
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+
+    cfg = g_new0 (BroadcastConfig, 1);
+    if (!mm_sit_message_parse_broadcast_sms_config (response, cfg->ranges,
+                                                    &cfg->n_ranges, &error)) {
+        g_free (cfg);
+        g_task_return_error (task, error);
+        g_object_unref (task);
+        return;
+    }
+    g_task_return_pointer (task, cfg, (GDestroyNotify) broadcast_config_free);
+    g_object_unref (task);
+}
+
+void
+mm_sit_client_get_broadcast_config (MMSitClient        *self,
+                                    GCancellable       *cancellable,
+                                    GAsyncReadyCallback callback,
+                                    gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+    GTask                *task;
+
+    task = g_task_new (self, cancellable, callback, user_data);
+    request = mm_sit_request_new_get_broadcast_sms_config (mm_sit_client_next_token (self));
+    mm_sit_client_command (self, request, 5, cancellable,
+                           (GAsyncReadyCallback) get_broadcast_config_ready, task);
+}
+
+/* Returns the ranges into caller storage; out_n_ranges is capped at
+ * MM_SIT_MAX_BROADCAST_RANGES by the parser. */
+gboolean
+mm_sit_client_get_broadcast_config_finish (MMSitClient         *self,
+                                           GAsyncResult        *res,
+                                           MMSitBroadcastRange *out_ranges,
+                                           guint               *out_n_ranges,
+                                           GError             **error)
+{
+    g_autofree BroadcastConfig *cfg = NULL;
+
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+
+    cfg = g_task_propagate_pointer (G_TASK (res), error);
+    if (!cfg)
+        return FALSE;
+    if (out_ranges)
+        memcpy (out_ranges, cfg->ranges, sizeof (cfg->ranges));
+    if (out_n_ranges)
+        *out_n_ranges = cfg->n_ranges;
+    return TRUE;
+}
+
+void
+mm_sit_client_set_broadcast_config (MMSitClient               *self,
+                                    const MMSitBroadcastRange *ranges,
+                                    guint                      n_ranges,
+                                    GCancellable              *cancellable,
+                                    GAsyncReadyCallback        callback,
+                                    gpointer                   user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+
+    request = mm_sit_request_new_set_broadcast_sms_config (mm_sit_client_next_token (self),
+                                                           ranges, n_ranges);
+    run_checked_command (self, request, 5, cancellable, callback, user_data);
+}
+
+gboolean
+mm_sit_client_set_broadcast_config_finish (MMSitClient  *self,
+                                           GAsyncResult *res,
+                                           GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
+void
+mm_sit_client_set_broadcast_activation (MMSitClient        *self,
+                                        gboolean            activate,
+                                        GCancellable       *cancellable,
+                                        GAsyncReadyCallback callback,
+                                        gpointer            user_data)
+{
+    g_autoptr(GByteArray) request = NULL;
+
+    request = mm_sit_request_new_sms_broadcast_activation (mm_sit_client_next_token (self),
+                                                            activate);
+    run_checked_command (self, request, 5, cancellable, callback, user_data);
+}
+
+gboolean
+mm_sit_client_set_broadcast_activation_finish (MMSitClient  *self,
+                                               GAsyncResult *res,
+                                               GError      **error)
+{
+    g_return_val_if_fail (MM_IS_SIT_CLIENT (self), FALSE);
+    return g_task_propagate_boolean (G_TASK (res), error);
+}
+
 void
 mm_sit_client_set_indication_filter (MMSitClient        *self,
                                      guint32             filter,

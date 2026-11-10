@@ -22,6 +22,11 @@
 #define MM_SIT_MAX_SIM_IO_DATA      512
 #define MM_SIT_MAX_SIM_IO_PATH      6
 #define MM_SIT_MAX_SMS_PDU          244
+/* A GSM cell broadcast page is 88 bytes; the UMTS and LTE forms carry up to
+ * this, which is the widest the CP's signed length field can mean. */
+#define MM_SIT_MAX_CBS_PAGE         1252
+/* Most broadcast ranges the CP accepts, and so the most it can report. */
+#define MM_SIT_MAX_BROADCAST_RANGES 50
 #define MM_SIT_MAX_SMSC_LEN         12
 #define MM_SIT_MAX_IMEI_LEN         15
 #define MM_SIT_SOFTWARE_VERSION_LEN 2
@@ -73,8 +78,12 @@ typedef enum {
     MM_SIT_MESSAGE_SEND_SMS_EXPECT_MORE       = 0x0101,
     MM_SIT_MESSAGE_SMS_ACK                    = 0x0102,
     MM_SIT_MESSAGE_GET_SMSC_ADDRESS           = 0x0108,
+    MM_SIT_MESSAGE_GET_BROADCAST_SMS_CONFIG   = 0x0105,
+    MM_SIT_MESSAGE_SET_BROADCAST_SMS_CONFIG   = 0x0106,
+    MM_SIT_MESSAGE_SMS_BROADCAST_ACTIVATION   = 0x0107,
     MM_SIT_MESSAGE_NEW_SMS                    = 0x010c,
     MM_SIT_MESSAGE_NEW_SMS_STATUS_REPORT      = 0x010d,
+    MM_SIT_MESSAGE_NEW_BROADCAST_SMS          = 0x0110,
     MM_SIT_MESSAGE_IMS_SEND_SMS               = 0x0d1b,
     MM_SIT_MESSAGE_IMS_SMS_ACK                = 0x0d1d,
     MM_SIT_MESSAGE_IMS_NEW_SMS                = 0x0d1e,
@@ -336,6 +345,22 @@ typedef struct {
     guint16  pdu_len;
     guint8   pdu[MM_SIT_MAX_SMS_PDU];
 } MMSitSmsDeliver;
+
+/* One inclusive range of cell broadcast message identifiers, and whether the
+ * CP should accept it. 4352-4356 are ETWS, 4370 onwards CMAS. */
+typedef struct {
+    guint16  from_service_id;
+    guint16  to_service_id;
+    guint8   from_code_scheme;
+    guint8   to_code_scheme;
+    gboolean selected;
+} MMSitBroadcastRange;
+
+/* A cell broadcast page as it arrived: a TS 23.041 CBS message, untouched. */
+typedef struct {
+    guint16 len;
+    guint8  page[MM_SIT_MAX_CBS_PAGE];
+} MMSitCbsPage;
 
 /* How an elementary file is organised. */
 typedef enum {
@@ -774,8 +799,25 @@ GByteArray *mm_sit_request_new_send_sms               (guint16                to
 GByteArray *mm_sit_request_new_sms_ack                (guint16                token,
                                                        gboolean               over_ims);
 GByteArray *mm_sit_request_new_get_smsc_address       (guint16                token);
+GByteArray *mm_sit_request_new_get_broadcast_sms_config (guint16              token);
+/* Pass ranges == NULL to ask for the set this device's own Android writes at
+ * boot: ETWS and CMAS on, test and exercise identifiers off. */
+GByteArray *mm_sit_request_new_set_broadcast_sms_config (guint16              token,
+                                                       const MMSitBroadcastRange *ranges,
+                                                       guint                  n_ranges);
+GByteArray *mm_sit_request_new_sms_broadcast_activation (guint16              token,
+                                                       gboolean               activate);
 gboolean mm_sit_message_parse_new_sms                 (const MMSitMessage    *message,
                                                        MMSitSmsDeliver       *out_deliver,
+                                                       GError               **error);
+gboolean mm_sit_message_parse_new_broadcast_sms       (const MMSitMessage    *message,
+                                                       MMSitCbsPage          *out_page,
+                                                       GError               **error);
+/* out_ranges must have room for MM_SIT_MAX_BROADCAST_RANGES entries. A CP with
+ * no config yet is not an error: it reports zero ranges. */
+gboolean mm_sit_message_parse_broadcast_sms_config    (const MMSitMessage    *message,
+                                                       MMSitBroadcastRange   *out_ranges,
+                                                       guint                 *out_n_ranges,
                                                        GError               **error);
 gboolean mm_sit_message_parse_send_sms_result         (const MMSitMessage    *message,
                                                        guint32               *out_reference,
