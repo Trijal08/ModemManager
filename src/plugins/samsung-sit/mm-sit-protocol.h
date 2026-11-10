@@ -800,9 +800,13 @@ GByteArray *mm_sit_request_new_sms_ack                (guint16                to
                                                        gboolean               over_ims);
 GByteArray *mm_sit_request_new_get_smsc_address       (guint16                token);
 GByteArray *mm_sit_request_new_get_broadcast_sms_config (guint16              token);
-/* Pass ranges == NULL to ask for the set this device's own Android writes at
- * boot: ETWS and CMAS on, test and exercise identifiers off. */
+/* Pass ranges == NULL to ask for what that country accepts by default: real
+ * alerts on, tests and exercises off. */
+/* mcc is the country whose identifier assignment applies, 0 when unknown: a
+ * category's channel moves between countries, so the same ranges do not mean
+ * the same channels everywhere. */
 GByteArray *mm_sit_request_new_set_broadcast_sms_config (guint16              token,
+                                                       guint16                mcc,
                                                        const MMSitBroadcastRange *ranges,
                                                        guint                  n_ranges);
 GByteArray *mm_sit_request_new_sms_broadcast_activation (guint16              token,

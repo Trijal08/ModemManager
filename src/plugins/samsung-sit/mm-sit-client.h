@@ -506,6 +506,7 @@ gboolean mm_sit_client_get_broadcast_config_finish  (MMSitClient        *self,
                                                     guint              *out_n_ranges,
                                                     GError            **error);
 void     mm_sit_client_set_broadcast_config         (MMSitClient        *self,
+                                                    guint16             mcc,
                                                     const MMSitBroadcastRange *ranges,
                                                     guint               n_ranges,
                                                     GCancellable       *cancellable,

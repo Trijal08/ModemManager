@@ -7368,6 +7368,33 @@ modem_voice_join_multiparty (MMIfaceModemVoice   *_self,
  * unlike a delivered SMS, and the CP does not hold it.
  */
 
+/*
+ * The country whose cell broadcast identifier assignment applies, or 0 when
+ * it is not known yet.
+ *
+ * The *serving* network decides it, not the SIM: the identifiers carry local
+ * alerts about where the phone physically is, so a roaming phone wants the
+ * country it is in. The SIM's own MCC is the fallback for the window before
+ * the CP has reported an operator.
+ */
+static guint16
+cell_broadcast_mcc (MMBroadbandModemSamsungSit *self)
+{
+    const gchar *source;
+    gchar        mcc[4] = { 0 };
+
+    source = self->priv->operator_code;
+    if (!source || strlen (source) < 3)
+        source = self->priv->carrier_config_imsi;
+    if (!source || strlen (source) < 3)
+        return 0;
+
+    memcpy (mcc, source, 3);
+    if (!g_ascii_isdigit (mcc[0]) || !g_ascii_isdigit (mcc[1]) || !g_ascii_isdigit (mcc[2]))
+        return 0;
+    return (guint16) atoi (mcc);
+}
+
 static void
 handle_new_broadcast_sms (MMBroadbandModemSamsungSit *self,
                           const MMSitMessage         *message)
@@ -7544,8 +7571,11 @@ enable_read_config_ready (MMSitClient  *client,
      */
     if (!any_selected) {
         mm_obj_dbg (g_task_get_source_object (task),
-                    "CP accepts no broadcast ranges; writing the Android boot set");
-        mm_sit_client_set_broadcast_config (client, NULL, 0, NULL,
+                    "CP accepts no broadcast ranges; writing the default set for MCC %u",
+                    cell_broadcast_mcc (g_task_get_source_object (task)));
+        mm_sit_client_set_broadcast_config (client,
+                                            cell_broadcast_mcc (g_task_get_source_object (task)),
+                                            NULL, 0, NULL,
                                             (GAsyncReadyCallback) seed_broadcast_config_ready,
                                             task);
         return;
@@ -7760,7 +7790,8 @@ cell_broadcast_set_channels (MMIfaceModemCellBroadcast *_self,
         ranges[i].selected         = TRUE;
     }
 
-    mm_sit_client_set_broadcast_config (client, ranges, channels->len, NULL,
+    mm_sit_client_set_broadcast_config (client, cell_broadcast_mcc (self),
+                                        ranges, channels->len, NULL,
                                         (GAsyncReadyCallback) set_channels_ready,
                                         task);
 }

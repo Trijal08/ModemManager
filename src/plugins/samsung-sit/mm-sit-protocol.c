@@ -726,6 +726,7 @@ mm_sit_request_new_get_broadcast_sms_config (guint16 token)
 
 GByteArray *
 mm_sit_request_new_set_broadcast_sms_config (guint16                    token,
+                                             guint16                    mcc,
                                              const MMSitBroadcastRange *ranges,
                                              guint                      n_ranges)
 {
@@ -736,8 +737,8 @@ mm_sit_request_new_set_broadcast_sms_config (guint16                    token,
     guint                        i;
 
     if (!ranges || !n_ranges) {
-        /* The codec sends Android's own boot set for an empty list. */
-        status = samsung_sit_build_set_broadcast_sms_config (token, NULL, 0, &buffer, &len);
+        /* The codec derives the country's default set for an empty list. */
+        status = samsung_sit_build_set_broadcast_sms_config (token, mcc, NULL, 0, &buffer, &len);
         return finish_build (status, buffer, len, NULL);
     }
 
@@ -750,7 +751,7 @@ mm_sit_request_new_set_broadcast_sms_config (guint16                    token,
         wire[i].to_code_scheme   = ranges[i].to_code_scheme;
         wire[i].selected         = ranges[i].selected ? 1 : 0;
     }
-    status = samsung_sit_build_set_broadcast_sms_config (token, wire, n_ranges, &buffer, &len);
+    status = samsung_sit_build_set_broadcast_sms_config (token, mcc, wire, n_ranges, &buffer, &len);
     return finish_build (status, buffer, len, NULL);
 }
 

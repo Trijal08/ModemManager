@@ -2733,6 +2733,7 @@ mm_sit_client_get_broadcast_config_finish (MMSitClient         *self,
 
 void
 mm_sit_client_set_broadcast_config (MMSitClient               *self,
+                                    guint16                    mcc,
                                     const MMSitBroadcastRange *ranges,
                                     guint                      n_ranges,
                                     GCancellable              *cancellable,
@@ -2742,7 +2743,7 @@ mm_sit_client_set_broadcast_config (MMSitClient               *self,
     g_autoptr(GByteArray) request = NULL;
 
     request = mm_sit_request_new_set_broadcast_sms_config (mm_sit_client_next_token (self),
-                                                           ranges, n_ranges);
+                                                           mcc, ranges, n_ranges);
     run_checked_command (self, request, 5, cancellable, callback, user_data);
 }
 
