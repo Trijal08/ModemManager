@@ -364,7 +364,9 @@ call_hangup (MMBaseCall          *_self,
                     unanswered ? "releasing unanswered" : "hanging up",
                     call_id, index, mm_call_state_get_string (state));
         mm_sit_ims_hangup (mm_broadband_modem_samsung_sit_peek_ims (MM_BROADBAND_MODEM_SAMSUNG_SIT (self->priv->modem)),
-                           (guint8) call_id, unanswered,
+                           (guint8) call_id,
+                           mm_gdbus_call_get_number (MM_GDBUS_CALL (self)),
+                           unanswered,
                            (GAsyncReadyCallback) ims_simple_ready, task);
         return;
     }

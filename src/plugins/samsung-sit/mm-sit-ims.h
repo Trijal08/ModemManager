@@ -169,8 +169,11 @@ void     mm_sit_ims_answer        (MMSitIms            *self,
 gboolean mm_sit_ims_answer_finish (MMSitIms            *self,
                                    GAsyncResult        *res,
                                    GError             **error);
+/* `number` is the far end as the caller knows it, used only to name a
+ * conference member being dropped; NULL is accepted. */
 void     mm_sit_ims_hangup        (MMSitIms            *self,
                                    guint8               call_id,
+                                   const gchar         *number,
                                    gboolean             declined,
                                    GAsyncReadyCallback  callback,
                                    gpointer             user_data);

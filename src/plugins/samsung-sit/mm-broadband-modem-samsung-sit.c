@@ -7250,7 +7250,9 @@ hangup_all_step (GTask *task)
 
     id = g_array_index (ctx->ids, guint8, ctx->next++);
     mm_obj_dbg (self, "hanging up call %u as part of hangup-all", id);
-    mm_sit_ims_hangup (ims, id, FALSE,
+    /* No number: hang-up-all ends the conference outright rather than
+     * dropping its members one at a time. */
+    mm_sit_ims_hangup (ims, id, NULL, FALSE,
                        (GAsyncReadyCallback) hangup_all_step_ready, task);
 }
 

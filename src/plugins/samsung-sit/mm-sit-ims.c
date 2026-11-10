@@ -1350,6 +1350,35 @@ handle_call_status (MMSitIms           *self,
          * longer act on has no business staying in the list. */
         if (call) {
             mm_obj_dbg (self, "IMS call %u released (cause %u)", st.call_id, st.end_cause);
+            /*
+             * Releasing a conference releases the legs inside it, and the CP
+             * will not say so: once they are merged it stops reporting them
+             * as calls, so the only release it ever sends is the
+             * conference's. Left in the list they keep whatever state they
+             * had when they were swallowed -- which is held, because holding
+             * is how a second call gets dialled -- and the user is shown a
+             * held call that does not exist and has no audio. Measured.
+             *
+             * A call still ringing in or waiting is genuinely separate: the
+             * CP reports those in their own right, so they are not members.
+             */
+            if (st.multiparty) {
+                guint i = 0;
+
+                while (i < self->priv->calls->len) {
+                    ImsCall *other = g_ptr_array_index (self->priv->calls, i);
+
+                    if (other != call &&
+                        other->state != MM_CALL_STATE_RINGING_IN &&
+                        other->state != MM_CALL_STATE_WAITING) {
+                        mm_obj_dbg (self, "IMS call %u went with conference %u",
+                                    other->call_id, st.call_id);
+                        g_ptr_array_remove_index_fast (self->priv->calls, i);
+                        continue;
+                    }
+                    i++;
+                }
+            }
             g_ptr_array_remove_fast (self->priv->calls, call);
             g_signal_emit (self, signals[SIGNAL_CALLS_CHANGED], 0);
         }
@@ -1593,6 +1622,7 @@ static ImsCall *find_conference (MMSitIms *self);
 void
 mm_sit_ims_hangup (MMSitIms            *self,
                    guint8               call_id,
+                   const gchar         *number,
                    gboolean             declined,
                    GAsyncReadyCallback  callback,
                    gpointer             user_data)
@@ -1621,15 +1651,33 @@ mm_sit_ims_hangup (MMSitIms            *self,
      */
     conference = find_conference (self);
     if (conference && conference->call_id != call_id) {
-        ImsCall *member = find_call (self, call_id);
+        /*
+         * The member has to be named by number as well as by id, and the CP's
+         * own number for it is not available: once the legs are merged the CP
+         * stops reporting them as calls at all -- only the conference, with
+         * the members as sub-records inside it -- so nothing ever fills in a
+         * connected number for them. The caller passes the number it knows.
+         *
+         * A NULL number means the caller is not singling out a member, and
+         * hang-up-all relies on that to end the whole conference with one
+         * frame rather than peeling members off it.
+         *
+         * Without the leading '+': Android's frame carries 11 bytes,
+         * "18004377950", and the conference event names the same participant
+         * as `tel:18004377950`. The CP's own call status spells it
+         * "+18004377950", so its two reports disagree and Android's wire form
+         * is the tiebreaker.
+         */
+        if (number && number[0] == '+')
+            number++;
 
-        if (member && member->number && conference->user_count > 1) {
-            mm_obj_dbg (self, "dropping call %u from conference %u (%u parties)",
-                        call_id, conference->call_id, conference->user_count);
+        if (number && number[0] && conference->user_count > 1) {
+            mm_obj_dbg (self, "dropping call %u (%s) from conference %u (%u parties)",
+                        call_id, number, conference->call_id, conference->user_count);
             status = samsung_aims_build_conf_call_add_remove_user (
                          mm_sit_client_next_token (self->priv->client),
                          MM_SIT_IMS_CONF_CALL_REMOVE,
-                         conference->call_id, member->call_id, member->number,
+                         conference->call_id, call_id, number,
                          &frame, &len);
             send_simple (self, frame, len, status, "conference remove user", NULL,
                          callback, user_data);
