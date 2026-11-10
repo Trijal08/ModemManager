@@ -99,6 +99,8 @@ gboolean mm_sit_boot_request_wanted (const MMSitBootRequest *request, guint stac
  * Builds the payload for a MM_SIT_BOOT_SUB_BUILD request. Returns a newly
  * allocated buffer and its length, or NULL if this request does not build one.
  */
-guint8 *mm_sit_boot_build_payload (const MMSitBootRequest *request, gsize *len);
+guint8 *mm_sit_boot_build_payload (const MMSitBootRequest *request,
+                                   const gchar            *mccmnc,
+                                   gsize                  *len);
 
 #endif /* MM_SIT_BOOT_CONFIG_H */

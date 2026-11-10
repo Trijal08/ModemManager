@@ -3877,8 +3877,12 @@ parity_build (MMBroadbandModemSamsungSit *self,
     g_autoptr(MMBaseSim)  sim = NULL;
     const gchar          *mccmnc = NULL;
 
-    /* The client does every substitution but this one, which needs the SIM. */
-    if (req->sub == MM_SIT_BOOT_SUB_MCCMNC) {
+    /*
+     * The client does every substitution but this one, which needs the SIM.
+     * A built payload wants it too: the cell broadcast config is derived per
+     * country, and the SIM's is the only MCC known this early.
+     */
+    if (req->sub == MM_SIT_BOOT_SUB_MCCMNC || req->sub == MM_SIT_BOOT_SUB_BUILD) {
         g_object_get (self, MM_IFACE_MODEM_SIM, &sim, NULL);
         mccmnc = sim ? mm_gdbus_sim_get_operator_identifier (MM_GDBUS_SIM (sim)) : NULL;
     }

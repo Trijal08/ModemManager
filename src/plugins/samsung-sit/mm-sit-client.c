@@ -4143,7 +4143,7 @@ mm_sit_client_build_boot_request (MMSitClient              *self,
 
     /* A request whose payload is derived rather than stated. */
     if (req->sub == MM_SIT_BOOT_SUB_BUILD) {
-        built = mm_sit_boot_build_payload (req, &payload_len);
+        built = mm_sit_boot_build_payload (req, mccmnc, &payload_len);
         if (!built)
             return NULL;
     }

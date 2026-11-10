@@ -3623,8 +3623,12 @@ test_boot_cell_broadcast_is_derived (void)
         0x2c, 0x11, 0x2f, 0x11, 0x00, 0xff, 0x01,  /* 4396-4399 CMAS more  on  */
     };
     const MMSitBootRequest *table;
+    const MMSitBootRequest *build = NULL;
     gsize                   n_table = 0, i, len = 0;
     g_autofree guint8      *built = NULL;
+    g_autofree guint8      *dflt = NULL;
+    g_autofree guint8      *brazil = NULL;
+    g_autofree guint8      *junk = NULL;
 
     table = mm_sit_boot_requests (&n_table);
     g_assert_nonnull (table);
@@ -3633,12 +3637,38 @@ test_boot_cell_broadcast_is_derived (void)
     for (i = 0; i < n_table; i++) {
         if (table[i].sub != MM_SIT_BOOT_SUB_BUILD)
             continue;
-        built = mm_sit_boot_build_payload (&table[i], &len);
+        build = &table[i];
         break;
     }
+    g_assert_nonnull (build);
+
+    /* The SIM's MCCMNC decides it, and the MNC length must not matter. */
+    built = mm_sit_boot_build_payload (build, "302220", &len);
     g_assert_nonnull (built);
     g_assert_cmpuint (len, ==, G_N_ELEMENTS (expected));
     g_assert_cmpmem (built, len, expected, G_N_ELEMENTS (expected));
+
+    /* No SIM yet: AOSP's default table, not anybody's country. Canada's own
+     * addition is the last range, so the default is one range shorter and
+     * identical up to it. */
+    dflt = mm_sit_boot_build_payload (build, NULL, &len);
+    g_assert_nonnull (dflt);
+    g_assert_cmpuint (dflt[0], ==, expected[0] - 1);
+    g_assert_cmpuint (len, ==, 1 + (gsize) dflt[0] * 7);
+    g_assert_cmpmem (dflt + 1, len - 1, expected + 1, len - 1);
+
+    /* A country that reassigns a category really differs, which is the whole
+     * reason this is derived: Brazil moves the test channels and uses no ETWS. */
+    brazil = mm_sit_boot_build_payload (build, "72402", &len);
+    g_assert_nonnull (brazil);
+    g_assert_cmpuint (len, ==, 1 + (gsize) brazil[0] * 7);
+    g_assert_true (brazil[0] != expected[0] ||
+                   memcmp (brazil, expected, len) != 0);
+
+    /* Junk where an MCC should be is unknown, never parsed. */
+    junk = mm_sit_boot_build_payload (build, "ab", &len);
+    g_assert_nonnull (junk);
+    g_assert_cmpuint (junk[0], ==, dflt[0]);
 }
 
 /* Three requests go to stack 0 only; stock does that in all five captures. */

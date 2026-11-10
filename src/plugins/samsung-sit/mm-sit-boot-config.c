@@ -22,61 +22,44 @@
  */
 
 #include <string.h>
+#include <glib.h>
+
+#include <samsung_sit_ffi.h>
+
 #include "mm-sit-boot-config.h"
 
 /*
  * Cell broadcast, 3GPP TS 23.041 message identifiers.
  *
- * Stock enables every channel that carries a real alert and disables every
- * test and exercise channel, which is what `test` records here. That is the
- * standard's own distinction, not a national policy: the identifiers mean the
- * same thing in every country, so building the request from them is correct
- * everywhere, where replaying one operator's bytes would not be.
+ * Which identifiers to accept is a property of the *country*, so the table
+ * does not live here: it is generated from AOSP's own CellBroadcastReceiver
+ * resources and assembled by the codec, which the CellBroadcast interface
+ * uses too. Two copies of it is how one capture's national additions -- the
+ * 4396-4399 that only Canada asks for -- became "the default" twice over.
  *
- * Erring towards enabling is deliberate. A channel the local network never
- * uses costs nothing; a disabled channel is an emergency alert the user does
- * not receive.
+ * `mccmnc` is the SIM's, and may be NULL this early in the boot; the codec
+ * then falls back to AOSP's default table rather than to anyone's country.
  */
-static const struct {
-    guint16  from;
-    guint16  to;
-    gboolean test;
-    const gchar *what;
-} cbs_ranges[] = {
-    { 4352, 4354, FALSE, "ETWS earthquake, tsunami, and both"      },
-    { 4355, 4355, TRUE,  "ETWS test"                               },
-    { 4356, 4356, FALSE, "ETWS other emergency"                    },
-    { 4370, 4379, FALSE, "CMAS presidential through amber"         },
-    { 4380, 4382, TRUE,  "CMAS test, exercise, operator defined"   },
-    { 4383, 4392, FALSE, "CMAS, additional language"               },
-    { 4393, 4395, TRUE,  "CMAS test and exercise, additional language" },
-    { 4396, 4399, FALSE, "CMAS, further languages"                 },
-};
-
-/* One count byte, then seven bytes per range. */
-#define CBS_RECORD_SIZE 7
-
 static guint8 *
-build_broadcast_sms_config (gsize *len)
+build_broadcast_sms_config (const gchar *mccmnc, gsize *len)
 {
-    guint8 *out;
-    gsize   i;
+    guint8           *out;
+    gsize             n = 0;
+    guint16           mcc = 0;
+    SamsungSitStatus  status;
 
-    *len = 1 + (G_N_ELEMENTS (cbs_ranges) * CBS_RECORD_SIZE);
-    out = g_malloc0 (*len);
-    out[0] = (guint8) G_N_ELEMENTS (cbs_ranges);
-    for (i = 0; i < G_N_ELEMENTS (cbs_ranges); i++) {
-        guint8 *r = out + 1 + (i * CBS_RECORD_SIZE);
+    if (mccmnc && strlen (mccmnc) >= 3 &&
+        g_ascii_isdigit (mccmnc[0]) && g_ascii_isdigit (mccmnc[1]) &&
+        g_ascii_isdigit (mccmnc[2]))
+        mcc = (guint16) ((mccmnc[0] - '0') * 100 + (mccmnc[1] - '0') * 10 + (mccmnc[2] - '0'));
 
-        r[0] = (guint8) (cbs_ranges[i].from & 0xff);
-        r[1] = (guint8) (cbs_ranges[i].from >> 8);
-        r[2] = (guint8) (cbs_ranges[i].to & 0xff);
-        r[3] = (guint8) (cbs_ranges[i].to >> 8);
-        /* Every coding scheme: the CP filters by identifier, not by scheme. */
-        r[4] = 0x00;
-        r[5] = 0xff;
-        r[6] = cbs_ranges[i].test ? 0x00 : 0x01;
+    out = g_malloc0 (1 + (SAMSUNG_SIT_MAX_BROADCAST_RANGES * 7));
+    status = samsung_sit_broadcast_config_body (mcc, out, &n);
+    if (status != SAMSUNG_SIT_STATUS_OK) {
+        g_free (out);
+        return NULL;
     }
+    *len = n;
     return out;
 }
 
@@ -463,12 +446,14 @@ mm_sit_boot_request_wanted (const MMSitBootRequest *request, guint stack)
 }
 
 guint8 *
-mm_sit_boot_build_payload (const MMSitBootRequest *request, gsize *len)
+mm_sit_boot_build_payload (const MMSitBootRequest *request,
+                           const gchar            *mccmnc,
+                           gsize                  *len)
 {
     if (request->sub != MM_SIT_BOOT_SUB_BUILD)
         return NULL;
     if (request->id == 0x0106)
-        return build_broadcast_sms_config (len);
+        return build_broadcast_sms_config (mccmnc, len);
     g_warn_if_reached ();
     return NULL;
 }
