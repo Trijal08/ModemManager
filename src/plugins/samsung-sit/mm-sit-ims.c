@@ -1361,8 +1361,16 @@ handle_call_status (MMSitIms           *self,
              *
              * A call still ringing in or waiting is genuinely separate: the
              * CP reports those in their own right, so they are not members.
+             *
+             * The frame's multiparty bit cannot be what decides this. The CP
+             * sets it on a *member's* release as well -- a removed leg is
+             * reported `state=6 mp=1 users=0`, exactly like the conference --
+             * so testing it swept away the calls that were still up, which is
+             * every call, measured. What identifies the conference is what we
+             * already know about the call being released: only it is tracked
+             * as multiparty with parties in it.
              */
-            if (st.multiparty) {
+            if (call->multiparty && call->user_count > 0) {
                 guint i = 0;
 
                 while (i < self->priv->calls->len) {
