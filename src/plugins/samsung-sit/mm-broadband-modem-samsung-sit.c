@@ -7729,6 +7729,11 @@ cell_broadcast_set_channels (MMIfaceModemCellBroadcast *_self,
         g_object_unref (task);
         return;
     }
+    /*
+     * The array below bounds the *input*. The frame can hold more entries than
+     * that, because the codec spells out the refusals stock spells out, and it
+     * rejects a merged list over the CP's own limit rather than truncating.
+     */
     if (channels->len > MM_SIT_MAX_BROADCAST_RANGES) {
         g_task_return_new_error (task, MM_CORE_ERROR, MM_CORE_ERROR_INVALID_ARGS,
                                  "Too many cell broadcast channels: %u, the CP takes %u",
