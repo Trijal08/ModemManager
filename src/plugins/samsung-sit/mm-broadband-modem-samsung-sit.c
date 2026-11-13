@@ -3217,6 +3217,7 @@ load_unlock_required_ready (MMSitClient  *client,
                             GTask        *task)
 {
     MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
+    gboolean                    last_attempt = GPOINTER_TO_UINT (g_task_get_task_data (task));
     MMSitSimStatus              status;
     MMModemLock                 lock;
     GError                     *error = NULL;
@@ -3228,6 +3229,34 @@ load_unlock_required_ready (MMSitClient  *client,
     }
 
     if (status.card_state == 0) {
+        /*
+         * An empty stack is not a broken modem, it is a phone with one SIM.
+         *
+         * Left alone, ModemManager turns a missing SIM into a modem in the
+         * failed state, and that modem still sits on the bus ahead of the one
+         * that works -- single-SIM users then get shown the empty stack, with
+         * no operator and nothing to select. So withdraw it instead: an
+         * unexported modem is the honest description of a slot with no card
+         * in it, and the stack that does have a SIM becomes the only one a
+         * caller can find.
+         *
+         * Only on the last attempt. ModemManager retries this before giving
+         * up, and a card the CP has not finished reading reports card_state 0
+         * in the meantime -- withdrawing on the first miss would hide a SIM
+         * that was merely slow.
+         *
+         * Deliberately without mm_base_modem_set_reprobe(): a reprobe recreates
+         * and reinitialises the modem every REPROBE_SECS, which for a slot that
+         * stays empty is an endless two-second cycle. The cost is that a SIM
+         * inserted later is picked up on the next probe of the device rather
+         * than immediately.
+         */
+        if (last_attempt) {
+            mm_obj_info (self, "no SIM in the slot mapped to logical stack %d; "
+                         "withdrawing this modem rather than exporting a failed one",
+                         MAX (self->priv->logical_stack, 0));
+            mm_base_modem_set_valid (MM_BASE_MODEM (self), FALSE);
+        }
         g_task_return_new_error (task, MM_MOBILE_EQUIPMENT_ERROR,
                                  MM_MOBILE_EQUIPMENT_ERROR_SIM_NOT_INSERTED,
                                  "SIM card is not inserted");
@@ -3275,6 +3304,7 @@ load_unlock_required (MMIfaceModem       *iface,
     GTask                      *task;
 
     task = g_task_new (iface, cancellable, callback, user_data);
+    g_task_set_task_data (task, GUINT_TO_POINTER (last_attempt), NULL);
     client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
     if (!client) {
         g_task_return_error (task, error);
