@@ -10,6 +10,7 @@
 #include <libmm-glib.h>
 
 #include "mm-bearer-samsung-sit.h"
+#include "mm-base-manager.h"
 #include "mm-base-sim.h"
 #include "mm-broadband-modem-samsung-sit.h"
 #include "mm-iface-modem.h"
@@ -1827,9 +1828,25 @@ sim_inventory_indication (MMSitClient *client,
                           MMBroadbandModemSamsungSit *self)
 {
     if (message->id == MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED) {
+        MMBaseManager *manager;
+
         /* The cached inventory load_sim_slots() reads is now stale. */
         mm_sit_cp_forget_sim_slot_status (self->priv->cp);
         schedule_sim_check (self);
+
+        /*
+         * A stack whose slot is empty has no modem, so it has no SIT client of
+         * its own to hear a card arrive -- withdrawing the modem took the
+         * client with it. This handler is running on the stack that does have a
+         * SIM, which makes it the only place on the device that learns a slot
+         * changed, so hand the manager our physdev and let it revive whichever
+         * sibling is currently modem-less. Harmless when both are up: the
+         * manager skips devices that already have a modem.
+         */
+        manager = mm_base_manager_peek_default ();
+        if (manager)
+            mm_base_manager_reprobe_physdev (manager,
+                                             mm_base_modem_get_physdev (MM_BASE_MODEM (self)));
     }
 }
 

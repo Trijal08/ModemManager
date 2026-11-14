@@ -90,4 +90,14 @@ void             mm_base_manager_sync        (MMBaseManager *manager);
 
 guint32          mm_base_manager_num_modems  (MMBaseManager *manager);
 
+/* The daemon runs exactly one manager, and a plugin has no path to it: a modem
+ * knows its own physdev but not the manager that owns its device. */
+MMBaseManager   *mm_base_manager_peek_default (void);
+
+/* Recreate a modem for every device on this physdev that has none. A logical
+ * stack whose slot is empty withdraws its modem and leaves the device behind
+ * with its ports, so this revives it; it is a no-op once every stack is up. */
+void             mm_base_manager_reprobe_physdev (MMBaseManager *manager,
+                                                  const gchar   *physdev);
+
 #endif /* MM_BASE_MANAGER_H */

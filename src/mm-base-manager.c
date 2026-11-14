@@ -2081,9 +2081,51 @@ get_property (GObject    *object,
     }
 }
 
+static MMBaseManager *default_manager = NULL;
+
+MMBaseManager *
+mm_base_manager_peek_default (void)
+{
+    return default_manager;
+}
+
+void
+mm_base_manager_reprobe_physdev (MMBaseManager *self,
+                                 const gchar   *physdev)
+{
+    GHashTableIter  iter;
+    MMDevice       *device;
+
+    g_return_if_fail (MM_IS_BASE_MANAGER (self));
+    g_return_if_fail (physdev);
+
+    g_hash_table_iter_init (&iter, self->priv->devices);
+    while (g_hash_table_iter_next (&iter, NULL, (gpointer *) &device)) {
+        g_autoptr(GError) error = NULL;
+
+        /* Devices that already have a modem are why this is safe to call on
+         * every SIM event: the ones that are up are skipped. */
+        if (mm_device_peek_modem (device))
+            continue;
+        if (g_strcmp0 (mm_device_get_physdev (device), physdev) != 0)
+            continue;
+
+        mm_obj_dbg (device, "reprobing: a sibling stack on this physdev reported a SIM change");
+        if (!mm_device_create_modem (device, &error)) {
+            mm_obj_dbg (device, "could not recreate modem: %s", error->message);
+            continue;
+        }
+        mm_device_initialize_modem (device);
+    }
+}
+
 static void
 mm_base_manager_init (MMBaseManager *self)
 {
+    /* See mm_base_manager_peek_default(). */
+    g_assert (default_manager == NULL);
+    default_manager = self;
+
     /* Setup private data */
     self->priv = G_TYPE_INSTANCE_GET_PRIVATE (self, MM_TYPE_BASE_MANAGER, MMBaseManagerPrivate);
 
@@ -2196,6 +2238,9 @@ initable_init (GInitable     *initable,
 static void
 finalize (GObject *object)
 {
+    if (default_manager == MM_BASE_MANAGER (object))
+        default_manager = NULL;
+
     MMBaseManager *self = MM_BASE_MANAGER (object);
 
     g_free (self->priv->initial_kernel_events);
