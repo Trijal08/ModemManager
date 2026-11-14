@@ -2107,6 +2107,14 @@ mm_base_manager_reprobe_physdev (MMBaseManager *self,
          * every SIM event: the ones that are up are skipped. */
         if (mm_device_peek_modem (device))
             continue;
+        /* A device still being probed has no plugin yet, and
+         * mm_device_create_modem() dereferences it to name it in its log line
+         * -- so calling this during a probe used to segfault. Only a device
+         * that has already been given a plugin can be rebuilt; mm-device.c's
+         * own reprobe() never meets this because it only ever runs on a device
+         * that had a modem, which implies a plugin. */
+        if (!mm_device_peek_plugin (device))
+            continue;
         /* And a grouping the plugin has already refused is never going to
          * build a modem because a card turned up in some other slot. On a
          * multi-stack Samsung modem the whole-PCI device is exactly that: it
