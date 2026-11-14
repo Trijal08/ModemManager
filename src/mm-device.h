@@ -80,6 +80,10 @@ void     mm_device_release_port_name (MMDevice       *self,
                                       const gchar    *subsystem,
                                       const gchar    *name);
 
+/* TRUE once the plugin has refused to build a modem for this grouping; such a
+ * device is a probe artefact and retrying it is pointless. */
+gboolean mm_device_creation_refused    (MMDevice            *self);
+
 gboolean mm_device_create_modem        (MMDevice            *self,
                                         GError             **error);
 void     mm_device_remove_modem        (MMDevice            *self,

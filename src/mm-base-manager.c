@@ -2107,6 +2107,13 @@ mm_base_manager_reprobe_physdev (MMBaseManager *self,
          * every SIM event: the ones that are up are skipped. */
         if (mm_device_peek_modem (device))
             continue;
+        /* And a grouping the plugin has already refused is never going to
+         * build a modem because a card turned up in some other slot. On a
+         * multi-stack Samsung modem the whole-PCI device is exactly that: it
+         * has no SIT control port, so without this it would be retried on
+         * every SIM event, forever. */
+        if (mm_device_creation_refused (device))
+            continue;
         if (g_strcmp0 (mm_device_get_physdev (device), physdev) != 0)
             continue;
 

@@ -1828,25 +1828,11 @@ sim_inventory_indication (MMSitClient *client,
                           MMBroadbandModemSamsungSit *self)
 {
     if (message->id == MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED) {
-        MMBaseManager *manager;
-
-        /* The cached inventory load_sim_slots() reads is now stale. */
+        /* The cached inventory load_sim_slots() reads is now stale. The
+         * manager reprobe for a withdrawn sibling is driven from the main
+         * indication handler, which sees this id and SIM_STATUS_CHANGED. */
         mm_sit_cp_forget_sim_slot_status (self->priv->cp);
         schedule_sim_check (self);
-
-        /*
-         * A stack whose slot is empty has no modem, so it has no SIT client of
-         * its own to hear a card arrive -- withdrawing the modem took the
-         * client with it. This handler is running on the stack that does have a
-         * SIM, which makes it the only place on the device that learns a slot
-         * changed, so hand the manager our physdev and let it revive whichever
-         * sibling is currently modem-less. Harmless when both are up: the
-         * manager skips devices that already have a modem.
-         */
-        manager = mm_base_manager_peek_default ();
-        if (manager)
-            mm_base_manager_reprobe_physdev (manager,
-                                             mm_base_modem_get_physdev (MM_BASE_MODEM (self)));
     }
 }
 
@@ -1929,12 +1915,34 @@ sit_indication (MMSitClient              *client,
     if (message->id == MM_SIT_MESSAGE_NEW_BROADCAST_SMS)
         handle_new_broadcast_sms (self, message);
 
-    if (message->id == MM_SIT_MESSAGE_SIM_STATUS_CHANGED) {
-        invalidate_carrier_config (self);
+    if (message->id == MM_SIT_MESSAGE_SIM_STATUS_CHANGED ||
+        message->id == MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED) {
+        MMBaseManager *manager;
+
+        if (message->id == MM_SIT_MESSAGE_SIM_STATUS_CHANGED)
+            invalidate_carrier_config (self);
+        else
+            mm_sit_cp_forget_sim_slot_status (self->priv->cp);
         schedule_sim_check (self);
-    } else if (message->id == MM_SIT_MESSAGE_SIM_SLOT_STATUS_CHANGED) {
-        mm_sit_cp_forget_sim_slot_status (self->priv->cp);
-        schedule_sim_check (self);
+
+        /*
+         * A stack whose slot is empty has no modem, so it has no SIT client of
+         * its own to hear a card arrive -- withdrawing the modem took the
+         * client with it. This handler runs on a stack that does have a SIM,
+         * which makes it the only place on the device that learns a card
+         * changed, so hand the manager our physdev and let it revive whichever
+         * sibling is currently modem-less. Harmless when both are up: the
+         * manager skips devices that already have a modem.
+         *
+         * Both ids, because pulling a tray reports SIM_STATUS_CHANGED (0x0210)
+         * and not SIM_SLOT_STATUS_CHANGED (0x024e) -- measured on komodo, and
+         * keying this on the slot message alone is why the first attempt never
+         * fired.
+         */
+        manager = mm_base_manager_peek_default ();
+        if (manager)
+            mm_base_manager_reprobe_physdev (manager,
+                                             mm_base_modem_get_physdev (MM_BASE_MODEM (self)));
     }
     else if (message->id == MM_SIT_MESSAGE_CARRIER_CONFIG_STATUS) {
         gboolean applied = FALSE;
@@ -3234,7 +3242,6 @@ load_unlock_required_ready (MMSitClient  *client,
                             GTask        *task)
 {
     MMBroadbandModemSamsungSit *self = g_task_get_source_object (task);
-    gboolean                    last_attempt = GPOINTER_TO_UINT (g_task_get_task_data (task));
     MMSitSimStatus              status;
     MMModemLock                 lock;
     GError                     *error = NULL;
@@ -3246,6 +3253,9 @@ load_unlock_required_ready (MMSitClient  *client,
     }
 
     if (status.card_state == 0) {
+        MMSitSimSlotStatus slots;
+        gboolean           slot_empty = FALSE;
+
         /*
          * An empty stack is not a broken modem, it is a phone with one SIM.
          *
@@ -3257,18 +3267,33 @@ load_unlock_required_ready (MMSitClient  *client,
          * in it, and the stack that does have a SIM becomes the only one a
          * caller can find.
          *
-         * Only on the last attempt. ModemManager retries this before giving
-         * up, and a card the CP has not finished reading reports card_state 0
-         * in the meantime -- withdrawing on the first miss would hide a SIM
-         * that was merely slow.
-         *
-         * Deliberately without mm_base_modem_set_reprobe(): a reprobe recreates
-         * and reinitialises the modem every REPROBE_SECS, which for a slot that
-         * stays empty is an endless two-second cycle. The cost is that a SIM
-         * inserted later is picked up on the next probe of the device rather
-         * than immediately.
+         * Gate it on the slot inventory, NOT on last_attempt. ModemManager
+         * does not retry this error -- mm-iface-modem.c returns
+         * SIM_NOT_INSERTED straight to its caller, so there is exactly one
+         * call and last_attempt is never true. The inventory is the honest
+         * second opinion and it is already settled here: load_sim_slots()
+         * runs at INITIALIZATION_STEP_SIM_SLOTS, one step before this one,
+         * and retries until the CP reports a mapping for this stack.
          */
-        if (last_attempt) {
+        if (mm_sit_cp_peek_sim_slot_status (self->priv->cp, &slots)) {
+            guint i, j;
+
+            for (i = 0; i < slots.slot_count && !slot_empty; i++) {
+                for (j = 0; j < slots.slots[i].port_count; j++) {
+                    const MMSitSimPort *port = &slots.slots[i].ports[j];
+
+                    if (port->logical_slot_id != (guint) MAX (self->priv->logical_stack, 0))
+                        continue;
+                    if (!port->state)
+                        continue;
+                    if (slots.slots[i].card_state == 0)
+                        slot_empty = TRUE;
+                    break;
+                }
+            }
+        }
+
+        if (slot_empty) {
             mm_obj_info (self, "no SIM in the slot mapped to logical stack %d; "
                          "withdrawing this modem rather than exporting a failed one",
                          MAX (self->priv->logical_stack, 0));
@@ -3321,7 +3346,6 @@ load_unlock_required (MMIfaceModem       *iface,
     GTask                      *task;
 
     task = g_task_new (iface, cancellable, callback, user_data);
-    g_task_set_task_data (task, GUINT_TO_POINTER (last_attempt), NULL);
     client = mm_broadband_modem_samsung_sit_peek_client (self, &error);
     if (!client) {
         g_task_return_error (task, error);

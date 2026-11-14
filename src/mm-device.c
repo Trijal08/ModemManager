@@ -102,6 +102,12 @@ struct _MMDevicePrivate {
 
     /* Scheduled reprobe */
     guint reprobe_id;
+
+    /* Whether the plugin already refused to build a modem for this grouping.
+     * Some devices exist only as a probe artefact -- on a multi-stack modem
+     * the whole-PCI grouping has no control port and never will -- and they
+     * must not be retried every time a sibling reports a SIM change. */
+    gboolean creation_refused;
 };
 
 /*****************************************************************************/
@@ -586,6 +592,12 @@ modem_valid (MMBaseModem *modem,
 }
 
 gboolean
+mm_device_creation_refused (MMDevice *self)
+{
+    return self->priv->creation_refused;
+}
+
+gboolean
 mm_device_create_modem (MMDevice  *self,
                         GError   **error)
 {
@@ -643,6 +655,7 @@ mm_device_create_modem (MMDevice  *self,
     }
 
     self->priv->modem = mm_plugin_create_modem (self->priv->plugin, self, error);
+    self->priv->creation_refused = !self->priv->modem;
     if (self->priv->modem)
         /* We want to get notified when the modem becomes valid/invalid */
         self->priv->modem_valid_id = g_signal_connect (self->priv->modem,
